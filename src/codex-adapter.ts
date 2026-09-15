@@ -218,7 +218,7 @@ class CodexSession implements HarnessSession {
   }
 
   static async open(options: CodexOptions, input: Extract<OpenSessionInput, { kind: 'create' | 'resume' }>): Promise<CodexSession> {
-    const session = new CodexSession(options, input.cwd);
+    const session = new CodexSession({ ...options, environment: { ...options.environment, ...input.environment } }, input.cwd);
     try {
       await initialize(session.rpc);
       const requested = input.permissionModeId ? permissionModeOf(input.permissionModeId) : undefined;

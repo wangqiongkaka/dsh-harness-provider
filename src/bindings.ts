@@ -14,6 +14,7 @@ const bindingSchema = z.object({
   usage: z.object({ contextUsedTokens: z.number().optional(), contextWindowTokens: z.number().optional(), totalTokens: z.number().optional(),
     inputTokens: z.number().optional(), cachedInputTokens: z.number().optional(), cacheWriteInputTokens: z.number().optional(), outputTokens: z.number().optional() }).optional(),
   pending: z.string().optional(),
+  delegation: z.object({ parentSessionId: z.string(), requestHash: z.string() }).strict().optional(),
 }).strict().refine(value => !value.nativeRef || value.nativeRef.harnessId === value.harness, 'Harness identity mismatch');
 export type Binding = z.infer<typeof bindingSchema>;
 

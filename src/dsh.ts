@@ -1,10 +1,12 @@
 import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService, RemoteError } from '@deepseek-ai/dsh-typert-protocol';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
-import type {} from '@deepseek-ai/dsh-api-session-controller';
+import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller';
+import { brandString } from '@deepseek-ai/dsh-brand';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-typert-registry';
 import type { HarnessAdapter, HarnessInspection } from '@codexhost/harness-adapter';
@@ -13,6 +15,8 @@ import type {} from '@deepseek-ai/dsh-settings';
 import type {} from '@deepseek-ai/dsh-credentials';
 import type {} from '@deepseek-ai/dsh-permission-presets';
 import type {} from '@deepseek-ai/dsh-shell';
+import type {} from '@deepseek-ai/dsh-workspace';
+import type {} from '@deepseek-ai/dsh-session-title';
 import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, type HarnessAccountSnapshot } from '@codexhost/shared-contracts';
 import { z } from 'zod';
 import { Bindings, type Binding } from './bindings.js';
@@ -20,6 +24,7 @@ import { CodexAdapter } from './codex-adapter.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest } from './remote.js';
+import { DelegationBridge, delegationRequest } from './delegation.js';
 
 export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions'];
 export const configSchema = z.object({
@@ -53,6 +58,7 @@ const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>
 export class HarnessService extends TypertRemoteService {
   readonly bindings: Bindings;
   readonly runner: DshRunner;
+  readonly delegation: DelegationBridge;
   // ponytail: per-cwd catalog cache; each inspect spawns a native process.
   private readonly catalogs = new Map<string, { until: number; inspection: Ready }>();
   // ponytail: per-source quota cache; account probes are rate-limited upstream and identical across sessions.
@@ -60,9 +66,11 @@ export class HarnessService extends TypertRemoteService {
   constructor(ctx: Context, root: string, private readonly adapters: Record<Binding['harness'], HarnessAdapter>) {
     super(ctx, 'harness');
     this.bindings = new Bindings(root);
-    this.runner = new DshRunner(ctx, this.bindings, adapters);
+    this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : this.readDelegation(source, input));
+    this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation);
     ctx.effect(() => ctx.typert.register({ package: contribution.package, face: 'host', schemas: [], invocations: contribution.descriptors, model: { services: [], events: [], objects: [] } }), 'harness: Remote contracts');
     ctx.effect(() => async () => {
+      await this.delegation.close();
       const agents = [...this.runner.live.keys()].flatMap(id => {
         const agent = ctx.agents.get(SessionId(id)); return agent ? [agent] : [];
       });
@@ -92,6 +100,76 @@ export class HarnessService extends TypertRemoteService {
     return this.bindings.serial(sessionId, async () => this.view(await this.bindings.read(sessionId) ?? await this.bind(agent, sessionId, remembered).catch(() => undefined)));
   }
 
+  /** Creates an ordinary DSH session, with a stable identity for admission retries. */
+  async delegate(source: string, raw: unknown) {
+    const request = delegationRequest.parse(raw);
+    const parent = await this.agent(source);
+    const cwd = parent.session.header.cwd;
+    if (!cwd) throw new Error('请先连接工作目录');
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+    const sessionId = SessionId(`session-${hash(JSON.stringify([source, request.requestId]))}`);
+    const requestHash = hash(JSON.stringify(request));
+    return this.bindings.serial(`delegate:${sessionId}`, async () => {
+      try {
+        const existing = await this.bindings.read(sessionId);
+        if (existing && (existing.delegation?.parentSessionId !== source || existing.delegation.requestHash !== requestHash)) {
+          throw new Error('requestId 已用于不同任务，请为新任务提供新标识');
+        }
+        // Admission locks before followup; while the runner opens its native session, the inbox is already empty
+        // but user/message is not persisted yet. Never resend through that gap (or after uncertain cold admission).
+        if (existing?.locked) {
+          if (this.fresh(await this.agent(sessionId))) throw new Error('上次提交结果未确认，请在目标会话检查，禁止自动重发');
+          return { sessionId, harness: request.harness, accepted: true };
+        }
+        if (!existing) {
+          const inspection = await this.inspection({ version: 1, sessionId, harness: request.harness, cwd, locked: false });
+          if ('error' in inspection) throw new Error(inspection.error);
+          const parentBinding = await this.bindings.read(source);
+          const permission = parentBinding?.harness === request.harness ? parentBinding.permission
+            : request.harness === 'codex' ? (parentBinding?.permission === 'bypassPermissions' ? 'dangerFullAccess' : 'readOnly')
+              : parentBinding?.permission === 'dangerFullAccess' ? 'bypassPermissions' : 'default';
+          if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
+          const workspace = this.ctx.get('workspaceRegistry')?.list().find(workspace => workspace.sessionIds.includes(parent.id));
+          // Hold the same lock as state/select/prompt so the UI cannot auto-bind the new session to its remembered Harness.
+          await this.bindings.serial(sessionId, async () => {
+            await this.ctx.sessionController.create({ sessionId, ...(workspace ? { workspaceId: workspace.id } : { cwd }) });
+            const child = await this.agent(sessionId);
+            if (!this.fresh(child)) throw new Error('目标会话已有内容，拒绝重复创建');
+            await this.bind(child, sessionId, request.harness, {
+              permission: permission ? harnessPermissionModeIdSchema.parse(permission) : inspection.permissionModes?.defaultModeId,
+              delegation: { parentSessionId: source, requestHash },
+            });
+            if (this.ctx.get('sessionTitle')) await this.ctx.sessionController.rename({ sessionId,
+              title: `${request.harness === 'codex' ? 'Codex' : 'Claude Code'} review` });
+          });
+        }
+        await this.ctx.sessionController.prompt({ sessionId, requestId: brandString<SessionRequestId>(request.requestId), mode: 'queue',
+          content: [{ type: 'text', text: request.prompt }] }, new AbortController().signal);
+        return { sessionId, harness: request.harness, accepted: true };
+      } catch (error) {
+        throw new Error(`会话 ${sessionId}：${error instanceof Error ? error.message : '委派失败'}。重试请保持 requestId 和参数不变。`);
+      }
+    });
+  }
+
+  async readDelegation(source: string, raw: unknown) {
+    await this.agent(source);
+    const { sessionId } = address.parse(raw);
+    const binding = await this.bindings.read(sessionId);
+    if (binding?.delegation?.parentSessionId !== source) throw new Error('只能读取由本会话创建的委派会话');
+    const agent = await this.agent(sessionId);
+    const events = agent.session.snapshotEvents();
+    const end = events.findLast(event => event.type === 'turn/end');
+    const queued = agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0;
+    const text = events.flatMap(event => event.type === 'assistant/message' ? event.data.message.content.flatMap(part => part.type === 'text' ? [part.text] : []) : []).join('\n\n');
+    return { sessionId, harness: binding.harness, status: agent.status === 'running' ? 'running' : queued ? 'queued'
+      : binding.pending || (binding.locked && !end) ? 'recovery-required' : end?.type === 'turn/end' ? end.data.reason.kind : 'idle',
+      outcome: end?.type === 'turn/end' ? end.data.reason : null,
+      // ponytail: return the latest 32k characters; the full transcript stays in the DSH session.
+      text: text.slice(-32_000), truncated: text.length > 32_000,
+    };
+  }
+
   async select(raw: unknown) {
     const request = selectRequest.parse(raw);
     return this.bindings.serial(request.sessionId, async () => {
@@ -111,7 +189,7 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /** Bind a fresh session to a Harness, seeding permission from the native sandbox and model / thinking from the last pick. */
-  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness']): Promise<Binding> {
+  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation'>> = {}): Promise<Binding> {
     const cwd = agent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
     const binding: Binding = { version: 1, sessionId, harness, cwd, locked: false };
@@ -129,6 +207,7 @@ export class HarnessService extends TypertRemoteService {
         if (remembered?.thinking && inspection.catalog.thinkingOptions.some(option => option.id === remembered.thinking) && allowed.includes(remembered.thinking)) binding.thinking = remembered.thinking;
       }
     }
+    Object.assign(binding, overrides);
     await this.bindings.write(binding);
     return binding;
   }

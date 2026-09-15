@@ -18,6 +18,7 @@
   "files": [
     "dist/dsh.js",
     "dist/client.js",
+    "dist/delegate-cli.mjs",
     "dist/claude-code",
     "dist/licenses",
     "cordis.patch.yml",

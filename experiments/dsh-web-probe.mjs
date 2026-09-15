@@ -12,7 +12,12 @@ const {chromium,expect}=require('@playwright/test');
 const {startResponsesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-codex/tests/responses-fixture.ts')));
 const {startMessagesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-claude-code/tests/messages-fixture.ts')));
 const codex=await startResponsesFixture([{kind:'complete',text:'Codex native first'},{kind:'complete',text:'Codex native second'},{kind:'complete',text:'Codex native resumed'}]);
-const claude=await startMessagesFixture({kind:'complete',text:'Claude native reply'});
+const delegationProbe=process.env.DSH_DELEGATION_PROBE === '1';
+const quote=text=>"'"+text.replaceAll("'","'\\''")+"'";
+const delegateCommand=[process.execPath,resolve('dist/delegate-cli.mjs'),'create',JSON.stringify({requestId:'web-review',harness:'codex',prompt:'Review this workspace without editing'})].map(quote).join(' ');
+const claude=await startMessagesFixture(delegationProbe
+ ? {kind:'tool-use',toolName:'Bash',input:{command:delegateCommand,description:'Create visible Codex review'},finalText:'Claude native reply'}
+ : {kind:'complete',text:'Claude native reply'});
 await mkdir('.cache',{recursive:true});
 const root=await mkdtemp(resolve('.cache/web-probe-'));
 const dshHome=join(root,'dsh'),codexHome=join(root,'codex'),claudeHome=join(root,'claude'),workspace=join(root,'workspace');
@@ -38,7 +43,7 @@ const env={PATH:process.env.PATH,HOME:root,DSH_HOME:dshHome,DSH_TELEMETRY_DISABL
  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:'1',
  DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',NO_PROXY:'127.0.0.1,localhost'};
 const pkg=JSON.parse(await readFile('package.json','utf8'));
-const tar=resolve(`${pkg.name}-${pkg.version}.tgz`);
+const tar=resolve(process.env.DSH_PLUGIN_TAR ?? `${pkg.name}-${pkg.version}.tgz`);
 const hash=createHash('sha256').update(await readFile(tar)).digest('hex').slice(0,12);
 const installedTar=join(root,`plugin-${hash}.tgz`);await copyFile(tar,installedTar);
 execFileSync('dsh',['plugin','--profile','web','add','--offline',installedTar],{env,stdio:'pipe'});
@@ -91,6 +96,22 @@ try{
  page.on('pageerror',error=>{logs+='\nBrowser: '+error.message;});
  await page.goto(url);await dismiss();
  const created=await rpc('workspace/create',{path:workspace});
+ if(delegationProbe){
+  const sessionId='claude-delegation-parent';
+  await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId});
+  await rpc('harness/select',{sessionId,harness:'claude-code'});
+  await rpc('harness/selectPermission',{sessionId,permission:'bypassPermissions'});
+  await page.reload();await dismiss();
+  await rpc('session/prompt',{sessionId,requestId:'delegate-web-parent',mode:'queue',content:[{type:'text',text:'Use Codex to review this workspace'}]});
+  const review=page.getByText('Codex review',{exact:true});
+  await review.waitFor({timeout:60000});await review.click();
+  await page.getByText('Codex native first',{exact:true}).waitFor({timeout:60000});
+  const childId='session-'+createHash('sha256').update(JSON.stringify([sessionId,'web-review'])).digest('hex');
+  assert.equal((await rpc('harness/state',{sessionId:childId})).harness,'codex');
+  assert.equal((await rpc('harness/state',{sessionId})).harness,'claude-code');
+  await page.screenshot({path:resolve('.cache/delegation-web.png')});
+  console.log('PASS: real Claude Code tool created a Codex review in the live DSH sidebar; selecting it displayed its native reply');
+ }else{
  await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:'codex-web-probe'});
  await page.reload();await dismiss();
  const selector=page.getByLabel('Select Harness',{exact:true});await selector.waitFor();
@@ -122,6 +143,7 @@ try{
  await send('Claude after restart','Claude native reply');
  assert.ok(claude.requests.some(request=>JSON.stringify(request.body.messages).includes('Claude first marker')&&JSON.stringify(request.body.messages).includes('Claude after restart')));
  console.log('PASS: DSH restart and the original session list resume Claude Code with prior context');
+ }
  console.log('Native replies came only from local fixture servers; no real model endpoint was used.');
 } catch(error){
  if(page){console.error((await page.locator('body').innerText()).slice(-7000));await page.screenshot({path:resolve('.cache/web-failure.png')});}

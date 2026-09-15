@@ -6,8 +6,9 @@ const reference = resolve(process.env.CODEXHOST_REFERENCE_ROOT ?? '../../codex-h
 const require = createRequire(resolve(reference, 'package.json'));
 const { build } = require('esbuild');
 await mkdir('dist', { recursive: true });
+await copyFile('src/delegate-cli.mjs', 'dist/delegate-cli.mjs');
 await build({
-  entryPoints: ['src/codex-rpc.ts', 'src/codex-adapter.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts'],
+  entryPoints: ['src/codex-rpc.ts', 'src/codex-adapter.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts'],
   external: ['@deepseek-ai/*', './claude-code/plugin.mjs'],
   outdir: 'dist',
   bundle: true,

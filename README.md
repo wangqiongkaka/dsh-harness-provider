@@ -23,6 +23,17 @@ DSH 的首次使用引导可选择“稍后配置”；外部 Harness 不需要 
 
 Harness 在第一条消息后固定；需要换 Harness 时新建会话。不同会话可分别使用 DSH、Codex、Claude Code。
 
+### 在对话中委派 review
+
+在 Codex 或 Claude Code 会话里说“用 Codex review 当前改动”或“新建 Claude Code 会话审查这段代码”，agent 可调用插件随会话提供的委派入口：
+
+- 在同一工作区创建独立的 **Codex review / Claude Code review** 会话，原会话不切换 harness；新会话从空历史开始，由 agent 写入完整审查任务。
+- 左侧会话列表显示新会话，点开可查看进度、回复，也可继续对话。来源 agent 可查询其创建的会话状态与结果；当前采用主动查询，不自动唤醒已经结束的来源轮次。
+- 同一请求标识和参数重试复用原会话；标识相同但任务不同会被拒绝。提交结果不明确时停止自动重发，错误会包含目标会话 ID。
+- 同 harness 沿用来源权限；跨 harness 的完全权限映射为目标的完全权限，其余映射到 Codex 只读 / Claude Code 默认审批。模型和推理强度沿用目标 harness 上次选择，不改变全局选择。
+
+插件通过临时本地服务和会话凭据连接 CLI 与 DSH，不依赖 `codexhost delegate` 或 Host Runtime 环境变量。凭据只在宿主进程期间有效；更新插件后需重启 DSH。此入口目前注入外部 harness 会话，DSH 原生模型会话尚未接入；CLI 的沙箱、网络及命令审批仍然生效，不会为委派自动放宽权限。结果查询最多返回最后 32,000 个字符，并标记是否截断，完整内容保留在目标会话。
+
 ### 配置
 
 默认配置即可使用。需要指定 Codex 可执行文件或插件状态目录时，在 Profile 的 `cordis.patch.yml` 添加：
@@ -73,8 +84,10 @@ npm run dev:link
 npm run check
 node experiments/codex-native-probe.mjs
 node experiments/claude-native-probe.mjs
+node experiments/delegation-native-probe.mjs
 npm pack --ignore-scripts
 node experiments/dsh-web-probe.mjs
+DSH_DELEGATION_PROBE=1 node experiments/dsh-web-probe.mjs
 ```
 
 开发链接只写本插件的 `node_modules`。构建产物不依赖 codexhost 工作区。Web 验证通过官方 `dsh plugin` 安装临时 Profile，使用真实 CLI、本地模拟模型服务和 Chromium；结束后清理临时状态，不使用真实模型端点。
@@ -82,6 +95,8 @@ node experiments/dsh-web-probe.mjs
 ## 验证记录
 
 2026-09-15：
+
+- 会话委派改动：类型检查、构建及 15 项自动化测试通过；覆盖同工作区独立会话、重复提交、权限映射、来源隔离和提交不明确时停止重发。两个真实 CLI 均通过 shell 调用委派入口验证；临时 Web Profile 中，Claude Code 创建的 Codex review 实时出现在侧栏，点击可查看原生回复。以上模型回复来自本地桩服务。
 
 - DSH `0.1.6-alpha.1`，既有本地构建标识 `0.1.6-alpha.1-0d1f500`。
 - Codex CLI `0.144.6`；Claude Code CLI `2.1.272`。

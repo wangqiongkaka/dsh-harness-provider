@@ -6,6 +6,7 @@ import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, Host
 import { hostTurnIdSchema } from '@codexhost/shared-contracts';
 import { Bindings, type Binding } from './bindings.js';
 import { DshOutput } from './dsh-output.js';
+import { delegationInstructions, type DelegationBridge } from './delegation.js';
 
 export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
@@ -50,7 +51,7 @@ async function take(live: Live): Promise<HarnessOutput | undefined> {
 export class DshRunner {
   readonly live = new Map<string, Live>();
   constructor(private readonly ctx: Context, private readonly bindings: Bindings,
-    private readonly adapters: Record<Binding['harness'], HarnessAdapter>) {}
+    private readonly adapters: Record<Binding['harness'], HarnessAdapter>, private readonly delegation?: DelegationBridge) {}
 
   async run(payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, binding: Binding): Promise<void> {
     const { agent, messages, turn, step, signal } = payload;
@@ -62,9 +63,11 @@ export class DshRunner {
       return { type: 'text' as const, text: part.text };
     }));
     if (!input.length) throw new Error('Harness prompt is empty');
+    if (this.delegation) input.unshift({ type: 'text', text: delegationInstructions() });
     let live = this.live.get(agent.id);
     if (!live) {
-      const hints = { ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
+      const hints = { ...(this.delegation ? { environment: { ...process.env, ...await this.delegation.environment(agent.id) } } : {}),
+        ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
         ...(binding.permission ? { permissionModeId: binding.permission } : {}) };
       const session = unwrap(await this.adapters[binding.harness].open(binding.nativeRef
         ? { kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef, ...hints }

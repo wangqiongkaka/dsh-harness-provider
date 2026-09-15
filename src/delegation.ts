@@ -1,0 +1,88 @@
+import { randomBytes } from 'node:crypto';
+import { createServer, type Server } from 'node:http';
+import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
+
+export const delegationRequest = z.object({
+  requestId: z.string().min(1).max(128), harness: z.enum(['codex', 'claude-code']),
+  prompt: z.string().trim().min(1).max(64_000),
+}).strict();
+
+/** Loopback-only, per-source credentials; no Host Runtime or global CLI configuration. */
+export class DelegationBridge {
+  private server?: Server;
+  private starting?: Promise<string>;
+  private closed = false;
+  private readonly pending = new Set<Promise<unknown>>();
+  private readonly tokens = new Map<string, string>();
+  constructor(private readonly call: (source: string, method: 'create' | 'read', input: unknown) => Promise<unknown>) {}
+
+  async environment(source: string): Promise<Record<string, string>> {
+    if (this.closed) throw new Error('DSH delegation is closed');
+    const endpoint = await (this.starting ??= this.listen());
+    if (this.closed) throw new Error('DSH delegation is closed');
+    let token = this.tokens.get(source);
+    if (!token) { token = randomBytes(32).toString('hex'); this.tokens.set(source, token); }
+    return { DSH_DELEGATE_ENDPOINT: endpoint, DSH_DELEGATE_TOKEN: token };
+  }
+
+  private listen(): Promise<string> {
+    const server = this.server = createServer(async (req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      const source = [...this.tokens].find(([, token]) => req.headers.authorization === `Bearer ${token}`)?.[0];
+      if (!source || req.headers.origin) { res.writeHead(403).end(JSON.stringify({ error: 'Forbidden' })); return; }
+      if (req.method !== 'POST' || !['/create', '/read'].includes(req.url ?? '')) {
+        res.writeHead(404).end(JSON.stringify({ error: 'Unknown delegation operation' })); return;
+      }
+      try {
+        let size = 0;
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          size += chunk.length;
+          if (size > 256_000) { res.writeHead(413).end(JSON.stringify({ error: 'Request too large' })); return; }
+          chunks.push(chunk);
+        }
+        if (this.closed) throw new Error('DSH delegation is closed');
+        const work = this.call(source, req.url === '/create' ? 'create' : 'read', JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        this.pending.add(work);
+        try { res.end(JSON.stringify(await work)); } finally { this.pending.delete(work); }
+      } catch (error) {
+        res.writeHead(400).end(JSON.stringify({ error: error instanceof Error ? error.message : 'Delegation failed' }));
+      }
+    });
+    server.requestTimeout = 15_000;
+    server.headersTimeout = 10_000;
+    return new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address();
+        if (!address || typeof address === 'string') { reject(new Error('Missing delegation address')); return; }
+        resolve(`http://127.0.0.1:${address.port}`);
+      });
+    });
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.tokens.clear();
+    await this.starting?.catch(() => {});
+    const server = this.server;
+    if (server) await new Promise<void>((resolve, reject) => {
+      server.close(error => error ? reject(error) : resolve());
+      server.closeAllConnections();
+    });
+    await Promise.allSettled(this.pending);
+  }
+}
+
+const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+export function delegationInstructions(): string {
+  const command = `${quote(process.execPath)} ${quote(fileURLToPath(new URL('./delegate-cli.mjs', import.meta.url)))}`;
+  return `[DSH 会话能力，由宿主提供]
+用户明确要求使用指定 harness 或新会话做 review/审查时，使用以下入口创建同工作区的全新 DSH 会话，左侧会话区会显示进度。
+${command} create '{"requestId":"唯一请求标识","harness":"codex","prompt":"完整审查任务、改动范围和验收要求；只审查，不修改文件"}'
+harness 支持 codex、claude-code。新会话没有本会话历史，必须写全任务。requestId 每个新任务使用唯一值；失败重试必须使用相同 requestId 和参数。
+返回 sessionId 只表示任务已提交。使用 ${command} read '<sessionId>' 查看状态与回复，完成后再汇报审查结果；执行中隔一段时间再查。truncated 为 true 时不能声称已经读取完整结果，应提示用户在目标会话查看全文。
+此入口独立于 codexhost delegate；不要用 codex exec review 替代可见会话。环境凭据已注入，不要打印或写入消息。
+[/DSH 会话能力]`;
+}

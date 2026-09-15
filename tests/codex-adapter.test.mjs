@@ -15,7 +15,7 @@ for await (const line of createInterface({input:process.stdin})) {
  else if(req.method==='thread/start' || req.method==='thread/resume') {
   if(req.method==='thread/start' && p.ephemeral!==false) process.exit(2);
   if(req.method==='thread/resume' && p.threadId!=='native-thread') process.exit(3);
-  send({id:req.id,result:{thread:{id:'native-thread',cwd:p.cwd,ephemeral:false,turns:[]},model:'test-model',modelProvider:'test-provider',sandbox:{type:p.sandbox==='read-only'?'readOnly':'dangerFullAccess'}}});
+  send({id:req.id,result:{thread:{id:'native-thread',cwd:p.cwd,ephemeral:false,turns:[]},model:'test-model',modelProvider:process.env.DSH_TEST_SESSION ?? 'test-provider',sandbox:{type:p.sandbox==='read-only'?'readOnly':'dangerFullAccess'}}});
  } else if(req.method==='model/list') send({id:req.id,result:{data:[
    {model:'gpt-5.5',displayName:'GPT-5.5',isDefault:true,hidden:false,supportedReasoningEfforts:[{reasoningEffort:'low',description:''},{reasoningEffort:'high',description:''}],defaultReasoningEffort:'high'},
    {model:'gpt-5.5-mini',displayName:'Mini',isDefault:false,hidden:false,supportedReasoningEfforts:[{reasoningEffort:'low',description:''}],defaultReasoningEffort:'low'},
@@ -125,3 +125,13 @@ test('catalog exposes reasoning efforts, thinking.select rides turn/start, token
   await session.close();
  } finally { await adapter.close(); }
 });
+
+ test('per-session environment reaches the Codex process on create and resume', async()=>{
+ const adapter=new CodexAdapter({...options,environment:{DSH_TEST_SESSION:'base'}});
+ try {
+  const first=value(await adapter.open({kind:'create',cwd:process.cwd(),environment:{DSH_TEST_SESSION:'first'}}));
+  assert.equal(first.sourceProvider,'first');
+  const second=value(await adapter.open({kind:'resume',cwd:process.cwd(),nativeRef:first.initialState.nativeRef,environment:{DSH_TEST_SESSION:'second'}}));
+  assert.equal(second.sourceProvider,'second');
+ } finally {await adapter.close();}
+ });
