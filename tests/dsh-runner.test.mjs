@@ -13,7 +13,7 @@ import Prompt from '@deepseek-ai/dsh-system-prompt';
 import Tools from '@deepseek-ai/dsh-tools';
 import Persistence from '@deepseek-ai/dsh-session-persistence-jsonl';
 import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence';
-import { HarnessOutputChannel } from '@codexhost/harness-adapter';
+import { HarnessOutputChannel } from '../dist/contracts.js';
 import { Bindings } from '../dist/bindings.js';
 import { DshRunner, usageDelta } from '../dist/dsh-runner.js';
 
@@ -26,6 +26,8 @@ function fakeAdapter(log,native) {
    let active;
    const session={
     initialState:{nativeRef:{harnessId:'codex',nativeSessionId:'native-fixed',formatVersion:1},effectiveModel:{id:'fixture-model'}},
+    // Thread-scoped counters, like Codex: the persisted usage is still the baseline after a reopen.
+    initialUsage:input.usage??null,
     outputs:channel.outputs,
     async execute(command) {
      const emit=event=>channel.emit({kind:'event',event});
@@ -138,10 +140,10 @@ test('cancellation during native session initialization never starts a native tu
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });
 
-test('usageDelta splits cumulative Harness counts into per-turn buckets, estimating Claude Code cache reads from the hit rate',()=>{
+test('usageDelta splits cumulative Harness counts into per-turn buckets',()=>{
  assert.equal(usageDelta(null,null),undefined);
  assert.equal(usageDelta({inputTokens:5,outputTokens:1},{inputTokens:5,outputTokens:1}),undefined);
  assert.deepEqual(usageDelta({inputTokens:1000,cachedInputTokens:100,outputTokens:10},{inputTokens:1600,cachedInputTokens:400,outputTokens:25}),
   {inputTokens:300,outputTokens:15,cacheReadTokens:300,cacheWriteTokens:0});
- assert.deepEqual(usageDelta(null,{inputTokens:2000,outputTokens:40,cacheHitRatePercent:61}),{inputTokens:780,outputTokens:40,cacheReadTokens:1220,cacheWriteTokens:0});
+ assert.deepEqual(usageDelta(null,{inputTokens:2000,cachedInputTokens:1200,cacheWriteInputTokens:300,outputTokens:40}),{inputTokens:500,outputTokens:40,cacheReadTokens:1200,cacheWriteTokens:300});
 });

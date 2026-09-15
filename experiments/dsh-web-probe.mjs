@@ -115,7 +115,9 @@ try{
  await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:'codex-web-probe'});
  await page.reload();await dismiss();
  const selector=page.getByLabel('Select Harness',{exact:true});await selector.waitFor();
- await selector.selectOption('codex');
+ // The Harness selector is a menu: open it, pick the option; the chip then shows the bound Harness.
+ const choose=async name=>{await selector.click();await page.getByRole('menuitemradio',{name,exact:true}).click();await expect(selector).toHaveText(name);};
+ await choose('Codex');
  await page.getByLabel('Select Harness model',{exact:true}).waitFor();
  await send('Remember first marker','Codex native first');
  await send('Continue with second marker','Codex native second');
@@ -123,14 +125,14 @@ try{
  console.log('PASS: original DSH composer selected Codex and displayed two native replies');
  await stop();url=await boot();await page.goto(url);await dismiss();
  await page.getByText('Remember first marker',{exact:true}).first().click();
- await expect(selector).toHaveValue('codex');
+ await expect(selector).toHaveText('Codex');
  await page.getByText('Codex native second',{exact:true}).waitFor();
  await send('Continue after restart','Codex native resumed');
  assert.ok(JSON.stringify(codex.requests[2].body.input).includes('Remember first marker'));
  console.log('PASS: DSH restart preserves the session list, transcript, and native Codex context');
  await page.getByRole('button').filter({hasText:'New Session'}).first().click();
  await dismiss();
- await selector.waitFor();await selector.selectOption('claude-code');
+ await selector.waitFor();await choose('Claude Code');
  await page.getByLabel('Select Harness model',{exact:true}).waitFor();
  await send('Claude first marker','Claude native reply');
  await send('Claude second marker','Claude native reply');
@@ -139,7 +141,7 @@ try{
  console.log('PASS: original DSH composer selected Claude Code and maintained its native context');
  await stop();url=await boot();await page.goto(url);await dismiss();
  await page.getByText('Claude first marker',{exact:true}).first().click();
- await expect(selector).toHaveValue('claude-code');
+ await expect(selector).toHaveText('Claude Code');
  await send('Claude after restart','Claude native reply');
  assert.ok(claude.requests.some(request=>JSON.stringify(request.body.messages).includes('Claude first marker')&&JSON.stringify(request.body.messages).includes('Claude after restart')));
  console.log('PASS: DSH restart and the original session list resume Claude Code with prior context');

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createHarnessAdapter } from '../dist/claude-code/plugin.mjs';
+import { ClaudeCodeAdapter } from '../dist/claude-adapter.js';
 const reference=resolve(process.env.DSH_REFERENCE_ROOT ?? '../../deepseek-harness');
 const {startMessagesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-claude-code/tests/messages-fixture.ts')));
 const fixture=await startMessagesFixture({kind:'complete',text:'native-claude-reply'});
@@ -25,12 +25,12 @@ async function turn(session,output,text){
  }
 }
 try{
- const first=createHarnessAdapter({environment,platform:process.platform,managedRemoteHost:false});adapters.push(first);
+ const first=new ClaudeCodeAdapter({environment});adapters.push(first);
  const session=unwrap(await first.open({kind:'create',cwd:root}));const output=session.outputs[Symbol.asyncIterator]();
  assert.equal(await turn(session,output,'first'),'native-claude-reply');
  assert.equal(await turn(session,output,'second'),'native-claude-reply');
  assert.ok(nativeRef);const savedRef=nativeRef;await first.close();
- const second=createHarnessAdapter({environment,platform:process.platform,managedRemoteHost:false});adapters.push(second);
+ const second=new ClaudeCodeAdapter({environment});adapters.push(second);
  const resumed=unwrap(await second.open({kind:'resume',cwd:root,nativeRef:savedRef}));
  assert.equal(await turn(resumed,resumed.outputs[Symbol.asyncIterator](),'third'),'native-claude-reply');
  assert.deepEqual(nativeRef,savedRef);

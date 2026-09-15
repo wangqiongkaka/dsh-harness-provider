@@ -13,14 +13,12 @@
     "check": "npm run typecheck && npm run build && npm test",
     "probe:codex": "node experiments/codex-native-probe.mjs",
     "probe:web": "node experiments/dsh-web-probe.mjs",
-    "probe:claude": "node experiments/claude-native-probe.mjs",
-    "sync:codexhost": "node scripts/sync-codexhost.mjs"
+    "probe:claude": "node experiments/claude-native-probe.mjs"
   },
   "files": [
     "dist/dsh.js",
     "dist/client.js",
     "dist/delegate-cli.mjs",
-    "dist/claude-code",
     "dist/licenses",
     "cordis.patch.yml",
     "README.md",
@@ -49,21 +47,20 @@
     }
   },
   "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
     "@deepseek-ai/dsh-agent": "0.1.6-alpha.1",
     "@deepseek-ai/dsh-api-session-controller": "0.1.6-alpha.1",
     "@deepseek-ai/dsh-llm": "0.1.6-alpha.1",
     "@deepseek-ai/dsh-session": "0.1.6-alpha.1",
     "@deepseek-ai/dsh-typert-protocol": "0.1.6-alpha.1",
-    "@deepseek-ai/dsh-user-questions": "0.1.6-alpha.1",
-    "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-typert-registry": "0.1.6-alpha.1"
+    "@deepseek-ai/dsh-typert-registry": "0.1.6-alpha.1",
+    "@deepseek-ai/dsh-user-questions": "0.1.6-alpha.1"
   },
   "engines": {
     "node": ">=22"
   },
   "devDependencies": {
-    "@codexhost/harness-adapter": "file:vendor/codexhost/harness-adapter",
-    "@codexhost/shared-contracts": "file:vendor/codexhost/shared-contracts",
+    "@anthropic-ai/claude-agent-sdk": "0.3.220",
     "@playwright/test": "1.62.0",
     "@types/node": "24.13.3",
     "esbuild": "0.28.1",

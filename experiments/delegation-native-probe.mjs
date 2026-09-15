@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DelegationBridge, delegationInstructions } from '../dist/delegation.js';
 import { CodexAdapter } from '../dist/codex-adapter.js';
-import { createHarnessAdapter } from '../dist/claude-code/plugin.mjs';
+import { ClaudeCodeAdapter } from '../dist/claude-adapter.js';
 const reference=resolve(process.env.DSH_REFERENCE_ROOT ?? '../../deepseek-harness');
 const {startResponsesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-codex/tests/responses-fixture.ts')));
 const {startMessagesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-claude-code/tests/messages-fixture.ts')));
@@ -43,7 +43,7 @@ const environment={PATH:process.env.PATH,HOME:root,CODEX_HOME:codexHome,CLAUDE_C
  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:'1',
  DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',NO_PROXY:'127.0.0.1,localhost'};
 const adapters=[new CodexAdapter({command:process.env.CODEX_COMMAND ?? '/opt/homebrew/bin/codex',environment,requestTimeoutMs:15000,shutdownTimeoutMs:1000,maxFrameBytes:16*1024*1024}),
- createHarnessAdapter({environment,platform:process.platform,managedRemoteHost:false})];
+ new ClaudeCodeAdapter({environment})];
 try {
  for (const [index,harness] of ['codex','claude-code'].entries()) {
   const result=await adapters[index].open({kind:'create',cwd:root,permissionModeId:index?'bypassPermissions':'dangerFullAccess',environment:{...environment,...await bridge.environment(harness)}});

@@ -6,12 +6,12 @@ import {
   type TurnStartCommand, type TurnCancelCommand, type InteractionRespondCommand,
   type ModelSelectCommand, type ThinkingSelectCommand, type PermissionModeSelectCommand,
   type TurnStartAccepted, type TurnCancelAccepted, type InteractionRespondAccepted, type ModelSelectCompleted,
-  type ThinkingSelectCompleted, type PermissionModeSelectCompleted,
-} from '@codexhost/harness-adapter';
+  type ThinkingSelectCompleted, type PermissionModeSelectCompleted, type HostUsage,
+} from './contracts.js';
 import {
   harnessIdSchema, harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, hostInteractionIdSchema,
   hostItemIdSchema, type HostTurnId, type HarnessAccountSnapshot,
-} from '@codexhost/shared-contracts';
+} from './contracts.js';
 import { z } from 'zod';
 import pkg from '../package.json' with { type: 'json' };
 import { CodexRpc, type RpcId, type RpcMessage, type RpcOptions } from './codex-rpc.js';
@@ -200,7 +200,8 @@ type ActiveTurn = { hostId: HostTurnId; nativeId?: string; started: boolean; don
 class CodexSession implements HarnessSession {
   readonly harnessId = id;
   readonly capabilities = capabilities;
-  readonly initialUsage = null;
+  /** Codex counts usage per native thread, so the Host's persisted counters still hold after a reopen. */
+  initialUsage: HostUsage | null = null;
   readonly channel = new HarnessOutputChannel<HarnessOutput>();
   readonly outputs = this.channel.outputs;
   readonly rpc: CodexRpc;
@@ -233,6 +234,7 @@ class CodexSession implements HarnessSession {
       }
       if (response.thread.cwd !== input.cwd) throw new Error('Codex returned a different workspace');
       session.threadId = response.thread.id;
+      session.initialUsage = input.usage ?? null;
       session.sourceProvider = response.modelProvider;
       session.initialState = {
         nativeRef: { harnessId: id, nativeSessionId: session.threadId, formatVersion: 1 },

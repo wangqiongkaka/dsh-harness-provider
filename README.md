@@ -45,7 +45,7 @@ Harness 在第一条消息后固定；需要换 Harness 时新建会话。不同
     root: /absolute/path/harness-state
 ```
 
-Claude Code 可执行文件可用 `CODEXHOST_CLAUDE_COMMAND` 环境变量指定；这是复用 Adapter 已有的配置项。
+Claude Code 可执行文件可用 `CODEXHOST_CLAUDE_COMMAND` 环境变量指定（沿用早期版本的变量名）；未指定时依次查找 PATH、常见安装目录和 Node.js 版本管理器目录。
 
 默认状态目录为 `$DSH_HOME/harness-plugin`；未设置 `DSH_HOME` 时为 `~/.dsh/harness-plugin`。其中只保存 DSH 会话 ID、Harness、原生会话引用、模型和未确认请求标记，不保存密钥或额外的全文历史。
 
@@ -73,7 +73,8 @@ Claude Code 可执行文件可用 `CODEXHOST_CLAUDE_COMMAND` 环境变量指定�
 - `src/dsh-output.ts`：映射到 DSH 已有消息、工具、通知与流式事件；不新增持久化事件类型。
 - `src/client.tsx`：原输入栏选择器、模型目录及条件插槽覆盖。
 - `src/codex-adapter.ts`、`src/codex-rpc.ts`：Codex 原生 app-server 持久会话与进程生命周期。
-- Claude Code 复用 codexhost 的独立 Adapter 构建产物，随插件打包。
+- `src/contracts.ts`：Host 与 Harness 之间的会话契约，两个 Adapter 共用。
+- `src/claude-adapter.ts`、`src/claude-sdk.ts`、`src/claude-native.ts`：基于 Claude Agent SDK 的 Claude Code 会话、进程与原生消息投影。
 
 ## 开发
 
@@ -91,9 +92,7 @@ node experiments/dsh-web-probe.mjs
 DSH_DELEGATION_PROBE=1 node experiments/dsh-web-probe.mjs
 ```
 
-开发链接只写本插件的 `node_modules`。构建产物不依赖 codexhost 工作区。
-
-codexhost 的公共契约与 Claude Code Adapter 以构建产物形式放在 `vendor/codexhost/`，来源提交记录在 `SOURCE.json`；构建、类型检查和测试不需要本机有 `codex-host`。升级时在已构建的 codex-host 上执行 `npm run sync:codexhost -- /path/to/codex-host`，确认 `zod` 版本与 `package.json` 一致，再运行 `npm run check`。Web 验证通过官方 `dsh plugin` 安装临时 Profile，使用真实 CLI、本地模拟模型服务和 Chromium；结束后清理临时状态，不使用真实模型端点。
+开发链接只写本插件的 `node_modules`。开发、构建和发布均不依赖 codex-host。`npm install` 会额外下载 Claude Agent SDK 的平台可选包（约 250MB），它不会打进插件；插件运行时使用用户安装的 `claude`。Web 验证通过官方 `dsh plugin` 安装临时 Profile，使用真实 CLI、本地模拟模型服务和 Chromium；结束后清理临时状态，不使用真实模型端点。
 
 ## 验证记录
 

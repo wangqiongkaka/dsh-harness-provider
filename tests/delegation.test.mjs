@@ -15,7 +15,7 @@ import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
 import Tools from '@deepseek-ai/dsh-tools';
 import Persistence from '@deepseek-ai/dsh-session-persistence-jsonl';
-import { HarnessOutputChannel } from '@codexhost/harness-adapter';
+import { HarnessOutputChannel } from '../dist/contracts.js';
 import { HarnessService, inject } from '../dist/dsh.js';
 
 const exec = promisify(execFile);

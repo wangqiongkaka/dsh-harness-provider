@@ -1,5 +1,5 @@
-import type { HostItem, HostItemSnapshot, HostTurnSnapshot } from '@codexhost/harness-adapter';
-import { hostItemIdSchema, harnessIdSchema } from '@codexhost/shared-contracts';
+import type { HostItem, HostItemSnapshot, HostTurnSnapshot } from './contracts.js';
+import { hostItemIdSchema, harnessIdSchema } from './contracts.js';
 import { z } from 'zod';
 
 export const object = z.record(z.string(), z.unknown());

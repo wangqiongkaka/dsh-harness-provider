@@ -2,8 +2,8 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { UserMessage, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
-import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HostInteraction, HostInteractionResponse, HarnessSessionState, HostUsage } from '@codexhost/harness-adapter';
-import { hostTurnIdSchema } from '@codexhost/shared-contracts';
+import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HostInteraction, HostInteractionResponse, HarnessSessionState, HostUsage } from './contracts.js';
+import { hostTurnIdSchema } from './contracts.js';
 import { Bindings, type Binding } from './bindings.js';
 import { DshOutput } from './dsh-output.js';
 import { delegationInstructions, type DelegationBridge } from './delegation.js';
@@ -28,16 +28,15 @@ function pump(live: Live): void {
 /** Persisted across restarts: the context reading for display, and the cumulative counters usageDelta subtracts from. */
 const USAGE_KEYS = ['contextUsedTokens', 'contextWindowTokens', 'totalTokens', 'inputTokens', 'cachedInputTokens', 'cacheWriteInputTokens', 'outputTokens'] as const;
 /**
- * This turn's token usage as DSH's per-message buckets: the Harness reports cumulative counts with cached input included.
- * Codex reports cached input separately; Claude Code lumps it into inputTokens and reports the latest request's hit rate,
- * so its cache split is an estimate.
+ * This turn's token usage as DSH's per-message buckets: the Harness reports cumulative counts, with cached input included
+ * in inputTokens and also reported on its own.
  */
 export function usageDelta(before: HostUsage | null, after: HostUsage | null): TokenUsage | undefined {
   if (!after) return undefined;
   const step = (key: 'inputTokens' | 'cachedInputTokens' | 'cacheWriteInputTokens' | 'outputTokens') => Math.max(0, (after[key] ?? 0) - (before?.[key] ?? 0));
   const input = step('inputTokens'), outputTokens = step('outputTokens');
   if (!input && !outputTokens) return undefined;
-  const cacheReadTokens = after.cachedInputTokens !== undefined ? step('cachedInputTokens') : Math.round(input * (after.cacheHitRatePercent ?? 0) / 100);
+  const cacheReadTokens = step('cachedInputTokens');
   const cacheWriteTokens = step('cacheWriteInputTokens');
   return { inputTokens: Math.max(0, input - cacheReadTokens - cacheWriteTokens), outputTokens, cacheReadTokens, cacheWriteTokens };
 }
@@ -68,11 +67,11 @@ export class DshRunner {
     if (!live) {
       const hints = { ...(this.delegation ? { environment: { ...process.env, ...await this.delegation.environment(agent.id) } } : {}),
         ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
-        ...(binding.permission ? { permissionModeId: binding.permission } : {}) };
+        ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(binding.usage ? { usage: binding.usage } : {}) };
       const session = unwrap(await this.adapters[binding.harness].open(binding.nativeRef
         ? { kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef, ...hints }
         : { kind: 'create', cwd: binding.cwd, ...hints }));
-      live = { session, revision: 0, usage: session.initialUsage ?? binding.usage ?? null, queue: [], ended: false, wake: () => {} };
+      live = { session, revision: 0, usage: session.initialUsage, queue: [], ended: false, wake: () => {} };
       pump(live);
       this.live.set(agent.id, live);
       const owned = live;

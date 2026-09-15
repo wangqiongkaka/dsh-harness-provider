@@ -6,7 +6,7 @@ import {
 } from '@deepseek-ai/dsh-llm';
 import type { Context } from '@deepseek-ai/cordis';
 import type { SessionEventMap } from '@deepseek-ai/dsh-session';
-import type { HostItem, HostItemSnapshot, HostItemUpdate } from '@codexhost/harness-adapter';
+import type { HostItem, HostItemSnapshot, HostItemUpdate } from './contracts.js';
 
 /** Projects external activities into DSH's existing message/tool/stream contracts. */
 export class DshOutput {

@@ -9,7 +9,7 @@ import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller';
 import { brandString } from '@deepseek-ai/dsh-brand';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-typert-registry';
-import type { HarnessAdapter, HarnessInspection } from '@codexhost/harness-adapter';
+import type { HarnessAdapter, HarnessInspection } from './contracts.js';
 import type {} from '@deepseek-ai/dsh-session-projection';
 import type {} from '@deepseek-ai/dsh-settings';
 import type {} from '@deepseek-ai/dsh-credentials';
@@ -17,10 +17,11 @@ import type {} from '@deepseek-ai/dsh-permission-presets';
 import type {} from '@deepseek-ai/dsh-shell';
 import type {} from '@deepseek-ai/dsh-workspace';
 import type {} from '@deepseek-ai/dsh-session-title';
-import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, type HarnessAccountSnapshot } from '@codexhost/shared-contracts';
+import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, type HarnessAccountSnapshot } from './contracts.js';
 import { z } from 'zod';
 import { Bindings, type Binding } from './bindings.js';
 import { CodexAdapter } from './codex-adapter.js';
+import { ClaudeCodeAdapter } from './claude-adapter.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest } from './remote.js';
@@ -35,9 +36,7 @@ declare module '@deepseek-ai/cordis' { interface Context { harness: HarnessServi
 /** Standalone DSH entry: no replacement of the original client/plugin row. */
 export async function apply(ctx: Context, rawConfig: unknown = {}): Promise<void> {
   const config = configSchema.parse(rawConfig);
-  // This is the existing self-contained codexhost Claude Code plugin artifact.
-  const { createHarnessAdapter } = await import('./claude-code/plugin.mjs');
-  const claude = await createHarnessAdapter({ environment: { ...process.env }, platform: process.platform, managedRemoteHost: false });
+  const claude = new ClaudeCodeAdapter({ environment: { ...process.env } });
   const adapters = {
     codex: new CodexAdapter({ command: config.codexCommand, environment: { ...process.env },
       requestTimeoutMs: 30000, shutdownTimeoutMs: 2000, maxFrameBytes: 16 * 1024 * 1024 }),
