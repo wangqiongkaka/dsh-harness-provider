@@ -269,7 +269,7 @@ export type ClaudeTurnEvent =
   | { type: 'message.completed'; messageId: string; requestUsage?: ClaudeRequestUsage }
   | { type: 'tool.started'; callId: string; toolName: string; arguments: JsonValue }
   | { type: 'tool.progress'; callId: string; elapsedMs: number }
-  | { type: 'tool.completed'; callId: string; toolName: string; outputText?: string; structuredResult?: JsonValue; isError: boolean; fileChange?: ClaudeFileChange }
+  | { type: 'tool.completed'; callId: string; toolName: string; outputText?: string; images?: Array<{ type: 'image'; mimeType: string; base64Data: string }>; structuredResult?: JsonValue; isError: boolean; fileChange?: ClaudeFileChange }
   | { type: 'subagent.started'; callId: string; operation: 'spawn' | 'send'; description: string; prompt?: string; role?: string; background: boolean; nativeSubagentId?: string }
   | { type: 'subagent.updated'; callId: string; status: SubagentStatus; description?: string; role?: string; nativeSubagentId?: string; resultSummary?: string }
   | { type: 'subagent.completed'; callId: string; isError: boolean; continuesInBackground?: boolean; nativeSubagentId?: string; resultSummary?: string }
@@ -468,6 +468,14 @@ export class TurnAccumulator {
       if (usage && !state.usagePublished) { state.usagePublished = true; events.push({ type: 'message.completed', messageId, requestUsage: usage }); }
       return;
     }
+    // Complete a public summary when the SDK supplied only part (or none) of it as deltas.
+    // Redacted/signature blocks are not display text; a differing snapshot must not overwrite streamed text.
+    const reasoning = (Array.isArray(inner.content) ? inner.content : []).flatMap(block =>
+      isRecord(block) && block.type === 'thinking' && typeof block.thinking === 'string' ? [block.thinking] : []).join('');
+    if (reasoning.startsWith(state.reasoning)) {
+      const suffix = reasoning.slice(state.reasoning.length);
+      if (suffix) { state.reasoning += suffix; events.push({ type: 'reasoning.delta', messageId, delta: suffix }); }
+    }
     if (state.reasoning) events.push({ type: 'reasoning.completed', messageId });
     const complete = Array.isArray(inner.content) ? blockText(inner.content) : '';
     if (complete.startsWith(state.text)) {
@@ -538,7 +546,9 @@ export class TurnAccumulator {
       }
       const structured = isTaskTool(tool.name) ? jsonValue.safeParse(native) : null;
       const fileChange = isError ? null : parseFileChange(tool.name, native);
-      events.push({ type: 'tool.completed', callId, toolName: tool.name, isError, ...(outputText ? { outputText } : {}),
+      const images = (Array.isArray(block.content) ? block.content : []).flatMap(part => isRecord(part) && part.type === 'image' && isRecord(part.source) && part.source.type === 'base64' && typeof part.source.media_type === 'string' && typeof part.source.data === 'string'
+        ? [{ type: 'image' as const, mimeType: part.source.media_type, base64Data: part.source.data }] : []);
+      events.push({ type: 'tool.completed', ...(images.length ? { images } : {}), callId, toolName: tool.name, isError, ...(outputText ? { outputText } : {}),
         ...(structured?.success ? { structuredResult: structured.data } : {}), ...(fileChange ? { fileChange } : {}) });
     }
   }

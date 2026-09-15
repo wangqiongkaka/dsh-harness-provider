@@ -7,7 +7,7 @@ try {
   if (!endpoint || !token) throw new Error('DSH delegation is unavailable in this process; start a new DSH harness turn.');
   const url = new URL(endpoint);
   if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.username || url.password) throw new Error('Invalid DSH delegation endpoint');
-  const body = method === 'create' ? JSON.parse(value) : { sessionId: value };
+  const body = method === 'create' || value.startsWith('{') ? JSON.parse(value) : { sessionId: value };
   const response = await fetch(new URL(method, url), {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify(body), signal: AbortSignal.timeout(120_000),

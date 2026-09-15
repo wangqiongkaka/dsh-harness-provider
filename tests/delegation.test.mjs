@@ -23,8 +23,8 @@ test('session CLI creates a visible independent harness session, reads its resul
  const root = await mkdtemp(join(tmpdir(), 'dsh-delegate-'));
  const ctx = new Context();
  const opens = [], turns = [], created = [];
- let unavailable = false;
- const workspace = {id:'workspace',path:root,sessionIds:['parent']};
+ let unavailable = false, reply = 'Review complete: no findings';
+ const workspace = {id:'workspace',path:root,sessionIds:['parent','other']};
  class Commands extends Service {
   constructor(ctx) { super(ctx, 'sessionController'); }
   async resolveAgent(id) { const agent=ctx.agents.get(id); return agent ? {agent} : {error:new Error('missing session')}; }
@@ -41,15 +41,19 @@ test('session CLI creates a visible independent harness session, reads its resul
   async inspect() { return unavailable ? {status:'unavailable',error:{message:'fixture unavailable'}} : {status:'ready',catalog:{models:[],thinkingOptions:[]},
    permissionModes:{modes:[{id:'readOnly',label:'Read only'},{id:'default',label:'Default'}],defaultModeId:'readOnly'}}; },
   async open(input) {
-   opens.push({harness,input});
+   if (harness === 'codex') opens.push({harness,input});
    assert.ok(input.environment.DSH_DELEGATE_TOKEN);
    assert.ok(input.environment.DSH_DELEGATE_ENDPOINT);
    const channel=new HarnessOutputChannel();
    return {ok:true,value:{initialState:{},outputs:channel.outputs,async close(){channel.end();},async execute(command){
+    if (harness === 'claude-code') {
+     channel.emit({kind:'event',event:{type:'turn.completed',turnId:command.turnId,outcome:{status:'succeeded'}}});
+     return {ok:true,value:{turnId:command.turnId}};
+    }
     turns.push(command);assert.equal(command.type,'turn.start');
     assert.match(command.input[0].text,/delegate-cli.mjs/);
     assert.equal(command.input.at(-1).text,'Review this diff without editing');
-    channel.emit({kind:'event',event:{type:'item.completed',turnId:command.turnId,snapshot:{item:{type:'agentMessage',itemId:'answer',text:'Review complete: no findings'},outcome:{status:'succeeded'}}}});
+    channel.emit({kind:'event',event:{type:'item.completed',turnId:command.turnId,snapshot:{item:{type:'agentMessage',itemId:'answer',text:reply},outcome:{status:'succeeded'}}}});
     channel.emit({kind:'event',event:{type:'turn.completed',turnId:command.turnId,outcome:{status:'succeeded'}}});
     return {ok:true,value:{turnId:command.turnId}};
    }}};
@@ -61,6 +65,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   await ctx.plugin(Commands);
   ctx.provide('userQuestions',{});ctx.provide('workspaceRegistry',{list:()=>[workspace]});
   await ctx.plugin({inject,apply(scope){new HarnessService(scope,join(root,'bindings'),{codex:adapter('codex'),'claude-code':adapter('claude-code')});}});
+  ctx.on('agent/pre-step',async(payload,next)=>payload.agent.id==='other'?{kind:'enter',messages:[]}:next());
   await ctx.plugin(Loop,{agents:[]});
   await ctx.agents.create({sessionId:'parent',meta:{cwd:root}});
   await ctx.agents.create({sessionId:'other',meta:{cwd:root}});
@@ -85,6 +90,11 @@ test('session CLI creates a visible independent harness session, reads its resul
   assert.equal(child.session.snapshotEvents().filter(e=>e.type==='user/message').length,1);
   assert.equal(JSON.stringify(child.session.snapshotEvents()).includes(environment.DSH_DELEGATE_TOKEN),false);
   await cli('create',request);assert.equal(turns.length,1);
+  await ctx.agents.get('parent').whenIdle();
+  const notifications=ctx.agents.get('parent').session.snapshotEvents().filter(e=>e.type==='user/message' && e.data.source.kind==='plugin');
+  assert.equal(notifications.length,1);
+  assert.match(notifications[0].data.content[0].text,/分页读取完整结果/);
+  assert.ok(ctx.tools.get('harness_delegate'));assert.ok(ctx.tools.get('harness_delegate_read'));
   await assert.rejects(cli('create',{...request,prompt:'changed'}),error => /不同任务/.test(error.stdout));
   await assert.rejects(cli('create',{...request,harness:'unknown'}));
   await assert.rejects(cli('create',{...request,prompt:'  '}));
@@ -104,8 +114,12 @@ test('session CLI creates a visible independent harness session, reads its resul
   await assert.rejects(cli('create',retryRequest),error=>/admission unavailable/.test(error.stdout));
   assert.equal(created.length,2);
   ctx.sessionController.prompt=prompt;
+  reply='完整结果'.repeat(20000);
   const admitted=await cli('create',retryRequest);await ctx.agents.get(admitted.sessionId).whenIdle();
   assert.equal(created.length,2);assert.equal(turns.length,2);
+  let page=await cli('read',admitted.sessionId), full=page.text;
+  while(page.nextOffset!==null){page=await cli('read',JSON.stringify({sessionId:admitted.sessionId,offset:page.nextOffset,throughSeq:page.throughSeq}));full+=page.text;}
+  assert.equal(full,reply);
   // A cold, locked admission without a recorded turn must not silently replay.
   ctx.sessionController.prompt=async()=>{throw new Error('admission unavailable');};
   const uncertainRequest={...request,requestId:'uncertain-admission'};
@@ -115,5 +129,13 @@ test('session CLI creates a visible independent harness session, reads its resul
   const uncertain=await h.bindings.read(uncertainId);uncertain.locked=true;await h.bindings.write(uncertain);
   await assert.rejects(cli('create',uncertainRequest),error=>/禁止自动重发/.test(error.stdout));
   assert.equal((await cli('read',uncertainId)).status,'recovery-required');assert.equal(turns.length,2);
+  const nativeAgent=ctx.agents.get('other');
+  const delegated=await ctx.tools.execute({callId:'native-delegate',name:'harness_delegate',arguments:{...request,requestId:'native-source'},agent:nativeAgent,signal:new AbortController().signal});
+  assert.equal(delegated.isError,false,JSON.stringify(delegated));
+  const nativeChild=JSON.parse(delegated.content[0].text);
+  await ctx.agents.get(nativeChild.sessionId).whenIdle();
+  const nativeRead=await ctx.tools.execute({callId:'native-read',name:'harness_delegate_read',arguments:{sessionId:nativeChild.sessionId},agent:nativeAgent,signal:new AbortController().signal});
+  assert.equal(nativeRead.isError,false,JSON.stringify(nativeRead));
+  assert.equal(JSON.parse(nativeRead.content[0].text).status,'completed');
  } finally { await ctx.fiber.dispose();await rm(root,{recursive:true,force:true}); }
 });

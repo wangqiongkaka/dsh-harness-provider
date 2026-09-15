@@ -234,7 +234,7 @@ interface PendingInteraction {
   suggestions?: PermissionUpdate[]; signal: AbortSignal; onAbort(): void; resolve(result: PermissionResult): void;
 }
 interface ActiveTurn {
-  accumulator: TurnAccumulator; interactions: Map<string, PendingInteraction>; controlRequestIds: Set<string>;
+  accumulator: TurnAccumulator; pendingInputs: number; interactions: Map<string, PendingInteraction>; controlRequestIds: Set<string>;
   onEvent(event: TransportEvent): void; resolve(result: ClaudeTurnResult): void; reject(error: unknown): void;
 }
 
@@ -323,12 +323,12 @@ export class ClaudeTransport {
     this.#permissionMode = mode;
   }
 
-  runTurn(text: string, userMessageId: string, onEvent: (event: TransportEvent) => void): Promise<ClaudeTurnResult> {
+  runTurn(text: SDKUserMessage['message']['content'], userMessageId: string, onEvent: (event: TransportEvent) => void): Promise<ClaudeTurnResult> {
     if (this.#closing || !this.#started) return Promise.reject(new Error('Claude SDK transport is not started'));
     if (this.#active) return Promise.reject(new Error('Claude SDK transport is busy'));
     this.#idle = null;
     const result = new Promise<ClaudeTurnResult>((resolve, reject) => {
-      this.#active = { accumulator: new TurnAccumulator(), interactions: new Map(), controlRequestIds: new Set(), onEvent, resolve, reject };
+      this.#active = { accumulator: new TurnAccumulator(), pendingInputs: 1, interactions: new Map(), controlRequestIds: new Set(), onEvent, resolve, reject };
     });
     this.#input.push({
       type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null, session_id: this.#options.sessionId,
@@ -336,6 +336,12 @@ export class ClaudeTransport {
       uuid: userMessageId as SDKUserMessage['uuid'] & string, origin: { kind: 'human' },
     });
     return result;
+  }
+
+  steer(content: SDKUserMessage['message']['content']): void {
+    if (!this.#active || this.#closing) throw new Error('Claude native turn is not active');
+    this.#active.pendingInputs++;
+    this.#input.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: this.#options.sessionId });
   }
 
   respondToInteraction(response: ClaudeInteractionResponse): void {
@@ -438,7 +444,12 @@ export class ClaudeTransport {
           for (const event of events) active.onEvent(event);
           if (terminal) {
             this.#closeInteractions(active);
+            if (terminal.status === 'succeeded' && --active.pendingInputs > 0) {
+              active.accumulator = new TurnAccumulator();
+              continue;
+            }
             this.#active = null;
+            if (terminal.status !== 'succeeded' && active.pendingInputs > 1) void this.close().catch(() => {});
             active.resolve(terminal);
           }
           continue;

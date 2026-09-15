@@ -35,6 +35,9 @@ for await (const line of createInterface({input:process.stdin})) {
   notice('item/agentMessage/delta',{turnId:turn.id,itemId:'answer',delta:'reply:'+turn.id});
   notice('item/completed',{turnId:turn.id,item:{id:'answer',type:'agentMessage',text:'reply:'+turn.id}});
   notice('turn/completed',{turn:{...turn,status:'completed'}});
+ } else if(req.method==='turn/steer') {
+  if(p.expectedTurnId!==turn.id || p.input[0].text!=='steer-now') process.exit(9);
+  send({id:req.id,result:{turnId:turn.id}});
  } else if(req.method==='turn/interrupt') {
   if(p.turnId!==turn.id) process.exit(5);
   notice('turn/completed',{turn:{...turn,status:'interrupted'}});
@@ -135,3 +138,17 @@ test('catalog exposes reasoning efforts, thinking.select rides turn/start, token
   assert.equal(second.sourceProvider,'second');
  } finally {await adapter.close();}
  });
+
+
+test('Codex routes steering to the exact active native turn',async()=>{
+ const adapter=new CodexAdapter(options);
+ try {
+  const session=value(await adapter.open({kind:'create',cwd:process.cwd()}));
+  const output=session.outputs[Symbol.asyncIterator]();
+  value(await session.execute({type:'turn.start',turnId:'host-cancel',input:[{type:'text',text:'cancel'}]}));
+  value(await session.steer([{type:'text',text:'steer-now'}]));
+  value(await session.execute({type:'turn.cancel',turnId:'host-cancel'}));
+  await until(output,'turn.completed');
+  assert.equal((await session.steer([{type:'text',text:'late'}])).ok,false);
+ } finally {await adapter.close();}
+});

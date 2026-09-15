@@ -1,4 +1,5 @@
 /** Claude Code native sessions behind the Host contract: turns, activities, interactions, configuration and usage. */
+import { claudeHistoryOperation } from './claude-history.js';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import {
@@ -23,7 +24,7 @@ import {
 const harnessId = harnessIdSchema.parse('claude-code');
 const capabilities = {
   configuration: { selectModel: true, selectThinkingOption: true, selectPermissionMode: true, permissionModeScope: 'live' as const },
-  history: { fork: false, forkAcrossCwd: false, rollbackLastTurn: false },
+  history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
 };
 const CLOSE_TIMEOUT_MS = 7_000;
 const CANCEL_TIMEOUT_MS = 2_000;
@@ -89,7 +90,7 @@ class ToolLifecycle {
     const durationMs = Math.max(tool.elapsedMs, Date.now() - tool.startedAt, 0);
     let item: ToolItem = tool.item.type === 'commandExecution'
       ? { ...tool.item, ...(output !== undefined ? { output, outputTruncated: truncated } : {}), durationMs }
-      : { ...tool.item, ...(output !== undefined ? { output: { content: [{ type: 'text', text: output }], ...(truncated ? { truncated: true } : {}) } } : {}), durationMs };
+      : { ...tool.item, ...(output !== undefined || event.images?.length ? { output: { content: [...(output !== undefined ? [{ type: 'text' as const, text: output }] : []), ...(event.images ?? [])], ...(truncated ? { truncated: true } : {}) } } : {}), durationMs };
     const outcome: HostItemOutcome = cancelled ? { status: 'cancelled', reason: 'Cancelled by user' }
       : event.isError ? { status: 'failed', error: error('nativeFailure', `Claude Code Tool '${event.toolName}' failed`) } : { status: 'succeeded' };
     if (outcome.status === 'succeeded' && item.type === 'toolExecution' && isTaskTool(event.toolName)) {
@@ -311,12 +312,32 @@ class ClaudeSession implements HarnessSession {
     }, () => { this.#contextCooldownUntil = Date.now() + CONTEXT_USAGE_COOLDOWN_MS; }).finally(() => { this.#contextRefresh = null; });
   }
 
+  async readSnapshot() {
+    try { return { ok: true as const, value: { turns: await claudeHistoryOperation('read', this.#state.nativeRef!, this.#options.cwd, this.#options.environment) as import('./contracts.js').HostTurnSnapshot[], state: this.#state } }; }
+    catch { return failed<{ turns: import('./contracts.js').HostTurnSnapshot[]; state: HarnessSessionState }>('unavailable', '无法读取 Claude 原生会话记录'); }
+  }
+  async fork(throughTurn?: string | null): Promise<HarnessResult<NativeSessionRef | undefined>> {
+    if (this.#active || this.#accepting || this.#configuring) return failed('sessionBusy', '请等待当前轮结束');
+    try { return { ok: true, value: (await claudeHistoryOperation('fork', this.#state.nativeRef!, this.#options.cwd, this.#options.environment, throughTurn) ?? undefined) as NativeSessionRef | undefined }; }
+    catch { return failed('unavailable', '无法创建 Claude 原生会话分支'); }
+  }
+  async steer(input: import('./contracts.js').HostInput[]): Promise<HarnessResult<{ accepted: true }>> {
+    if (!this.#active || !this.#transport) return failed('invalidState', '当前没有可插入的原生轮次');
+    try {
+      this.#transport.steer(input.map(part => part.type === 'text' ? { type: 'text' as const, text: part.text }
+        : { type: 'image' as const, source: { type: 'base64' as const, media_type: part.mimeType, data: part.base64Data } }));
+      return { ok: true, value: { accepted: true } };
+    } catch { return failed('unavailable', '原生轮次已结束，插入未被接收'); }
+  }
+
   close(): Promise<void> { return this.#closing ??= this.#close(); }
 
   async #start(command: TurnStartCommand): Promise<HarnessResult<{ turnId: HostTurnId }>> {
     if (this.#accepting || this.#active || this.#configuring) return failed('sessionBusy', 'Claude Code Session already has an active Turn', true);
-    const text = command.input.map(input => input.text).join('\n');
-    if (!text) return failed('invalidRequest', 'Claude Code text Turn must not be empty');
+    const text = command.input.every(input => input.type === 'text') ? command.input.map(input => input.text).join('\n')
+      : command.input.map(input => input.type === 'text' ? { type: 'text' as const, text: input.text }
+        : { type: 'image' as const, source: { type: 'base64' as const, media_type: input.mimeType, data: input.base64Data } });
+    if (!text.length) return failed('invalidRequest', 'Claude Code text Turn must not be empty');
     this.#accepting = true;
     const starting = !this.#transport;
     let transport: ClaudeTransport;
@@ -332,7 +353,7 @@ class ClaudeSession implements HarnessSession {
       cancellationRequested: false, held: false, rootSegmentActive: true,
     };
     this.#active = active;
-    this.#event({ type: 'turn.started', turnId: command.turnId });
+    this.#event({ type: 'turn.started', turnId: command.turnId, nativeTurnRef: { harnessId, nativeSessionId: this.#options.sessionId, nativeTurnKey, formatVersion: 1 } });
     this.#event({ type: 'item.started', turnId: command.turnId, item: active.item! });
     transport.runTurn(text, nativeTurnKey, event => this.#turnEvent(active, event))
       .then(result => this.#finishResult(active, result), () => {

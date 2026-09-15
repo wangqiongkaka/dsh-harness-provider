@@ -38,7 +38,10 @@ try{
  const first=new CodexAdapter(options);adapters.push(first);
  const session=unwrap(await first.open({kind:'create',cwd:root}));const ref=session.initialState.nativeRef;
  assert.equal(await turn(session,'first'),'native-one');assert.equal(await turn(session,'second'),'native-two');
- assert.equal(unwrap(await session.readSnapshot()).turns.length,2);
+ const history=unwrap(await session.readSnapshot());assert.equal(history.turns.length,2);
+ const forkRef=unwrap(await session.fork(history.turns[0].nativeTurnRef.nativeTurnKey));assert.notEqual(forkRef.nativeSessionId,ref.nativeSessionId);
+ const forked=unwrap(await first.open({kind:'resume',cwd:root,nativeRef:forkRef}));assert.equal(unwrap(await forked.readSnapshot()).turns.length,1);await forked.close();
+ console.log('PASS: Codex selected-turn fork retains exactly the requested native history');
  await first.close();
  const second=new CodexAdapter(options);adapters.push(second);
  const resumed=unwrap(await second.open({kind:'resume',cwd:root,nativeRef:ref}));

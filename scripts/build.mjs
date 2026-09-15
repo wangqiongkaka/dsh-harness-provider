@@ -21,7 +21,7 @@ const quietBypassNotice = {
   },
 };
 await build({
-  entryPoints: ['src/contracts.ts', 'src/codex-rpc.ts', 'src/codex-adapter.ts', 'src/claude-adapter.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts'],
+  entryPoints: ['src/claude-history-cli.ts', 'src/media.ts', 'src/secret-questions.ts', 'src/dsh-output.ts', 'src/contracts.ts', 'src/codex-rpc.ts', 'src/codex-adapter.ts', 'src/claude-adapter.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts'],
   external: ['@deepseek-ai/*'],
   outdir: 'dist',
   bundle: true,

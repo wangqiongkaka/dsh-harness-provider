@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { nativeSessionRefSchema, harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema } from './contracts.js';
@@ -14,7 +14,9 @@ const bindingSchema = z.object({
   usage: z.object({ contextUsedTokens: z.number().optional(), contextWindowTokens: z.number().optional(), totalTokens: z.number().optional(),
     inputTokens: z.number().optional(), cachedInputTokens: z.number().optional(), cacheWriteInputTokens: z.number().optional(), outputTokens: z.number().optional() }).optional(),
   pending: z.string().optional(),
-  delegation: z.object({ parentSessionId: z.string(), requestHash: z.string() }).strict().optional(),
+  pendingNative: z.string().optional(),
+  turns: z.array(z.object({ turn: z.number().int(), key: z.string() })).optional(),
+  delegation: z.object({ parentSessionId: z.string(), requestHash: z.string(), notifiedSeq: z.number().int().optional() }).strict().optional(),
 }).strict().refine(value => !value.nativeRef || value.nativeRef.harnessId === value.harness, 'Harness identity mismatch');
 export type Binding = z.infer<typeof bindingSchema>;
 
@@ -43,6 +45,16 @@ export class Bindings {
   async write(binding: Binding): Promise<void> {
     const data = bindingSchema.parse(binding);
     await this.save(this.path(data.sessionId), data);
+  }
+  async delegated(): Promise<Binding[]> {
+    let names: string[];
+    try { names = await readdir(this.root); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
+    const result: Binding[] = [];
+    for (const name of names) if (/^[a-f0-9]{64}\.json$/.test(name)) {
+      const binding = bindingSchema.parse(JSON.parse(await readFile(join(this.root, name), 'utf8')));
+      if (binding.delegation) result.push(binding);
+    }
+    return result;
   }
   async readDefaults(): Promise<HarnessDefaults> {
     try { return defaultsSchema.parse(JSON.parse(await readFile(join(this.root, 'defaults.json'), 'utf8'))); }

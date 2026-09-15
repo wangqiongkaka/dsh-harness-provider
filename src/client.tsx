@@ -8,14 +8,19 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client';
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
-import { contribution, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema } from './remote.js';
+import { contribution, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema } from './remote.js';
 import type { z } from 'zod';
 
 type State = z.infer<typeof stateSchema>;
 type Models = z.infer<typeof modelsSchema>;
 type Usage = z.infer<typeof usageSchema>;
 type Quota = z.infer<typeof quotaSchema>;
+type SecretStatus = z.infer<typeof secretStatusSchema>;
 type Api = {
+  recover(request: {sessionId: string; action: 'check' | 'unlock'}): Promise<RemoteResult<State & {detail: string}>>;
+  rollback(request: {sessionId: string}): Promise<RemoteResult<State>>;
+  secretStatus(request: {sessionId: string}): Promise<RemoteResult<SecretStatus>>;
+  answerSecret(request: {sessionId: string; id: string; answers: Record<string,string[]>; cancelled?: boolean}): Promise<RemoteResult<{accepted: boolean}>>;
   state(request: {sessionId: string}): Promise<RemoteResult<State>>;
   select(request: {sessionId: string; harness: State['harness']}): Promise<RemoteResult<State>>;
   models(request: {sessionId: string}): Promise<RemoteResult<Models>>;
@@ -71,6 +76,10 @@ async function value<T>(promise: Promise<RemoteResult<T>>): Promise<T> {
   return result.value;
 }
 interface Injected {
+  recover(id: string, action: 'check' | 'unlock'): Promise<State & {detail: string}>;
+  rollback(id: string): Promise<State>;
+  secretStatus(id: string): Promise<SecretStatus>;
+  answerSecret(id: string, question: string, answers: Record<string,string[]>, cancelled?: boolean): Promise<{accepted: boolean}>;
   read(id: string): Promise<State>;
   select(id: string, harness: State['harness']): Promise<State>;
   models(id: string): Promise<Models>;
@@ -248,9 +257,78 @@ function ContextRing({ usage, t }: { usage: Usage | undefined; t: T }) {
   </span>;
 }
 
+function SessionActions({ sessionId, recover, rollback, running, recoveryRequired, onChange }: {
+  sessionId: string; recover: Injected['recover']; rollback: Injected['rollback']; running: boolean; recoveryRequired: boolean; onChange: (state: State) => void;
+}) {
+  const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [detail, setDetail] = useState('');
+  const root = useRef<HTMLSpanElement>(null);
+  const close = useCallback(() => setOpen(false), []);
+  useDismiss(open, close, root);
+  async function act(operation: 'rollback' | 'check' | 'unlock') {
+    setBusy(true); setDetail('');
+    try {
+      const state = operation === 'rollback' ? await rollback(sessionId) : await recover(sessionId, operation);
+      onChange(state); setDetail('detail' in state ? String(state.detail) : '已回退最后一轮对话上下文，文件未改动。');
+    } catch (error) { setDetail(error instanceof Error ? error.message : '操作失败'); }
+    finally { setBusy(false); }
+  }
+  return <span className="hp-anchor" ref={root}>
+    <button type="button" className="hp-chip" aria-expanded={open} aria-label="会话操作" onClick={() => setOpen(!open)}>···</button>
+    {open && <div className="hp-panel hp-panel-left" role="dialog" aria-label="会话操作">
+      {recoveryRequired ? <>
+        <p>上次请求结果未确认。先核对原生记录；手动解除暂停会保留原生上下文，不重发原请求。</p>
+        <button disabled={busy || running} onClick={() => void act('check')}>核对原生记录</button>
+        <button disabled={busy || running} onClick={() => void act('unlock')}>解除暂停，不重发</button>
+      </> : <button disabled={busy || running} onClick={() => void act('rollback')}>回退最后一轮（保留文件）</button>}
+      {detail && <p role="status" style={{whiteSpace:'pre-wrap',maxHeight:240,overflow:'auto'}}>{detail}</p>}
+    </div>}
+  </span>;
+}
+
+/** Password values remain in the form DOM until submission; never put them in a draft/store. */
+export function SecretPanel({ sessionId, read, answer }: { sessionId: string; read: Injected['secretStatus']; answer: Injected['answerSecret'] }) {
+  const pending = usePolled(() => read(sessionId), 1000, [sessionId]);
+  const [closed, setClosed] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(false);
+  if (!pending || pending.id === closed) return null;
+  async function submit(form: HTMLFormElement, cancelled = false) {
+    if (!pending) return;
+    setBusy(true); setError(false);
+    const data = new FormData(form);
+    const answers: Record<string,string[]> = {};
+    if (!cancelled) for (const question of pending.questions) {
+      const values = data.getAll(question.id).map(String).filter(Boolean);
+      const other = data.get(`${question.id}:other`);
+      answers[question.id] = [...values, ...(other ? [String(other)] : [])];
+    }
+    form.reset();
+    try { await answer(sessionId, pending.id, answers, cancelled); setClosed(pending.id); }
+    catch { setError(true); }
+    finally { setBusy(false); }
+  }
+  return <form key={pending.id} className="hp-secret" aria-label={pending.title} aria-busy={busy} autoComplete="off"
+    onSubmit={event => { event.preventDefault(); void submit(event.currentTarget); }}>
+    <strong>{pending.title}</strong>
+    <p>保密答复仅发送给当前 Harness，不保存到 DSH 对话记录。</p>
+    {pending.questions.map(question => <label key={question.id} style={{display:'block',margin:'8px 0'}}>
+      {question.prompt}
+      {question.type === 'text' ? <input name={question.id} type={question.secret ? 'password' : 'text'} required={!question.optional}
+        placeholder={question.placeholder} autoComplete="off" disabled={busy} />
+        : <><select name={question.id} multiple={question.multiple} required={!question.optional && !question.allowOther} disabled={busy} defaultValue={question.multiple ? [] : ''}>
+          {!question.multiple && <option value="">请选择</option>}
+          {question.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>{question.allowOther && <input name={`${question.id}:other`} aria-label="其他答复" disabled={busy}/>}</>}
+    </label>)}
+    {error && <p role="alert">提交失败，请检查问题是否已过期，重新填写后再提交。</p>}
+    <button type="submit" disabled={busy}>提交</button>
+    <button type="button" disabled={busy} onClick={event => { const form = event.currentTarget.form; if (form) void submit(form, true); }}>取消</button>
+  </form>;
+}
+
 // ---- left slot: Harness chip + quota chip ----
 const names: Record<State['harness'], string> = { dsh: '', codex: 'Codex', 'claude-code': 'Claude Code' };
-export function HarnessSelect({ sessionId, useSessions, read, select, quota, changed, t }: LeftProps) {
+export function HarnessSelect({ sessionId, useSessions, read, select, quota, changed, secretStatus, answerSecret, recover, rollback, t }: LeftProps) {
   const [state,setState] = useState<State>();
   const [error,setError] = useState<string>();
   const [busy,setBusy] = useState(false);
@@ -290,6 +368,8 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, cha
       </div>}
     </div>
     <QuotaChip quota={quotaView} t={t} />
+    {current !== 'dsh' && <SessionActions key={sessionId} sessionId={sessionId} recover={recover} rollback={rollback} running={!!summary?.running} recoveryRequired={!!state?.recoveryRequired} onChange={setState} />}
+    <SecretPanel key={sessionId} sessionId={sessionId} read={secretStatus} answer={answerSecret} />
     {error && <span role="alert" className="hp-alert">{error}</span>}
     {state?.recoveryRequired && !summary?.running && <span role="status" className="hp-alert">{t('recovery')}</span>}
   </div>;
@@ -496,7 +576,7 @@ const styles = `
 .hp-row dd{margin:0;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
 .hp-section{margin-top:12px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}
 .hp-foot{margin-top:10px;padding-top:8px;border-top:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-caption)}
-.hp-alert{max-width:360px;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
+.hp-secret{position:absolute;bottom:100%;left:0;z-index:110;max-height:60vh;overflow:auto;width:340px;padding:16px;border-radius:12px;background:var(--dsw-specific-menu);box-shadow:var(--dsw-elevation-prominent);font-size:14px}.hp-secret input,.hp-secret select{display:block;box-sizing:border-box;width:100%;margin-top:4px}.hp-secret p{font-size:12px}.hp-alert{max-width:360px;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
 `;
 
 export async function apply(ctx: Context): Promise<void> {
@@ -513,6 +593,10 @@ export async function apply(ctx: Context): Promise<void> {
     const known = new Map<string,boolean>();
     const listeners = new Set<() => void>();
     const api: Injected = {
+      recover:(sessionId,action)=>value(scope.remote.harness.recover({sessionId,action})),
+      rollback:sessionId=>value(scope.remote.harness.rollback({sessionId})),
+      secretStatus:id=>value(scope.remote.harness.secretStatus({sessionId:id})),
+      answerSecret:(sessionId,id,answers,cancelled)=>value(scope.remote.harness.answerSecret({sessionId,id,answers,cancelled})),
       read:id=>value(scope.remote.harness.state({sessionId:id})),
       select:(id,harness)=>value(scope.remote.harness.select({sessionId:id,harness})),
       models:id=>value(scope.remote.harness.models({sessionId:id})),

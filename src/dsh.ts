@@ -6,6 +6,7 @@ import { TypertRemoteService, RemoteError } from '@deepseek-ai/dsh-typert-protoc
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller';
+import { defineTool } from '@deepseek-ai/dsh-tools';
 import { brandString } from '@deepseek-ai/dsh-brand';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-typert-registry';
@@ -16,6 +17,8 @@ import type {} from '@deepseek-ai/dsh-credentials';
 import type {} from '@deepseek-ai/dsh-permission-presets';
 import type {} from '@deepseek-ai/dsh-shell';
 import type {} from '@deepseek-ai/dsh-workspace';
+import type {} from '@deepseek-ai/dsh-attachment';
+import type {} from '@deepseek-ai/dsh-client-file-upload';
 import type {} from '@deepseek-ai/dsh-session-title';
 import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, type HarnessAccountSnapshot } from './contracts.js';
 import { z } from 'zod';
@@ -24,8 +27,8 @@ import { CodexAdapter } from './codex-adapter.js';
 import { ClaudeCodeAdapter } from './claude-adapter.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
-import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest } from './remote.js';
-import { DelegationBridge, delegationRequest } from './delegation.js';
+import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, secretAnswerRequest, recoveryRequest } from './remote.js';
+import { DelegationBridge, delegationRequest, delegationReadRequest } from './delegation.js';
 
 export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions'];
 export const configSchema = z.object({
@@ -58,6 +61,7 @@ export class HarnessService extends TypertRemoteService {
   readonly bindings: Bindings;
   readonly runner: DshRunner;
   readonly delegation: DelegationBridge;
+  private stopped = false;
   // ponytail: per-cwd catalog cache; each inspect spawns a native process.
   private readonly catalogs = new Map<string, { until: number; inspection: Ready }>();
   // ponytail: per-source quota cache; account probes are rate-limited upstream and identical across sessions.
@@ -69,6 +73,7 @@ export class HarnessService extends TypertRemoteService {
     this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation);
     ctx.effect(() => ctx.typert.register({ package: contribution.package, face: 'host', schemas: [], invocations: contribution.descriptors, model: { services: [], events: [], objects: [] } }), 'harness: Remote contracts');
     ctx.effect(() => async () => {
+      this.stopped = true;
       await this.delegation.close();
       const agents = [...this.runner.live.keys()].flatMap(id => {
         const agent = ctx.agents.get(SessionId(id)); return agent ? [agent] : [];
@@ -85,13 +90,130 @@ export class HarnessService extends TypertRemoteService {
       await this.runner.run(payload, binding);
       return { kind: 'enter', messages: [] };
     });
+    ctx.on('agent/inbox/inserted', ({ agent }) => { this.runner.drainSteering(agent); });
+    ctx.on('session/event', (session, event) => {
+      if (event.type === 'turn/end') void this.notifyDelegation(session.id).catch(() => {});
+    });
+    ctx.on('agent/created', async ({ agent }) => { void agent.whenIdle().then(() => this.notifyDelegation(agent.id)).catch(() => {}); });
+    ctx.inject(['tools'], scope => {
+      scope.tools.register(defineTool({
+        name: 'harness_delegate', description: '用户明确要求委派给 Codex 或 Claude Code 时，创建可见独立会话。完成后自动唤醒来源会话；重试保持 requestId 和所有参数不变。',
+        parameters: { requestId: { type: 'string', required: true }, harness: { type: 'string', enum: ['codex', 'claude-code'], required: true }, prompt: { type: 'string', required: true } },
+        output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+        execute: async (args, exec) => { if (!exec.agent) throw new Error('委派需要来源会话'); return JSON.stringify(await this.delegate(exec.agent.id, args)); },
+      }));
+      scope.tools.register(defineTool({
+        name: 'harness_delegate_read', description: '分页读取本会话创建的委派结果。首次省略 offset/throughSeq；按 nextOffset 和 throughSeq 读到末尾。',
+        parameters: { sessionId: { type: 'string', required: true }, offset: { type: 'integer' }, throughSeq: { type: 'integer' } },
+        output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+        execute: async (args, exec) => { if (!exec.agent) throw new Error('查询需要来源会话'); return JSON.stringify(await this.readDelegation(exec.agent.id, args)); },
+      }));
+    });
     this.wrapCommands(ctx);
+    void this.bindings.delegated().then(bindings => Promise.allSettled(bindings.map(binding => this.notifyDelegation(binding.sessionId)))).catch(() => {});
+  }
+
+  private async withSession<T>(binding: Binding, work: (session: import('./contracts.js').HarnessSession) => Promise<T>): Promise<T> {
+    const live = this.runner.live.get(binding.sessionId);
+    if (live) return work(live.session);
+    if (!binding.nativeRef) throw new Error('尚未保存原生会话身份，无法读取或分支');
+    const session = unwrap(await this.adapters[binding.harness].open({ kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef,
+      ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
+      ...(binding.permission ? { permissionModeId: binding.permission } : {}) }));
+    try { return await work(session); } finally { await session.close(); }
+  }
+
+  async recover(raw: unknown) {
+    const { sessionId, action } = recoveryRequest.parse(raw);
+    return this.bindings.serial(sessionId, async () => {
+      const agent = await this.agent(sessionId), binding = await this.bindings.read(sessionId);
+      if (!binding?.pending) return { ...this.view(binding), detail: '没有待恢复的请求' };
+      if (agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先等待会话停止');
+      let detail = '无法确认原请求的执行结果；没有重发任何请求。';
+      let confirmed = false;
+      if (binding.nativeRef && binding.pendingNative) {
+        try {
+          const snapshot = await this.withSession(binding, async session => {
+            if (!session.readSnapshot) throw new Error('Harness 不支持读取原生记录');
+            return unwrap(await session.readSnapshot());
+          });
+          const index = snapshot.turns.findIndex(turn => turn.nativeTurnRef.nativeTurnKey === binding.pendingNative);
+          const tail = index < 0 ? [] : snapshot.turns.slice(index);
+          const turn = tail.at(-1);
+          if (turn && tail.every(turn => turn.outcome.status !== 'unknown')) {
+            confirmed = true;
+            const text = tail.flatMap(turn => turn.items.flatMap(entry => entry.item.type === 'agentMessage' ? [entry.item.text] : [])).join('\n');
+            detail = `已核对原生记录：${turn.outcome.status}。${text ? `\n原生回复：\n${text}` : ''}`;
+          }
+        } catch { /* Unavailable history is not evidence that resubmission is safe. */ }
+      }
+      if (confirmed || action === 'unlock') {
+        const live = this.runner.live.get(sessionId);
+        if (live) { await live.session.close(); this.runner.live.delete(sessionId); }
+        const marker = `Harness recovery ${binding.pending}`;
+        if (!agent.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.source.kind === 'plugin' && event.data.source.form === 'notice' && event.data.source.summary === marker)) {
+          agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice', summary: marker },
+            content: [{ type: 'text', text: confirmed ? detail : '用户已手动解除暂停，保留原生上下文；上次请求结果仍不明确，未重发。' }] }), { surfaceOp: 'append' });
+          await this.ctx.sessions.flush(agent.session);
+        }
+        const turnNumber = Number(binding.pending.split(':').at(-1));
+        if (binding.pendingNative && Number.isSafeInteger(turnNumber)) binding.turns = [...(binding.turns ?? []).filter(entry => entry.turn !== turnNumber), { turn: turnNumber, key: binding.pendingNative }];
+        delete binding.pending; delete binding.pendingNative;
+        await this.bindings.write(binding);
+      }
+      if (!binding.pending) void this.bindings.delegated().then(bindings => Promise.allSettled(bindings.filter(child => child.delegation?.parentSessionId === sessionId).map(child => this.notifyDelegation(child.sessionId)))).catch(() => {});
+      return { ...this.view(binding), detail };
+    });
+  }
+
+  async rollback(raw: unknown) {
+    const { sessionId } = address.parse(raw);
+    return this.bindings.serial(sessionId, async () => {
+      const agent = await this.agent(sessionId), binding = await this.bindings.read(sessionId);
+      if (!binding || binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先结束当前请求并处理未确认结果');
+      const ref = await this.withSession(binding, async session => {
+        if (!session.fork || !session.readSnapshot) throw new Error('Harness 未提供历史操作');
+        const snapshot = unwrap(await session.readSnapshot());
+        if (!snapshot.turns.length) throw new Error('没有可回滚的对话');
+        const currentKey = binding.turns?.at(-1)?.key;
+        const index = currentKey ? snapshot.turns.findIndex(turn => turn.nativeTurnRef.nativeTurnKey === currentKey) : snapshot.turns.length - 1;
+        if (index < 0) throw new Error('无法确认最后一轮的原生边界');
+        const previous = snapshot.turns[index - 1]?.nativeTurnRef.nativeTurnKey;
+        return unwrap(await session.fork(previous ?? null));
+      });
+      const live = this.runner.live.get(sessionId);
+      if (live) { await live.session.close(); this.runner.live.delete(sessionId); }
+      if (ref) binding.nativeRef = ref; else delete binding.nativeRef;
+      binding.turns = (binding.turns ?? []).slice(0, -1);
+      delete binding.usage;
+      await this.bindings.write(binding);
+      agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice', summary: '对话已回滚' },
+        content: [{ type: 'text', text: '已撤销最后一轮原生对话上下文，工作区文件保持原状。上方原记录保留供查阅，后续对话从回滚位置继续。' }] }), { surfaceOp: 'append' });
+      await this.ctx.sessions.flush(agent.session);
+      return this.view(binding);
+    });
+  }
+
+  async secretStatus(raw: unknown) {
+    const { sessionId } = address.parse(raw);
+    await this.agent(sessionId);
+    return this.runner.secrets.read(sessionId);
+  }
+  async answerSecret(raw: unknown) {
+    const { sessionId, id, answers, cancelled } = secretAnswerRequest.parse(raw);
+    await this.agent(sessionId);
+    this.runner.secrets.answer(sessionId, id, { type: 'question', answers, ...(cancelled ? { cancelled } : {}) });
+    return { accepted: true };
   }
 
   async state(raw: unknown) {
     const { sessionId } = address.parse(raw);
     const agent = await this.agent(sessionId); // Same authorization/ownership rules as native Session commands.
     const binding = await this.bindings.read(sessionId);
+    if (binding?.pending && agent.status !== 'running' && !agent.inbox.nextTurn.length && !agent.inbox.nextStep.length) {
+      await this.recover({ sessionId, action: 'check' });
+      return this.view(await this.bindings.read(sessionId));
+    }
     if (binding || !this.fresh(agent)) return this.view(binding);
     // A fresh session starts on the Harness picked last time; failures fall back to native silently.
     const remembered = (await this.bindings.readDefaults()).harness;
@@ -124,7 +246,9 @@ export class HarnessService extends TypertRemoteService {
           const inspection = await this.inspection({ version: 1, sessionId, harness: request.harness, cwd, locked: false });
           if ('error' in inspection) throw new Error(inspection.error);
           const parentBinding = await this.bindings.read(source);
-          const permission = parentBinding?.harness === request.harness ? parentBinding.permission
+          const nativeSandbox = this.ctx.get('sessionProjections')?.stateOf(parent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
+          const permission = !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox]
+            : parentBinding?.harness === request.harness ? parentBinding.permission
             : request.harness === 'codex' ? (parentBinding?.permission === 'bypassPermissions' ? 'dangerFullAccess' : 'readOnly')
               : parentBinding?.permission === 'dangerFullAccess' ? 'bypassPermissions' : 'default';
           if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
@@ -153,20 +277,48 @@ export class HarnessService extends TypertRemoteService {
 
   async readDelegation(source: string, raw: unknown) {
     await this.agent(source);
-    const { sessionId } = address.parse(raw);
+    const { sessionId, offset, limit, throughSeq } = delegationReadRequest.parse(raw);
     const binding = await this.bindings.read(sessionId);
     if (binding?.delegation?.parentSessionId !== source) throw new Error('只能读取由本会话创建的委派会话');
     const agent = await this.agent(sessionId);
-    const events = agent.session.snapshotEvents();
+    const all = agent.session.snapshotEvents();
+    const boundary = throughSeq ?? all.at(-1)?.seq ?? 0;
+    const events = all.filter(event => event.seq <= boundary);
     const end = events.findLast(event => event.type === 'turn/end');
     const queued = agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0;
     const text = events.flatMap(event => event.type === 'assistant/message' ? event.data.message.content.flatMap(part => part.type === 'text' ? [part.text] : []) : []).join('\n\n');
     return { sessionId, harness: binding.harness, status: agent.status === 'running' ? 'running' : queued ? 'queued'
       : binding.pending || (binding.locked && !end) ? 'recovery-required' : end?.type === 'turn/end' ? end.data.reason.kind : 'idle',
       outcome: end?.type === 'turn/end' ? end.data.reason : null,
-      // ponytail: return the latest 32k characters; the full transcript stays in the DSH session.
-      text: text.slice(-32_000), truncated: text.length > 32_000,
+      text: text.slice(offset, offset + limit), truncated: offset + limit < text.length, totalChars: text.length, throughSeq: boundary,
+      nextOffset: offset + limit < text.length ? offset + limit : null,
     };
+  }
+
+  private async notifyDelegation(id: string): Promise<void> {
+    await this.bindings.serial(`notify:${id}`, async () => {
+      if (!(await this.bindings.read(id))?.delegation) return;
+      const child = await this.agent(id);
+      await child.whenIdle();
+      const binding = await this.bindings.read(id);
+      if (!binding?.delegation) return;
+      const end = child.session.snapshotEvents().findLast(event => event.type === 'turn/end');
+      if (!end || (binding.delegation.notifiedSeq ?? -1) >= end.seq) return;
+      const parentId = binding.delegation.parentSessionId;
+      if ((await this.bindings.read(parentId))?.pending && this.ctx.agents.get(SessionId(parentId))?.status !== 'running') return;
+      const parent = await this.agent(parentId);
+      if (this.stopped) return;
+      const marker = `DSH delegation ${id}:${end.seq}`;
+      const delivered = (message: { source: unknown }) => { const source = message.source as { kind?: string; summary?: string }; return source.kind === 'plugin' && source.summary === marker; };
+      if (!parent.inbox.nextTurn.some(delivered) && !parent.inbox.nextStep.some(delivered)
+        && !parent.session.snapshotEvents().some(event => event.type === 'user/message' && delivered(event.data))) {
+        parent.followup(createUserMessage({ source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice', summary: marker },
+          content: [{ type: 'text', text: `委派会话 ${id} 已结束，状态：${end.data.reason.kind}。请使用委派查询入口分页读取完整结果，然后继续原任务。不要重复创建该任务。` }] }));
+        await this.ctx.sessions.flush(parent.session);
+      }
+      binding.delegation.notifiedSeq = end.seq;
+      await this.bindings.write(binding);
+    });
   }
 
   async select(raw: unknown) {
@@ -397,30 +549,67 @@ export class HarnessService extends TypertRemoteService {
       signal.throwIfAborted();
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) return native.prompt(request, signal);
-      if (request.mode === 'steer') throw new RemoteError('gateway/bad-request', '外部 Harness 首版只支持排队发送', {});
-      if (!request.content.length || request.content.some(part => part.type !== 'text')
-        || !request.content.some(part => part.type === 'text' && part.text.trim())) {
-        throw new RemoteError('gateway/bad-request', '外部 Harness 首版只接受非空文本', {});
-      }
+      if (!request.content.some(part => part.type !== 'text' || part.text.trim())) throw new RemoteError('gateway/bad-request', '请输入文字或上传附件', {});
       const agent = await this.agent(request.sessionId);
       const matches = (message: { source: unknown }) => {
         const source = message.source as { kind?: string; rpcId?: string };
         return source.kind === 'user' && source.rpcId === request.requestId;
       };
-      if (agent.inbox.nextTurn.some(matches) || agent.inbox.nextStep.some(matches)
+      if (this.runner.pendingSteering(request.sessionId).some(matches) || agent.inbox.nextTurn.some(matches) || agent.inbox.nextStep.some(matches)
         || agent.session.snapshotEvents().some(event => event.type === 'user/message' && matches(event.data))) return { accepted: true };
       if (binding.pending && agent.status !== 'running') throw new RemoteError('gateway/bad-request', '上次 Harness 请求结果未确认，已暂停发送以避免重复执行', {});
       if (!binding.locked) { binding.locked = true; await this.bindings.write(binding); }
       signal.throwIfAborted();
-      agent.followup(createUserMessage({ content: request.content.map(part => {
-        if (part.type !== 'text') throw new Error('Text prompt required');
-        return { type: 'text', text: part.text };
-      }), source: { kind: 'user', rpcId: request.requestId, ...(request.clientTimeZone ? { clientTimeZone: request.clientTimeZone } : {}) } }));
+      const receiptIds = request.content.flatMap(part => part.type === 'file' ? [part.receiptId] : []);
+      const admission = request.content.map(part => {
+        if (part.type !== 'file') return part;
+        const attachment = ctx.fileUploads.resolve(agent, part.receiptId);
+        if (!attachment) throw new RemoteError('session/attachment-invalid', '附件不属于当前会话或上传已过期', { reason: 'FILE_NOT_STAGED' });
+        return { type: 'file' as const, attachment };
+      });
+      const content = admission.every(part => part.type === 'text') ? admission : await ctx.attachments.admitPromptContent(admission);
+      signal.throwIfAborted();
+      if (ctx.agents.get(agent.id) !== agent) throw new Error('会话已关闭');
+      const receiptBinding = receiptIds.length ? ctx.fileUploads.bindPrompt(agent, receiptIds, request.requestId) : undefined;
+      try {
+        const message = createUserMessage({ content, source: { kind: 'user', rpcId: request.requestId,
+          ...(request.clientTimeZone ? { clientTimeZone: request.clientTimeZone } : {}) } });
+        if (request.mode === 'steer') agent.steer(message); else agent.followup(message);
+        receiptBinding?.commit();
+      } finally { receiptBinding?.[Symbol.dispose](); }
       return { accepted: true };
     });
     const fork: typeof controller.fork = async request => {
-      if (await this.bindings.read(request.sessionId)) throw new RemoteError('gateway/bad-request', '此 Harness 尚未实现原生会话分支', {});
-      return native.fork(request);
+      return this.bindings.serial(request.sessionId, async () => {
+        const binding = await this.bindings.read(request.sessionId);
+        if (!binding) return native.fork(request);
+        const agent = await this.agent(request.sessionId);
+        if (binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先等待当前请求结束');
+        let throughTurn: string | undefined;
+        if (request.atSeq !== undefined) {
+          const boundary = agent.session.snapshotEvents().find(event => event.type === 'turn/end' && event.seq >= request.atSeq!);
+          throughTurn = boundary?.type === 'turn/end' ? binding.turns?.find(entry => entry.turn === boundary.data.turn)?.key : undefined;
+          if (!throughTurn) throw new Error('所选位置没有可确认的原生轮次边界，请选择更新后的已完成轮次');
+        }
+        const nativeRef = await this.withSession(binding, async session => {
+          if (!session.fork) throw new Error('Harness 未提供原生会话分支');
+          let nativeBoundary = throughTurn;
+          if (throughTurn && session.readSnapshot) {
+            const history = unwrap(await session.readSnapshot()).turns;
+            const nextKey = binding.turns?.[(binding.turns.findIndex(entry => entry.key === throughTurn)) + 1]?.key;
+            const next = nextKey ? history.findIndex(turn => turn.nativeTurnRef.nativeTurnKey === nextKey) : history.length;
+            if (next < 1) throw new Error('无法确认分支末尾的原生边界');
+            nativeBoundary = history[next - 1]?.nativeTurnRef.nativeTurnKey;
+          }
+          return unwrap(await session.fork(nativeBoundary));
+        });
+        const child = await native.fork(request);
+        await this.bindings.serial(child.sessionId, async () => {
+          const cut = throughTurn ? (binding.turns ?? []).findIndex(entry => entry.key === throughTurn) + 1 : binding.turns?.length;
+          await this.bindings.write({ ...binding, sessionId: child.sessionId, nativeRef, delegation: undefined, turns: binding.turns?.slice(0, cut) });
+        });
+        return child;
+      });
     };
     const selectModel: typeof controller.selectModel = async request => {
       if (await this.bindings.read(request.sessionId)) throw new RemoteError('gateway/bad-request', '请使用 Harness 模型选择器', {});
@@ -428,7 +617,6 @@ export class HarnessService extends TypertRemoteService {
     };
     // Synchronous queue API cannot read a sidecar. For attached external sessions the runner owns this identity.
     const updateQueue: typeof controller.updateQueue = request => {
-      if (request.action.kind === 'steer' && this.runner.live.has(request.sessionId)) throw new RemoteError('gateway/bad-request', '外部 Harness 首版不支持插入当前轮', {});
       return native.updateQueue(request);
     };
     ctx.effect(() => {

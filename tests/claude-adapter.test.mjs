@@ -198,3 +198,45 @@ test('inspection exposes models, thinking and permission catalogs, and plan-limi
   assert.equal((await missing.inspect({ cwd: '/workspace' })).status, 'notInstalled');
   await adapter.close();
 });
+
+
+test('public thinking summaries survive snapshots without duplicating streamed text', async () => {
+  const sdk = fakeSdk();
+  const { adapter, session, out } = await openSession(sdk);
+  try {
+    const q = await startTurn(sdk, session, 'summaries');
+    assert.deepEqual(q.options.thinking, { type: 'adaptive', display: 'summarized' });
+    const stream = event => q.push({ type: 'stream_event', parent_tool_use_id: null, event });
+    stream({ type: 'message_start', message: { id: 'streamed' } });
+    stream({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Checking' } });
+    q.push(assistant('streamed', [{ type: 'thinking', thinking: 'Checking files' }]));
+    q.push(assistant('streamed', [{ type: 'thinking', thinking: 'Checking files' }]));
+    q.push(assistant('snapshot', [{ type: 'thinking', thinking: 'Reviewing tests' }]));
+    q.push(assistant('snapshot', [{ type: 'thinking', thinking: 'Reviewing tests' }]));
+    stream({ type: 'message_start', message: { id: 'different' } });
+    stream({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'Public streamed summary' } });
+    q.push(assistant('different', [{ type: 'thinking', thinking: 'Different snapshot' }]));
+    q.push(assistant('hidden', [{ type: 'redacted_thinking', data: 'opaque' }, { type: 'thinking', thinking: '' }]));
+    q.push(result({}));
+    assert.equal((await out.until(eventOf('turn.completed'))).event.outcome.status, 'succeeded');
+    const summaries = out.seen.filter(eventOf('item.completed')).map(o => o.event.snapshot.item).filter(i => i.type === 'reasoning');
+    assert.deepEqual(summaries.map(i => i.text), ['Checking files', 'Reviewing tests', 'Public streamed summary']);
+  } finally { await adapter.close(); }
+});
+
+
+test('Claude accepts image-only input and appends steering to its active native input stream', async () => {
+  const sdk=fakeSdk(), {adapter,session,out}=await openSession(sdk);
+  try {
+    unwrap(await session.execute({type:'turn.start',turnId:'images',input:[{type:'image',mimeType:'image/png',base64Data:'aGVsbG8='}]}));
+    await tick();const q=sdk.queries.at(-1);
+    assert.equal(q.prompts[0].message.content[0].source.media_type,'image/png');
+    unwrap(await session.steer([{type:'text',text:'Look at the corner'}]));await tick();
+    assert.equal(q.prompts[1].message.content[0].text,'Look at the corner');
+    q.push(result({}));await tick();
+    q.push(assistant('steered',[{type:'text',text:'Steering handled'}]));q.push(result({}));
+    await out.until(eventOf('turn.completed'));
+    assert.ok(out.seen.filter(eventOf('item.completed')).some(o=>o.event.snapshot.item.text==='Steering handled'));
+    assert.equal((await session.steer([{type:'text',text:'late'}])).ok,false);
+  } finally {await adapter.close();}
+});

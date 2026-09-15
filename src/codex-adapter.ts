@@ -12,6 +12,7 @@ import {
   harnessIdSchema, harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, hostInteractionIdSchema,
   hostItemIdSchema, type HostTurnId, type HarnessAccountSnapshot,
 } from './contracts.js';
+import { nativeSessionRefSchema, type NativeSessionRef } from './contracts.js';
 import { z } from 'zod';
 import pkg from '../package.json' with { type: 'json' };
 import { CodexRpc, type RpcId, type RpcMessage, type RpcOptions } from './codex-rpc.js';
@@ -20,7 +21,7 @@ import { itemOf, snapshotItem, nativeTurn, object, turnSnapshot } from './codex-
 const id = harnessIdSchema.parse('codex');
 const capabilities = {
   configuration: { selectModel: true, selectThinkingOption: true, selectPermissionMode: true, permissionModeScope: 'live' as const },
-  history: { fork: false, forkAcrossCwd: false, rollbackLastTurn: false },
+  history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
 };
 const opened = z.object({
   thread: z.object({ id: z.string().min(1), cwd: z.string(), ephemeral: z.boolean(), turns: z.array(z.unknown()) }).passthrough(),
@@ -162,7 +163,7 @@ export class CodexAdapter implements HarnessAdapter {
   async open(input: OpenSessionInput): Promise<HarnessResult<HarnessSession>> {
     if (this.closing) return errorResult(new Error('Codex adapter closed'));
     if (input.kind !== 'create' && input.kind !== 'resume') {
-      return { ok: false, error: { code: 'unsupported', message: 'Codex fork and rollback are not implemented', retryable: false } };
+      return { ok: false, error: { code: 'unsupported', message: 'Unsupported Codex session open mode', retryable: false } };
     }
     if (input.kind === 'resume' && input.nativeRef.harnessId !== id) return errorResult(new Error('Wrong native Harness identity'));
     const work = CodexSession.open(this.options, input);
@@ -214,7 +215,7 @@ class CodexSession implements HarnessSession {
   private start?: Promise<unknown>;
   private readonly interactions = new Map<string, { rpcId: RpcId; interaction: HostInteraction }>();
 
-  private constructor(private readonly options: CodexOptions, cwd: string) {
+  private constructor(private readonly options: CodexOptions, private readonly cwd: string) {
     this.rpc = new CodexRpc({ ...options, cwd, onMessage: message => this.receive(message), onFault: error => this.fail(error) });
   }
 
@@ -246,6 +247,30 @@ class CodexSession implements HarnessSession {
     } catch (error) { await session.rpc.close(); throw error; }
   }
 
+  async fork(throughTurn?: string | null): Promise<HarnessResult<NativeSessionRef | undefined>> {
+    if (this.active || this.fault || this.closing) return errorResult(new Error('请等待原生会话结束后再分支'));
+    if (throughTurn === null) return { ok: true, value: undefined };
+    // Forking loads a writer in the app-server. A short-lived process guarantees its release before resume.
+    const rpc = new CodexRpc({ ...this.options, cwd: this.cwd, onMessage: () => {}, onFault: () => {} });
+    try {
+      await initialize(rpc);
+      const response = opened.parse(await rpc.request('thread/fork', { threadId: this.threadId, ephemeral: false, ...(throughTurn ? { lastTurnId: throughTurn } : {}) }));
+      if (response.thread.id === this.threadId || response.thread.cwd !== this.cwd) throw new Error('Codex 返回了错误的分支身份');
+      return { ok: true, value: nativeSessionRefSchema.parse({ harnessId: id, nativeSessionId: response.thread.id, formatVersion: 1 }) };
+    } catch (error) { return errorResult(error); }
+    finally { await rpc.close(); }
+  }
+
+  async steer(input: import('./contracts.js').HostInput[]): Promise<HarnessResult<{ accepted: true }>> {
+    try {
+      await this.start;
+      if (!this.active?.nativeId) throw new Error('当前没有可插入的原生轮次');
+      await this.rpc.request('turn/steer', { threadId: this.threadId, expectedTurnId: this.active.nativeId,
+        input: input.map(part => part.type === 'image' ? { type: 'image', url: `data:${part.mimeType};base64,${part.base64Data}` } : { type: 'text', text: part.text, text_elements: [] }) });
+      return { ok: true, value: { accepted: true } };
+    } catch (error) { return errorResult(error); }
+  }
+
   async readSnapshot(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>> {
     try {
       if (this.fault) return { ok: false, error: this.fault };
@@ -271,14 +296,14 @@ class CodexSession implements HarnessSession {
       switch (command.type) {
         case 'turn.start': {
           if (this.active) return { ok: false, error: { code: 'sessionBusy', message: 'Codex turn is active', retryable: true } };
-          if (!command.input.length || command.input.some(part => part.type !== 'text') || !command.input.some(part => part.text.trim())) {
+          if (!command.input.length || !command.input.some(part => part.type === 'image' ? part.base64Data.length > 0 : part.text.trim())) {
             return { ok: false, error: { code: 'invalidRequest', message: 'A non-empty text prompt is required', retryable: false } };
           }
           const active: ActiveTurn = { hostId: command.turnId, started: false, done: Promise.withResolvers<void>() };
           this.active = active;
           const work = this.rpc.request('turn/start', {
             threadId: this.threadId,
-            input: command.input.map(part => ({ type: 'text', text: part.text, text_elements: [] })),
+            input: command.input.map(part => part.type === 'image' ? { type: 'image', url: `data:${part.mimeType};base64,${part.base64Data}` } : { type: 'text', text: part.text, text_elements: [] }),
             ...(this.initialState.effectiveModel ? { model: this.initialState.effectiveModel.id } : {}),
             ...(this.initialState.effectiveThinkingOptionId ? { effort: this.initialState.effectiveThinkingOptionId } : {}),
             ...(this.initialState.effectivePermissionModeId && permissionModeOf(this.initialState.effectivePermissionModeId)
@@ -336,7 +361,7 @@ class CodexSession implements HarnessSession {
   private identify(active: ActiveTurn, nativeId: string): void {
     if (active.nativeId && active.nativeId !== nativeId) throw new Error('Codex turn identity mismatch');
     active.nativeId = nativeId;
-    if (!active.started) { active.started = true; this.emit({ type: 'turn.started', turnId: active.hostId }); }
+    if (!active.started) { active.started = true; this.emit({ type: 'turn.started', turnId: active.hostId, nativeTurnRef: { harnessId: id, nativeSessionId: this.threadId!, nativeTurnKey: nativeId, formatVersion: 1 } }); }
   }
 
   private receive(message: RpcMessage): void {

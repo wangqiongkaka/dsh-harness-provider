@@ -8,6 +8,8 @@ export const delegationRequest = z.object({
   prompt: z.string().trim().min(1).max(64_000),
 }).strict();
 
+export const delegationReadRequest = z.object({ sessionId: z.string().min(1), offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(64_000).default(32_000), throughSeq: z.number().int().nonnegative().optional() }).strict();
+
 /** Loopback-only, per-source credentials; no Host Runtime or global CLI configuration. */
 export class DelegationBridge {
   private server?: Server;
@@ -82,7 +84,7 @@ export function delegationInstructions(): string {
 用户明确要求使用指定 harness 或新会话做 review/审查时，使用以下入口创建同工作区的全新 DSH 会话，左侧会话区会显示进度。
 ${command} create '{"requestId":"唯一请求标识","harness":"codex","prompt":"完整审查任务、改动范围和验收要求；只审查，不修改文件"}'
 harness 支持 codex、claude-code。新会话没有本会话历史，必须写全任务。requestId 每个新任务使用唯一值；失败重试必须使用相同 requestId 和参数。
-返回 sessionId 只表示任务已提交。使用 ${command} read '<sessionId>' 查看状态与回复，完成后再汇报审查结果；执行中隔一段时间再查。truncated 为 true 时不能声称已经读取完整结果，应提示用户在目标会话查看全文。
+返回 sessionId 只表示任务已提交。使用 ${command} read '<sessionId>' 查看状态与回复，完成后宿主自动通知并唤醒来源会话。结果按字符分页；nextOffset 非空时，用 read '{"sessionId":"目标 ID","offset":下一偏移,"throughSeq":首次返回的 throughSeq}' 继续读取，直到 nextOffset 为 null 才算读完。
 此入口独立于 codexhost delegate；不要用 codex exec review 替代可见会话。环境凭据已注入，不要打印或写入消息。
 [/DSH 会话能力]`;
 }

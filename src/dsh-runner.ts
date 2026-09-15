@@ -5,6 +5,8 @@ import type {} from '@deepseek-ai/dsh-user-questions';
 import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HostInteraction, HostInteractionResponse, HarnessSessionState, HostUsage } from './contracts.js';
 import { hostTurnIdSchema } from './contracts.js';
 import { Bindings, type Binding } from './bindings.js';
+import { SecretQuestions } from './secret-questions.js';
+import { harnessInput } from './media.js';
 import { DshOutput } from './dsh-output.js';
 import { delegationInstructions, type DelegationBridge } from './delegation.js';
 
@@ -12,7 +14,7 @@ export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
 }
-type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; queue: HarnessOutput[]; ended: boolean; wake: () => void };
+type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; queue: HarnessOutput[]; ended: boolean; wake: () => void; turnId?: import('./contracts.js').HostTurnId; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
 /** Drains the native session continuously: usage readings land as they arrive (also between turns), everything else queues for the turn loop. */
 function pump(live: Live): void {
   void (async () => {
@@ -50,17 +52,35 @@ async function take(live: Live): Promise<HarnessOutput | undefined> {
 export class DshRunner {
   readonly live = new Map<string, Live>();
   constructor(private readonly ctx: Context, private readonly bindings: Bindings,
-    private readonly adapters: Record<Binding['harness'], HarnessAdapter>, private readonly delegation?: DelegationBridge) {}
+    private readonly adapters: Record<Binding['harness'], HarnessAdapter>, private readonly delegation?: DelegationBridge, readonly secrets = new SecretQuestions()) {}
+
+  pendingSteering(id: string): readonly UserMessage[] { return this.live.get(id)?.steerMessages ?? []; }
+
+  drainSteering(agent: Agent): void {
+    const live = this.live.get(agent.id);
+    if (!live?.turnId || !live.session.steer) return;
+    for (const message of [...agent.inbox.nextStep]) {
+      (live.steerMessages ??= []).push(message);
+      agent.inbox.remove(message.id);
+      live.steering = (live.steering ?? Promise.resolve()).then(async () => {
+        await live.ready;
+        const input = await harnessInput(this.ctx, [message], new AbortController().signal);
+        agent.session.append('user/message', message, { surfaceOp: 'append' });
+        await this.ctx.sessions.flush(agent.session);
+        unwrap(await live.session.steer!(input));
+      }).catch(async error => {
+        live.steerError = error;
+        agent.cancel({ kind: 'user' }, { keepInbox: true });
+      });
+    }
+  }
 
   async run(payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, binding: Binding): Promise<void> {
     const { agent, messages, turn, step, signal } = payload;
     signal.throwIfAborted();
     if (binding.cwd !== agent.session.header.cwd) throw new Error('Harness workspace identity mismatch');
     if (binding.pending) throw new Error('上次 Harness 请求的结果尚未确认；为避免重复执行，本会话暂停发送。');
-    const input = messages.flatMap(message => message.content.map(part => {
-      if (part.type !== 'text') throw new Error('首版 Harness 只接受文本输入');
-      return { type: 'text' as const, text: part.text };
-    }));
+    const input = await harnessInput(this.ctx, messages, signal);
     if (!input.length) throw new Error('Harness prompt is empty');
     if (this.delegation) input.unshift({ type: 'text', text: delegationInstructions() });
     let live = this.live.get(agent.id);
@@ -115,7 +135,10 @@ export class DshRunner {
       await this.bindings.write(binding);
       signal.throwIfAborted();
       submitted = true;
+      current.turnId = turnId; current.steerError = undefined; current.steerMessages = [];
       const starting = current.session.execute({ type: 'turn.start', turnId, input });
+      current.ready = starting;
+      this.drainSteering(agent);
       signal.addEventListener('abort', cancel, { once: true });
       if (signal.aborted) cancel();
       unwrap(await starting);
@@ -135,15 +158,23 @@ export class DshRunner {
         if (event.type === 'session.faulted') throw new Error(event.error.message);
         if (!('turnId' in event) || event.turnId !== turnId) continue;
         switch (event.type) {
+          case 'interaction.closed': this.secrets.cancel(agent.id, event.interactionId); break;
+          case 'turn.started':
+            if (event.nativeTurnRef) { binding.pendingNative = event.nativeTurnRef.nativeTurnKey; await this.bindings.write(binding); }
+            break;
           case 'item.started': output.start(event.item); break;
           case 'item.updated': output.update(event.itemId, event.update); break;
-          case 'item.completed': output.complete(event.snapshot); break;
+          case 'item.completed': await output.complete(event.snapshot); break;
           case 'turn.completed': {
-            output.finish(usageDelta(usageBefore, current.usage));
+            current.turnId = undefined;
+            await current.steering;
+            if (current.steerError) throw new Error('插入请求的结果未确认，已暂停会话；请核对原生记录后恢复');
+            await output.finish(usageDelta(usageBefore, current.usage));
             await this.ctx.sessions.flush(agent.session);
             const uncertain = event.outcome.status === 'failed' && ['processExited', 'protocolError', 'internalError'].includes(event.outcome.error.code);
             if (current.usage) binding.usage = Object.fromEntries(USAGE_KEYS.flatMap(key => current.usage![key] !== undefined ? [[key, current.usage![key]]] : []));
-            if (!uncertain) delete binding.pending;
+            if (event.nativeTurnRef) binding.turns = [...(binding.turns ?? []).filter(entry => entry.turn !== turn), { turn, key: event.nativeTurnRef.nativeTurnKey }];
+            if (!uncertain) { delete binding.pending; delete binding.pendingNative; }
             await this.bindings.write(binding);
             completed = true;
             if (event.outcome.status === 'failed') throw new Error(event.outcome.error.message);
@@ -165,11 +196,13 @@ export class DshRunner {
       }
       throw error;
     } finally {
+      current.turnId = undefined;
+      await current.steering;
       signal.removeEventListener('abort', cancel);
       turnAbort.abort();
       await Promise.allSettled(questions);
       await cancelWork;
-      try { output.finish(); } finally { agent.session.append('step/end', { turn, step }); }
+      try { await output.finish(); } finally { agent.session.append('step/end', { turn, step }); }
     }
   }
 
@@ -187,7 +220,11 @@ export class DshRunner {
 
   private async answer(agent: Agent, interaction: HostInteraction, signal: AbortSignal, session: HarnessSession): Promise<void> {
     if (interaction.type === 'question' && interaction.questions.some(q => q.type === 'text' && q.secret)) {
-      throw new Error('DSH 的通用问答框不支持密码输入，已停止该请求');
+      const response = await this.secrets.ask(agent.id, interaction, signal);
+      if (!response) return;
+      signal.throwIfAborted();
+      unwrap(await session.execute({ type: 'interaction.respond', interactionId: interaction.interactionId, response }));
+      return;
     }
     const questions = interaction.type === 'approval' ? [{
       id: 'approval', question: interaction.title, detail: interaction.description,

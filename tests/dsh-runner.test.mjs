@@ -40,6 +40,9 @@ function fakeAdapter(log,native) {
      emit({type:'turn.started',turnId:active});
      const text=command.input.map(p=>p.text).join('|');
      if(text==='broken'){emit({type:'item.completed',turnId:active,snapshot:{item:{type:'agentMessage',itemId:'answer',text:'reply:broken'},outcome:{status:'succeeded'}}});emit({type:'item.updated',turnId:active,itemId:'unknown-item',update:{type:'text.append',text:'invalid'}});return {ok:true,value:{turnId:active}};}
+     emit({type:'item.started',turnId:active,item:{type:'reasoning',itemId:'reasoning',text:''}});
+     emit({type:'item.updated',turnId:active,itemId:'reasoning',update:{type:'text.append',text:'Checking the workspace'}});
+     emit({type:'item.completed',turnId:active,snapshot:{item:{type:'reasoning',itemId:'reasoning',text:'Checking the workspace'},outcome:{status:'succeeded'}}});
      emit({type:'item.started',turnId:active,item:{type:'agentMessage',itemId:'answer',text:''}});
      emit({type:'item.updated',turnId:active,itemId:'answer',update:{type:'text.append',text:'reply:'+text}});
      if(text==='wait') return {ok:true,value:{turnId:active}};
@@ -53,6 +56,7 @@ function fakeAdapter(log,native) {
      emit({type:'turn.completed',turnId:active,outcome:{status:'succeeded'}});
      active=undefined;return {ok:true,value:{turnId:command.turnId}};
     },
+    async steer(input){log.push({kind:'steer',input});return {ok:true,value:{accepted:true}};},
     async close(){if(active) await session.execute({type:'turn.cancel',turnId:active});channel.end();},
    };
    sessions.push(session);return {ok:true,value:session};
@@ -74,6 +78,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   const adapter=fakeAdapter(logs,native);
   const runner=new DshRunner(ctx,bindings,{codex:adapter});
   ctx.on('agent/assistant-stream',({frame})=>frames.push(frame));
+  ctx.on('agent/inbox/inserted',({agent})=>runner.drainSteering(agent));
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
   await ctx.plugin(Loop,{agents:[]});return {ctx,adapter};
  }
@@ -86,11 +91,16 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   const ends=agent.session.snapshotEvents().filter(e=>e.type==='turn/end');
   assert.deepEqual(ends.map(e=>e.data.reason.kind),['completed','completed']);
   assert.equal(agent.session.snapshotEvents().filter(e=>e.type==='tool/result').length,2);
+  const calls=agent.session.snapshotEvents().filter(e=>e.type==='tool/call');
+  assert.deepEqual(calls.map(e=>e.data.name),['bash','bash']);
+  assert.equal(JSON.parse(calls[0].data.arguments).command,'pwd');
   assert.equal(frames.filter(f=>f.type==='chunk' && f.chunk.type==='text-delta').length,4);
   // The turn's usage delta rides the last agent message; earlier messages of the turn carry none.
   const answers=agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='text');
   assert.deepEqual(answers.map(e=>e.data.usage),[undefined,{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0},undefined,{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0}]);
-  assert.equal(frames.filter(f=>f.type==='end').length,4);
+  assert.equal(frames.filter(f=>f.type==='end').length,6);
+  assert.deepEqual(frames.filter(f=>f.type==='chunk' && f.chunk.type==='reasoning-delta').map(f=>f.chunk.text),['Checking the workspace','Checking the workspace']);
+  assert.deepEqual(agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='reasoning').map(e=>e.data.message.content[0].text),['Checking the workspace','Checking the workspace']);
   assert.equal((await bindings.read(id)).pending,undefined);
   validateStoredEvents(agent.session.header,structuredClone(agent.session.snapshotEvents()));
   await first.ctx.fiber.dispose();await first.adapter.close();
@@ -107,6 +117,11 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   const started=Promise.withResolvers();
   const dispose=second.ctx.on('agent/assistant-stream',({frame})=>{if(frame.type==='chunk' && frame.chunk.type==='text-delta' && frame.chunk.text==='reply:wait') started.resolve();});
   const waiting=prompt(resumed.agent,'wait');await started.promise;
+  resumed.agent.steer(createUserMessage({content:[{type:'text',text:'insert now'}],source:{kind:'user'}}));
+  for(let i=0;i<100 && !logs.some(entry=>entry.kind==='steer');i++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.deepEqual(logs.find(entry=>entry.kind==='steer').input,[{type:'text',text:'insert now'}]);
+  assert.equal(resumed.agent.inbox.nextStep.length,0);
+  assert.equal(resumed.agent.session.snapshotEvents().filter(e=>e.type==='user/message' && e.data.content[0]?.text==='insert now').length,1);
   resumed.agent.cancel({kind:'user'});await waiting;dispose();
   const events=resumed.agent.session.snapshotEvents();
   assert.equal(events.filter(e=>e.type==='turn/end').at(-1).data.reason.kind,'aborted');

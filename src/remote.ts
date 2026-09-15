@@ -34,8 +34,17 @@ export const quotaSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('windows'), source: z.string(), plan: z.string().nullable(), windows: z.array(quotaWindowSchema) }),
   z.object({ kind: z.literal('balance'), source: z.string(), currency: z.string(), total: z.string(), granted: z.string(), toppedUp: z.string() }),
 ]).nullable();
+export const recoveryRequest = address.extend({ action: z.enum(['check', 'unlock']) });
+export const recoverySchema = stateSchema.extend({ detail: z.string() });
+export const secretAnswerRequest = address.extend({ id: z.string().min(1), answers: z.record(z.string(), z.array(z.string().min(1).max(64_000))), cancelled: z.boolean().optional() });
+export const secretStatusSchema = z.object({ id: z.string(), title: z.string(), questions: z.array(z.discriminatedUnion('type', [
+  z.object({ id: z.string(), type: z.literal('text'), prompt: z.string(), secret: z.boolean(), multiline: z.boolean(), optional: z.boolean(), placeholder: z.string().optional() }),
+  z.object({ id: z.string(), type: z.literal('choice'), prompt: z.string(), multiple: z.boolean(), allowOther: z.boolean(), optional: z.boolean(), options: z.array(z.object({ value: z.string(), label: z.string(), description: z.string().optional() })) }),
+])) }).nullable();
 const codec = (schema: z.ZodType) => ({ mode: 'strict' as const, typeSymbol: 'dsh-harness-provider#Contract', create: () => schema });
 export const descriptors: InvocationDescriptor[] = [
+  ['recover', recoveryRequest, recoverySchema], ['rollback', address, stateSchema],
+  ['secretStatus', address, secretStatusSchema], ['answerSecret', secretAnswerRequest, z.object({ accepted: z.boolean() })],
   ['state', address, stateSchema], ['select', selectRequest, stateSchema],
   ['models', address, modelsSchema], ['selectModel', modelRequest, stateSchema],
   ['selectThinking', thinkingRequest, stateSchema], ['selectPermission', permissionRequest, stateSchema],

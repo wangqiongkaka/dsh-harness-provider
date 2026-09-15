@@ -1,9 +1,12 @@
+import { open } from 'node:fs/promises';
+import { isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { agentEvents, type Agent, type AssistantStreamFrame } from '@deepseek-ai/dsh-agent';
 import {
   AssistantStreamAccumulator, createAssistantMessage, createToolResultMessage, createUserMessage, LlmAttemptId, ToolCallId,
   type ContentBlock, type StreamChunk, type TokenUsage,
 } from '@deepseek-ai/dsh-llm';
+import type {} from '@deepseek-ai/dsh-attachment';
 import type { Context } from '@deepseek-ai/cordis';
 import type { SessionEventMap } from '@deepseek-ai/dsh-session';
 import type { HostItem, HostItemSnapshot, HostItemUpdate } from './contracts.js';
@@ -53,7 +56,7 @@ export class DshOutput {
     else throw new Error('Unsupported Harness item update');
   }
 
-  complete(snapshot: HostItemSnapshot, interrupted = false): void {
+  async complete(snapshot: HostItemSnapshot, interrupted = false): Promise<void> {
     const item = snapshot.item;
     if (!this.active.has(item.itemId)) this.start(item);
     const entry = this.active.get(item.itemId)!;
@@ -79,19 +82,19 @@ export class DshOutput {
       this.flush();
       this.agent.session.append('tool/result', { ...this.position,
         message: createToolResultMessage({ callId: ToolCallId(item.itemId),
-          content: toolOutput(item), isError: snapshot.outcome.status !== 'succeeded' }),
-        meta: { harnessItem: JSON.parse(JSON.stringify(item)), outcome: JSON.parse(JSON.stringify(snapshot.outcome)) },
+          content: await toolOutput(this.ctx, item), isError: snapshot.outcome.status !== 'succeeded' }),
+        meta: { harnessItem: JSON.parse(JSON.stringify(item.type === 'toolExecution' && item.output?.content.some(part => part.type !== 'text') ? { ...item, output: undefined } : item)), outcome: JSON.parse(JSON.stringify(snapshot.outcome)) },
       }, { surfaceOp: 'append' });
     }
     this.active.delete(item.itemId);
   }
 
-  interrupt(): void {
-    for (const entry of [...this.active.values()]) this.complete({ item: entry.item, outcome: { status: 'cancelled' } }, true);
+  async interrupt(): Promise<void> {
+    for (const entry of [...this.active.values()]) await this.complete({ item: entry.item, outcome: { status: 'cancelled' } }, true);
   }
   /** Commit the deferred agent message with the turn's token usage; without one, a surface-less attempt still carries the count. */
-  finish(usage?: TokenUsage): void {
-    this.interrupt();
+  async finish(usage?: TokenUsage): Promise<void> {
+    await this.interrupt();
     if (this.deferred || !usage) return this.flush(usage);
     const stream = new AssistantStreamAccumulator();
     stream.push({ time: Date.now(), chunk: { type: 'usage', usage } });
@@ -115,15 +118,34 @@ export class DshOutput {
   }
 }
 function toolCall(item: HostItem): Extract<ContentBlock, { type: 'tool-call' }> {
-  const name = item.type === 'toolExecution' ? item.toolName : item.type;
+  const name = item.type === 'commandExecution' ? 'bash' : item.type === 'toolExecution' ? item.toolName : item.type;
   const args = item.type === 'toolExecution' ? item.arguments : item;
   return { type: 'tool-call', id: ToolCallId(item.itemId), name, arguments: JSON.stringify(args) };
 }
-function toolOutput(item: HostItem): ContentBlock[] {
+async function toolOutput(ctx: Context, item: HostItem): Promise<ContentBlock[]> {
   if (item.type === 'commandExecution') return [{ type: 'text', text: item.output ?? '' }];
   if (item.type === 'toolExecution' && item.output) {
-    if (item.output.content.some(part => part.type !== 'text')) throw new Error('Harness image output needs an attachment importer');
-    return item.output.content.map(part => ({ type: 'text' as const, text: part.type === 'text' ? part.text : '' }));
+    const images = await Promise.all(item.output.content.filter(part => part.type !== 'text').map(async part => {
+      if (part.type === 'image') return part;
+      if (!isAbsolute(part.path)) throw new Error('工具图片需要绝对路径');
+      const file = await open(part.path, 'r');
+      try {
+        const stat = await file.stat(), limit = ctx.attachments.imageLimits.maxImageBytes;
+        if (!stat.isFile() || stat.size > limit) throw new Error('工具图片不是普通文件或超过大小限制');
+        const bytes = Buffer.alloc(Math.min(stat.size + 1, limit + 1));
+        const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+        if (bytesRead > stat.size) throw new Error('工具图片在读取期间发生变化');
+        const data = bytes.subarray(0, bytesRead);
+        const mimeType = data[0] === 0x89 ? 'image/png' : data[0] === 0xff ? 'image/jpeg' : data.toString('ascii', 0, 3) === 'GIF' ? 'image/gif' : 'image/webp';
+        return { type: 'image' as const, mimeType, base64Data: data.toString('base64') };
+      } finally { await file.close(); }
+    }));
+    const refs = images.length ? await ctx.attachments.admitPromptContent(images.map(part => {
+      if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(part.mimeType)) throw new Error('不支持的工具图片格式');
+      return { type: 'image' as const, mediaType: part.mimeType as 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif', data: part.base64Data };
+    })) : [];
+    let index = 0;
+    return item.output.content.map(part => part.type === 'text' ? { type: 'text' as const, text: part.text } : refs[index++]!);
   }
   return [{ type: 'text', text: JSON.stringify(item) }];
 }

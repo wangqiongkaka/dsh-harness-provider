@@ -16,6 +16,7 @@ const harnessId = harnessIdSchema.parse('codex');
 export function itemOf(value: unknown): HostItem | undefined {
   const item = nativeItem.parse(value);
   const itemId = hostItemIdSchema.parse(item.id);
+  const { result: _result, contentItems: _content, ...activity } = item;
   switch (item.type) {
     case 'userMessage': return undefined;
     case 'agentMessage':
@@ -52,8 +53,20 @@ export function itemOf(value: unknown): HostItem | undefined {
         type: 'toolExecution', itemId,
         toolName: typeof item.tool === 'string' ? item.tool : item.type,
         ...(typeof item.server === 'string' ? { namespace: item.server } : {}),
-        arguments: JSON.parse(JSON.stringify(item.arguments ?? item)),
-        output: { content: [{ type: 'text', text: JSON.stringify(item.result ?? item) }], truncated: false },
+        arguments: JSON.parse(JSON.stringify(item.arguments ?? activity)),
+        output: { content: (item.type === 'imageView' && typeof item.path === 'string') || (item.type === 'imageGeneration' && typeof item.savedPath === 'string')
+          ? [{ type: 'imageFile', path: text.parse(item.type === 'imageView' ? item.path : item.savedPath) }]
+          : item.type === 'dynamicToolCall' && Array.isArray(item.contentItems) ? item.contentItems.map(value => {
+            const part = object.parse(value);
+            if (part.type === 'inputText') return { type: 'text' as const, text: text.parse(part.text) };
+            const url = text.parse(part.imageUrl ?? part.audioUrl ?? '');
+            const image = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(url);
+            return image ? { type: 'image' as const, mimeType: image[1]!, base64Data: image[2]! } : { type: 'text' as const, text: url };
+          }) : Array.isArray((item.result as { content?: unknown } | undefined)?.content)
+          ? z.array(object).parse((item.result as { content: unknown }).content).map(part => part.type === 'image'
+            ? { type: 'image' as const, mimeType: text.parse(part.mimeType), base64Data: text.parse(part.data) }
+            : { type: 'text' as const, text: part.type === 'text' ? text.parse(part.text) : JSON.stringify(part) })
+          : [{ type: 'text', text: JSON.stringify(item.result ?? item) }], truncated: false },
       };
     default: throw new Error(`Unsupported Codex item type: ${item.type}`);
   }
@@ -76,8 +89,7 @@ export function turnSnapshot(threadId: string, value: unknown): HostTurnSnapshot
   return {
     nativeTurnRef: { harnessId, nativeSessionId: threadId, nativeTurnKey: turn.id, formatVersion: 1 },
     input: turn.items.filter(item => item.type === 'userMessage').flatMap(item =>
-      z.array(z.object({ type: z.literal('text'), text, text_elements: z.unknown().optional() })).parse(item.content)
-        .map(part => ({ type: 'text' as const, text: part.text }))),
+      z.array(object).parse(item.content).flatMap(part => part.type === 'text' ? [{ type: 'text' as const, text: text.parse(part.text) }] : [])),
     items: turn.items.flatMap(item => { const mapped = snapshotItem(item); return mapped ? [mapped] : []; }),
     outcome: turn.status === 'completed' ? { status: 'succeeded' }
       : turn.status === 'interrupted' ? { status: 'cancelled' }

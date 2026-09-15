@@ -83,7 +83,8 @@ export interface HarnessSessionState {
 }
 
 export interface HostTextInput { type: 'text'; text: string }
-export interface TurnStartCommand { type: 'turn.start'; turnId: HostTurnId; input: HostTextInput[] }
+export type HostInput = HostTextInput | { type: 'image'; mimeType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'; base64Data: string };
+export interface TurnStartCommand { type: 'turn.start'; turnId: HostTurnId; input: HostInput[] }
 export interface TurnCancelCommand { type: 'turn.cancel'; turnId: HostTurnId }
 export interface ModelSelectCommand { type: 'model.select'; model: HarnessModelRef }
 export interface ThinkingSelectCommand { type: 'thinking.select'; thinkingOptionId: HarnessThinkingOptionId }
@@ -117,7 +118,7 @@ export interface ModelSelectCompleted { completed: true }
 export interface ThinkingSelectCompleted { completed: true }
 export interface PermissionModeSelectCompleted { completed: true }
 
-export interface HostToolOutput { content: Array<{ type: 'text'; text: string } | { type: 'image'; mimeType: string; base64Data: string }>; truncated?: boolean }
+export interface HostToolOutput { content: Array<{ type: 'text'; text: string } | { type: 'image'; mimeType: string; base64Data: string } | { type: 'imageFile'; path: string }>; truncated?: boolean }
 export interface HostFileChange { path: string; kind: 'add' | 'update' | 'delete'; unifiedDiff: string }
 export type HostSubagentStatus = 'pending' | 'running' | 'completed' | 'failed' | 'interrupted';
 export interface HostSubagentState {
@@ -148,7 +149,7 @@ export type HostEvent =
   | { type: 'session.state.changed'; state: HarnessSessionState }
   | { type: 'session.usage.changed'; usage: HostUsage | null; observedForTurnId?: HostTurnId }
   | { type: 'session.faulted'; error: HarnessError }
-  | { type: 'turn.started'; turnId: HostTurnId }
+  | { type: 'turn.started'; turnId: HostTurnId; nativeTurnRef?: NativeTurnRef }
   | { type: 'turn.completed'; turnId: HostTurnId; nativeTurnRef?: NativeTurnRef; outcome: TurnOutcome }
   | { type: 'item.started'; turnId: HostTurnId; item: HostItem }
   | { type: 'item.updated'; turnId: HostTurnId; itemId: HostItemId; update: HostItemUpdate }
@@ -163,6 +164,8 @@ export interface HarnessSession {
   /** Usage that already holds when the session opens: the baseline the Host subtracts per-turn deltas from. */
   readonly initialUsage: HostUsage | null;
   readonly outputs: AsyncIterable<HarnessOutput>;
+  fork?(throughTurn?: string | null): Promise<HarnessResult<NativeSessionRef | undefined>>;
+  steer?(input: HostInput[]): Promise<HarnessResult<{ accepted: true }>>;
   refreshUsage?(): Promise<void>;
   readSnapshot?(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>>;
   execute(command: TurnStartCommand): Promise<HarnessResult<TurnStartAccepted>>;
