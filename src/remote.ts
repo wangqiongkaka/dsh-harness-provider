@@ -12,14 +12,14 @@ export const modelRequest = address.extend({ model: z.string().min(1) });
 export const modelsSchema = z.object({
   models: z.array(z.object({ id: z.string(), label: z.string() })), error: z.string().nullable(),
 });
-const codec = (schema: z.ZodType) => ({ mode: 'strict' as const, typeSymbol: 'dsh-harness-plugin#Contract', create: () => schema });
+const codec = (schema: z.ZodType) => ({ mode: 'strict' as const, typeSymbol: 'dsh-harness-provider#Contract', create: () => schema });
 export const descriptors: InvocationDescriptor[] = [
   ['state', address, stateSchema], ['select', selectRequest, stateSchema],
   ['models', address, modelsSchema], ['selectModel', modelRequest, stateSchema],
 ].map(([method, request, result]) => ({
-  id: `dsh-harness-plugin#harness/${method}`, service: 'harness', namespace: 'harness', method: method as string,
+  id: `dsh-harness-provider#harness/${method}`, service: 'harness', namespace: 'harness', method: method as string,
   invocation: { kind: 'direct' },
   parameters: [{ name: 'request', wire: 'request', source: 'json', codec: codec(request as z.ZodType) }],
   result: codec(result as z.ZodType),
 }));
-export const contribution = { package: 'dsh-harness-plugin', descriptors };
+export const contribution = { package: 'dsh-harness-provider', descriptors };

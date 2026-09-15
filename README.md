@@ -9,7 +9,7 @@
 先安装 Codex / Claude Code CLI，并完成所需的原生登录或环境配置。插件沿用各自的认证、模型、工作目录、工具和权限策略。
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-harness-plugin-0.1.0.tgz
+dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.1.0.tgz
 dsh --profile web
 ```
 

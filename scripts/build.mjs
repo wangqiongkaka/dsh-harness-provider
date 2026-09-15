@@ -25,7 +25,7 @@ await build({
   entryPoints: ['src/client.tsx'], outfile: 'dist/client.js', bundle: true,
   platform: 'browser', format: 'cjs', target: 'es2022', jsx: 'automatic',
   external: ['react', 'react/jsx-runtime'], nodePaths: [resolve(reference, 'node_modules')],
-  banner: { js: 'window.__ModuleLoader__.load({id:"dsh-harness-plugin",factory:(require)=>{var module={exports:{}};var exports=module.exports;' },
+  banner: { js: 'window.__ModuleLoader__.load({id:"dsh-harness-provider",factory:(require)=>{var module={exports:{}};var exports=module.exports;' },
   footer: { js: 'return module.exports;}});' },
 });
 

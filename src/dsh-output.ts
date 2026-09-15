@@ -66,7 +66,7 @@ export class DshOutput {
         outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } });
     } else if (item.type === 'contextCompaction' || item.type === 'subagentDelegation') {
       this.agent.session.append('user/message', createUserMessage({
-        source: { kind: 'plugin', plugin: 'dsh-harness-plugin', form: 'notice',
+        source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice',
           summary: item.type === 'contextCompaction' ? 'Harness context compaction' : 'Harness subagent activity' },
         content: [{ type: 'text', text: JSON.stringify(snapshot) }],
       }), { surfaceOp: 'append' });
