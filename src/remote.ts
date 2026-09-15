@@ -4,18 +4,42 @@ import type { InvocationDescriptor } from '@deepseek-ai/dsh-typert-protocol';
 export const selection = z.enum(['dsh', 'codex', 'claude-code']);
 export const address = z.object({ sessionId: z.string().min(1) }).strict();
 export const stateSchema = z.object({
-  harness: selection, locked: z.boolean(), model: z.string().nullable(),
+  harness: selection, locked: z.boolean(), model: z.string().nullable(), thinking: z.string().nullable(), permission: z.string().nullable(),
   recoveryRequired: z.boolean(),
 });
 export const selectRequest = address.extend({ harness: selection });
 export const modelRequest = address.extend({ model: z.string().min(1) });
+export const thinkingRequest = address.extend({ thinking: z.string().min(1) });
+export const permissionRequest = address.extend({ permission: z.string().min(1) });
 export const modelsSchema = z.object({
-  models: z.array(z.object({ id: z.string(), label: z.string() })), error: z.string().nullable(),
+  models: z.array(z.object({ id: z.string(), label: z.string(), resolved: z.string().nullable(), thinkingOptionIds: z.array(z.string()).nullable() })),
+  /** What the Harness runs when no model is picked here: its own CLI configuration. */
+  defaultModel: z.object({ id: z.string(), label: z.string(), resolved: z.string().nullable() }).nullable(),
+  thinkingOptions: z.array(z.object({ id: z.string(), label: z.string() })),
+  defaultThinkingOptionId: z.string().nullable(),
+  /** Selectable permission modes; empty when the Harness only reports its policy (Codex sandbox). */
+  permissionModes: z.array(z.object({ id: z.string(), label: z.string(), dangerous: z.boolean() })),
+  defaultPermissionModeId: z.string().nullable(),
+  error: z.string().nullable(),
 });
+/** Context occupancy the Harness reported for the live native session; null until it reports one. */
+export const usageSchema = z.object({
+  contextUsedTokens: z.number().nullable(), contextWindowTokens: z.number().nullable(), totalTokens: z.number().nullable(),
+}).nullable();
+export const quotaWindowSchema = z.object({
+  id: z.string(), label: z.string(), usedPercent: z.number(), resetsAt: z.string().nullable(),
+});
+/** Account quota of whatever serves the session's model: rolling windows, a prepaid balance, or nothing known. */
+export const quotaSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('windows'), source: z.string(), plan: z.string().nullable(), windows: z.array(quotaWindowSchema) }),
+  z.object({ kind: z.literal('balance'), source: z.string(), currency: z.string(), total: z.string(), granted: z.string(), toppedUp: z.string() }),
+]).nullable();
 const codec = (schema: z.ZodType) => ({ mode: 'strict' as const, typeSymbol: 'dsh-harness-provider#Contract', create: () => schema });
 export const descriptors: InvocationDescriptor[] = [
   ['state', address, stateSchema], ['select', selectRequest, stateSchema],
   ['models', address, modelsSchema], ['selectModel', modelRequest, stateSchema],
+  ['selectThinking', thinkingRequest, stateSchema], ['selectPermission', permissionRequest, stateSchema],
+  ['usage', address, usageSchema], ['quota', address, quotaSchema],
 ].map(([method, request, result]) => ({
   id: `dsh-harness-provider#harness/${method}`, service: 'harness', namespace: 'harness', method: method as string,
   invocation: { kind: 'direct' },

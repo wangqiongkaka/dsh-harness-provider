@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { UserMessage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
-import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HostInteraction, HostInteractionResponse, HarnessSessionState } from '@codexhost/harness-adapter';
+import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HostInteraction, HostInteractionResponse, HarnessSessionState, HostUsage } from '@codexhost/harness-adapter';
 import { hostTurnIdSchema } from '@codexhost/shared-contracts';
 import { Bindings, type Binding } from './bindings.js';
 import { DshOutput } from './dsh-output.js';
@@ -11,7 +11,26 @@ export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
 }
-type Live = { session: HarnessSession; output: AsyncIterator<HarnessOutput>; revision: number };
+type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; queue: HarnessOutput[]; ended: boolean; wake: () => void };
+/** Drains the native session continuously: usage readings land as they arrive (also between turns), everything else queues for the turn loop. */
+function pump(live: Live): void {
+  void (async () => {
+    try {
+      for await (const value of live.session.outputs) {
+        if (value.kind === 'event' && value.event.type === 'session.usage.changed') { live.usage = value.event.usage; continue; }
+        live.queue.push(value);
+        live.wake();
+      }
+    } finally { live.ended = true; live.wake(); }
+  })();
+}
+async function take(live: Live): Promise<HarnessOutput | undefined> {
+  while (!live.queue.length) {
+    if (live.ended) return undefined;
+    await new Promise<void>(resolve => { live.wake = resolve; });
+  }
+  return live.queue.shift();
+}
 export class DshRunner {
   readonly live = new Map<string, Live>();
   constructor(private readonly ctx: Context, private readonly bindings: Bindings,
@@ -29,10 +48,13 @@ export class DshRunner {
     if (!input.length) throw new Error('Harness prompt is empty');
     let live = this.live.get(agent.id);
     if (!live) {
+      const hints = { ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
+        ...(binding.permission ? { permissionModeId: binding.permission } : {}) };
       const session = unwrap(await this.adapters[binding.harness].open(binding.nativeRef
-        ? { kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef, ...(binding.model ? { model: binding.model } : {}) }
-        : { kind: 'create', cwd: binding.cwd, ...(binding.model ? { model: binding.model } : {}) }));
-      live = { session, output: session.outputs[Symbol.asyncIterator](), revision: 0 };
+        ? { kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef, ...hints }
+        : { kind: 'create', cwd: binding.cwd, ...hints }));
+      live = { session, revision: 0, usage: session.initialUsage ?? binding.usage ?? null, queue: [], ended: false, wake: () => {} };
+      pump(live);
       this.live.set(agent.id, live);
       const owned = live;
       agent.ctx.effect(() => async () => {
@@ -80,9 +102,8 @@ export class DshRunner {
       unwrap(await starting);
       let completed = false;
       while (!completed) {
-        const next = await current.output.next();
-        if (next.done) throw new Error('Harness disconnected before confirming the turn');
-        const value = next.value;
+        const value = await take(current);
+        if (!value) throw new Error('Harness disconnected before confirming the turn');
         if (value.kind === 'interaction') {
           const task = this.answer(agent, value.interaction, questionSignal, current.session)
             .catch(error => { if (!questionSignal.aborted) { interactionError = error; cancel(); } })
@@ -102,7 +123,11 @@ export class DshRunner {
             output.interrupt();
             await this.ctx.sessions.flush(agent.session);
             const uncertain = event.outcome.status === 'failed' && ['processExited', 'protocolError', 'internalError'].includes(event.outcome.error.code);
-            if (!uncertain) { delete binding.pending; await this.bindings.write(binding); }
+            if (current.usage) binding.usage = { ...(current.usage.contextUsedTokens !== undefined ? { contextUsedTokens: current.usage.contextUsedTokens } : {}),
+              ...(current.usage.contextWindowTokens !== undefined ? { contextWindowTokens: current.usage.contextWindowTokens } : {}),
+              ...(current.usage.totalTokens !== undefined ? { totalTokens: current.usage.totalTokens } : {}) };
+            if (!uncertain) delete binding.pending;
+            await this.bindings.write(binding);
             completed = true;
             if (event.outcome.status === 'failed') throw new Error(event.outcome.error.message);
             if (event.outcome.status === 'cancelled' && !signal.aborted && !interactionError) throw new Error('Harness cancelled the turn');
@@ -138,6 +163,8 @@ export class DshRunner {
       binding.nativeRef = state.nativeRef;
     }
     if (state.effectiveModel) binding.model = state.effectiveModel;
+    if (state.effectiveThinkingOptionId) binding.thinking = state.effectiveThinkingOptionId;
+    if (state.effectivePermissionModeId) binding.permission = state.effectivePermissionModeId;
     await this.bindings.write(binding);
   }
 

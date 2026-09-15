@@ -6,10 +6,11 @@ import {
   type TurnStartCommand, type TurnCancelCommand, type InteractionRespondCommand,
   type ModelSelectCommand, type ThinkingSelectCommand, type PermissionModeSelectCommand,
   type TurnStartAccepted, type TurnCancelAccepted, type InteractionRespondAccepted, type ModelSelectCompleted,
+  type ThinkingSelectCompleted, type PermissionModeSelectCompleted,
 } from '@codexhost/harness-adapter';
 import {
-  harnessIdSchema, harnessModelRefSchema, hostInteractionIdSchema,
-  hostItemIdSchema, type HostTurnId,
+  harnessIdSchema, harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, hostInteractionIdSchema,
+  hostItemIdSchema, type HostTurnId, type HarnessAccountSnapshot,
 } from '@codexhost/shared-contracts';
 import { z } from 'zod';
 import pkg from '../package.json' with { type: 'json' };
@@ -18,17 +19,72 @@ import { itemOf, snapshotItem, nativeTurn, object, turnSnapshot } from './codex-
 
 const id = harnessIdSchema.parse('codex');
 const capabilities = {
-  configuration: { selectModel: true, selectThinkingOption: false, selectPermissionMode: false, permissionModeScope: 'live' as const },
+  configuration: { selectModel: true, selectThinkingOption: true, selectPermissionMode: true, permissionModeScope: 'live' as const },
   history: { fork: false, forkAcrossCwd: false, rollbackLastTurn: false },
 };
 const opened = z.object({
   thread: z.object({ id: z.string().min(1), cwd: z.string(), ephemeral: z.boolean(), turns: z.array(z.unknown()) }).passthrough(),
   model: z.string().min(1), modelProvider: z.string().min(1),
+  // v2/ThreadStartResponse: the sandbox policy Codex applies; surfaced read-only as the permission mode.
+  sandbox: z.object({ type: z.string() }).passthrough().optional(),
 }).passthrough();
 const modelList = z.object({
-  data: z.array(z.object({ model: z.string().min(1), displayName: z.string(), isDefault: z.boolean(), hidden: z.boolean() }).passthrough()),
+  data: z.array(z.object({
+    model: z.string().min(1), displayName: z.string(), isDefault: z.boolean(), hidden: z.boolean(),
+    supportedReasoningEfforts: z.array(z.object({ reasoningEffort: z.string().min(1), description: z.string() }).passthrough()).default([]),
+    defaultReasoningEffort: z.string().nullable().default(null),
+  }).passthrough()),
   nextCursor: z.string().nullable(),
 });
+// Official app-server protocol (`codex app-server generate-ts`): v2/GetAccountRateLimitsResponse, RateLimitSnapshot, RateLimitWindow.
+const rateLimitWindow = z.object({ usedPercent: z.number(), windowDurationMins: z.number().nullable(), resetsAt: z.number().nullable() }).passthrough();
+const rateLimits = z.object({
+  rateLimits: z.object({ limitName: z.string().nullable().optional(), primary: rateLimitWindow.nullable(), secondary: rateLimitWindow.nullable(), planType: z.string().nullable().optional() }).passthrough(),
+}).passthrough();
+// v2/ThreadTokenUsageUpdatedNotification: `last` is the newest request's breakdown, `modelContextWindow` its capacity.
+const tokenUsage = z.object({
+  total: z.object({ totalTokens: z.number(), inputTokens: z.number(), cachedInputTokens: z.number(), outputTokens: z.number() }).passthrough(),
+  last: z.object({ totalTokens: z.number(), inputTokens: z.number(), cachedInputTokens: z.number(), outputTokens: z.number() }).passthrough(),
+  modelContextWindow: z.number().nullable(),
+}).passthrough();
+// Permission modes = Codex sandbox mode + approval policy pairs (v2/SandboxMode, v2/AskForApproval); ids follow the
+// `sandbox.type` spelling Codex reports back on thread/start so the reported policy maps onto the same catalog.
+const PERMISSION_MODES = [
+  { id: 'readOnly', label: 'Read-only', description: 'Sandboxed reads; every write or command asks first.', sandbox: 'read-only', approval: 'on-request' },
+  { id: 'workspaceWrite', label: 'Workspace write', description: 'Edit the workspace; other protected actions ask first.', sandbox: 'workspace-write', approval: 'on-request' },
+  { id: 'dangerFullAccess', label: 'Full access', description: 'No sandbox and no approval prompts.', sandbox: 'danger-full-access', approval: 'never', dangerous: true },
+] as const;
+const permissionModeOf = (id: string) => PERMISSION_MODES.find(mode => mode.id === id);
+const permissionModeForSandbox = (sandbox: string | null | undefined) => PERMISSION_MODES.find(mode => mode.sandbox === sandbox)?.id ?? 'workspaceWrite';
+/** turn/start takes the structured v2/SandboxPolicy, thread/start the plain mode string. */
+const sandboxPolicyOf = (id: string) => id === 'dangerFullAccess' ? { type: 'dangerFullAccess' }
+  : id === 'readOnly' ? { type: 'readOnly', networkAccess: false }
+    : { type: 'workspaceWrite', writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
+const permissionModeCatalog = (defaultModeId: string) => ({
+  modes: PERMISSION_MODES.map(mode => ({ id: harnessPermissionModeIdSchema.parse(mode.id), label: mode.label, description: mode.description, ...('dangerous' in mode ? { dangerous: true } : {}) })),
+  defaultModeId: harnessPermissionModeIdSchema.parse(defaultModeId),
+});
+const configRead = z.object({ config: z.object({ sandbox_mode: z.string().nullable().optional(), model: z.string().nullable().optional() }).passthrough() }).passthrough();
+const thinkingOption = (effort: string) => ({ id: harnessThinkingOptionIdSchema.parse(effort), label: effort.charAt(0).toUpperCase() + effort.slice(1) });
+/** Codex reports one reset instant per window; the protocol pins the type to int64 without a unit, so seconds are widened to ms. */
+const resetIso = (value: number | null) => value === null ? {} : { resetsAt: new Date(value < 1e12 ? value * 1000 : value).toISOString() };
+const periodOf = (mins: number | null) => mins === 300 ? 'five_hour' as const : mins === 10080 ? 'seven_day' as const : mins === 43200 ? 'monthly' as const : 'unknown' as const;
+const windowLabel = (mins: number | null) => mins === 300 ? '5-hour window' : mins === 10080 ? '7-day window' : mins === null ? 'Rate limit' : `${mins}-minute window`;
+
+/** Maps `account/rateLimits/read` onto the shared account snapshot: primary window as credits, the secondary as product usage. */
+export function accountSnapshot(raw: unknown): HarnessAccountSnapshot | null {
+  const { rateLimits: limits } = rateLimits.parse(raw);
+  const primary = limits.primary ?? limits.secondary;
+  if (!primary) return null;
+  const secondary = limits.primary ? limits.secondary : null;
+  return {
+    ...(limits.planType ? { plan: limits.planType } : {}),
+    credits: {
+      usedPercent: primary.usedPercent, periodType: periodOf(primary.windowDurationMins), ...resetIso(primary.resetsAt),
+      ...(secondary ? { productUsage: [{ product: windowLabel(secondary.windowDurationMins), usagePercent: secondary.usedPercent, ...resetIso(secondary.resetsAt) }] } : {}),
+    },
+  };
+}
 
 function errorResult(error: unknown): { ok: false; error: HarnessError } {
   return { ok: false, error: {
@@ -66,17 +122,38 @@ export class CodexAdapter implements HarnessAdapter {
           if (cursor !== null) cursors.add(cursor);
         } while (cursor !== null);
         const fallback = models.find(model => model.isDefault);
+        const efforts = [...new Set(models.flatMap(model => model.supportedReasoningEfforts.map(option => option.reasoningEffort)))];
+        const config = configRead.safeParse(await rpc.request('config/read', { cwd: input.cwd ?? process.cwd() }));
+        const configured = config.success ? config.data.config.model ?? undefined : undefined;
         return {
           status: 'ready', capabilities,
+          permissionModes: permissionModeCatalog(permissionModeForSandbox(config.success ? config.data.config.sandbox_mode : null)),
           catalog: {
-            models: models.map(model => ({ ref: harnessModelRefSchema.parse({ id: model.model }), label: model.displayName })),
-            thinkingOptions: [],
-            ...(fallback ? { defaultModel: harnessModelRefSchema.parse({ id: fallback.model }) } : {}),
+            models: models.map(model => ({
+              ref: harnessModelRefSchema.parse({ id: model.model }), label: model.displayName,
+              supportedThinkingOptionIds: model.supportedReasoningEfforts.map(option => harnessThinkingOptionIdSchema.parse(option.reasoningEffort)),
+            })),
+            thinkingOptions: efforts.map(thinkingOption),
+            // The user's config.toml `model` wins over the catalog's built-in default: that is what Codex would actually run.
+            ...(configured || fallback ? { defaultModel: harnessModelRefSchema.parse({ id: configured ?? fallback!.model }) } : {}),
+            ...(fallback?.defaultReasoningEffort ? { defaultThinkingOptionId: harnessThinkingOptionIdSchema.parse(fallback.defaultReasoningEffort) } : {}),
           },
         };
       } catch (error) {
         return { status: 'unavailable', error: errorResult(error).error };
       } finally { await rpc.close(); }
+    })();
+    this.pending.add(work);
+    try { return await work; } finally { this.pending.delete(work); }
+  }
+
+  /** Rolling ChatGPT rate-limit windows for the signed-in Codex account; null when Codex reports none. */
+  async inspectAccount(): Promise<HarnessAccountSnapshot | null> {
+    if (this.closing) return null;
+    const rpc = new CodexRpc({ ...this.options, cwd: process.cwd(), onMessage: () => {}, onFault: () => {} });
+    const work = (async () => {
+      try { await initialize(rpc); return accountSnapshot(await rpc.request('account/rateLimits/read', {})); }
+      finally { await rpc.close(); }
     })();
     this.pending.add(work);
     try { return await work; } finally { this.pending.delete(work); }
@@ -144,9 +221,11 @@ class CodexSession implements HarnessSession {
     const session = new CodexSession(options, input.cwd);
     try {
       await initialize(session.rpc);
+      const requested = input.permissionModeId ? permissionModeOf(input.permissionModeId) : undefined;
       const response = opened.parse(await session.rpc.request(input.kind === 'create' ? 'thread/start' : 'thread/resume', {
         cwd: input.cwd,
         ...(input.model ? { model: input.model.id } : {}),
+        ...(requested ? { sandbox: requested.sandbox, approvalPolicy: requested.approval } : {}),
         ...(input.kind === 'create' ? { ephemeral: false } : { threadId: input.nativeRef.nativeSessionId }),
       }));
       if (response.thread.ephemeral || (input.kind === 'resume' && response.thread.id !== input.nativeRef.nativeSessionId)) {
@@ -158,6 +237,8 @@ class CodexSession implements HarnessSession {
       session.initialState = {
         nativeRef: { harnessId: id, nativeSessionId: session.threadId, formatVersion: 1 },
         effectiveModel: harnessModelRefSchema.parse({ id: response.model }), resolvedModelLabel: response.model,
+        ...(input.thinkingOptionId ? { effectiveThinkingOptionId: input.thinkingOptionId } : {}),
+        effectivePermissionModeId: harnessPermissionModeIdSchema.parse(requested?.id ?? permissionModeForSandbox(response.sandbox ? PERMISSION_MODES.find(mode => mode.id === response.sandbox!.type)?.sandbox : null)),
       };
       return session;
     } catch (error) { await session.rpc.close(); throw error; }
@@ -177,10 +258,10 @@ class CodexSession implements HarnessSession {
   execute(command: TurnCancelCommand): Promise<HarnessResult<TurnCancelAccepted>>;
   execute(command: InteractionRespondCommand): Promise<HarnessResult<InteractionRespondAccepted>>;
   execute(command: ModelSelectCommand): Promise<HarnessResult<ModelSelectCompleted>>;
-  execute(command: ThinkingSelectCommand): Promise<HarnessResult<ModelSelectCompleted>>;
-  execute(command: PermissionModeSelectCommand): Promise<HarnessResult<ModelSelectCompleted>>;
+  execute(command: ThinkingSelectCommand): Promise<HarnessResult<ThinkingSelectCompleted>>;
+  execute(command: PermissionModeSelectCommand): Promise<HarnessResult<PermissionModeSelectCompleted>>;
   async execute(command: HostCommand): Promise<HarnessResult<
-    TurnStartAccepted | TurnCancelAccepted | InteractionRespondAccepted | ModelSelectCompleted
+    TurnStartAccepted | TurnCancelAccepted | InteractionRespondAccepted | ModelSelectCompleted | ThinkingSelectCompleted | PermissionModeSelectCompleted
   >> {
     try {
       if (this.fault) return { ok: false, error: this.fault };
@@ -197,6 +278,9 @@ class CodexSession implements HarnessSession {
             threadId: this.threadId,
             input: command.input.map(part => ({ type: 'text', text: part.text, text_elements: [] })),
             ...(this.initialState.effectiveModel ? { model: this.initialState.effectiveModel.id } : {}),
+            ...(this.initialState.effectiveThinkingOptionId ? { effort: this.initialState.effectiveThinkingOptionId } : {}),
+            ...(this.initialState.effectivePermissionModeId && permissionModeOf(this.initialState.effectivePermissionModeId)
+              ? { sandboxPolicy: sandboxPolicyOf(this.initialState.effectivePermissionModeId), approvalPolicy: permissionModeOf(this.initialState.effectivePermissionModeId)!.approval } : {}),
           });
           this.start = work;
           try {
@@ -231,6 +315,17 @@ class CodexSession implements HarnessSession {
           this.initialState = { ...this.initialState, effectiveModel: command.model, resolvedModelLabel: command.model.id };
           this.emit({ type: 'session.state.changed', state: this.initialState });
           return { ok: true, value: { completed: true } };
+        case 'permissionMode.select':
+          if (this.active) throw new Error('Permission selection requires an idle Codex session');
+          if (!permissionModeOf(command.permissionModeId)) throw new Error('Unknown Codex permission mode');
+          this.initialState = { ...this.initialState, effectivePermissionModeId: command.permissionModeId };
+          this.emit({ type: 'session.state.changed', state: this.initialState });
+          return { ok: true, value: { completed: true } };
+        case 'thinking.select':
+          if (this.active) throw new Error('Thinking selection requires an idle Codex session');
+          this.initialState = { ...this.initialState, effectiveThinkingOptionId: command.thinkingOptionId };
+          this.emit({ type: 'session.state.changed', state: this.initialState });
+          return { ok: true, value: { completed: true } };
         default: return { ok: false, error: { code: 'unsupported', message: 'Codex configuration operation is not implemented', retryable: false } };
       }
     } catch (error) { return errorResult(error); }
@@ -248,6 +343,17 @@ class CodexSession implements HarnessSession {
     if (params.threadId !== this.threadId) return;
     const active = this.active;
     if (!active) return;
+    if (message.method === 'thread/tokenUsage/updated') {
+      const parsed = tokenUsage.safeParse(params.tokenUsage);
+      if (parsed.success) this.emit({ type: 'session.usage.changed', observedForTurnId: active.hostId, usage: {
+        inputTokens: parsed.data.total.inputTokens, cachedInputTokens: parsed.data.total.cachedInputTokens,
+        outputTokens: parsed.data.total.outputTokens, totalTokens: parsed.data.total.totalTokens,
+        // Codex's `inputTokens` already includes the cached share; the newest request's total is what now occupies the window.
+        contextUsedTokens: parsed.data.last.totalTokens,
+        ...(parsed.data.modelContextWindow !== null ? { contextWindowTokens: parsed.data.modelContextWindow } : {}),
+      } });
+      return;
+    }
     if (message.method === 'turn/started' || message.method === 'turn/completed') {
       const turn = nativeTurn.parse(params.turn);
       this.identify(active, turn.id);

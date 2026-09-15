@@ -9,16 +9,17 @@
 先安装 Codex / Claude Code CLI，并完成所需的原生登录或环境配置。插件沿用各自的认证、模型、工作目录、工具和权限策略。
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.1.0.tgz
+dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.1.1.tgz
 dsh --profile web
 ```
 
 1. 连接工作目录。在空会话输入栏选择 **Codex** 或 **Claude Code**。
-2. 可选择该 Harness 提供的模型，也可保持原生默认模型。
-3. 使用 DSH 原输入框连续发送消息，使用原停止按钮取消。
-4. 重启 DSH 后，从原会话列表打开该会话继续对话。
+2. 输入栏右侧的模型胶囊可选择该 Harness 提供的模型和推理强度（Claude Code 七档、Codex 按模型提供的档位），也可保持原生默认。
+3. 使用 DSH 原输入框连续发送消息，使用原停止按钮取消。发送键左侧的环形图显示 Harness 报告的上下文占用。
+4. Harness 胶囊右侧的额度胶囊显示当前账户最紧张的额度窗口，点开查看全部窗口与重置时间：Claude Code 显示 5 小时、7 天和按模型的 7 天窗口；Codex 显示 ChatGPT 账户限速窗口；DSH 原生按提供方端点探测——智谱 Coding Plan（open.bigmodel.cn / api.z.ai）显示 5 小时与周额度，DeepSeek 开放平台显示账户余额，其余端点不显示。
+5. 重启 DSH 后，从原会话列表打开该会话继续对话。
 
-DSH 的首次使用引导可选择“稍后配置”；外部 Harness 不需要 DeepSeek API Key。已选外部 Harness 时，插件跳过 DeepSeek 凭据引导，并隐藏不适用的 DSH 模型、权限和计划控件。
+DSH 的首次使用引导可选择“稍后配置”；外部 Harness 不需要 DeepSeek API Key。已选外部 Harness 时，插件跳过 DeepSeek 凭据引导，用 Harness 自己的权限模式与模型控件替换 DSH 原生的权限、模型控件，并隐藏计划控件。Claude Code 的权限胶囊可切换计划/默认/接受编辑/自动/完全权限；Codex 的权限胶囊可切换只读/工作区可写/完全权限（对应 Codex 的沙箱模式与审批策略），默认取自 `~/.codex/config.toml` 的 `sandbox_mode`。切换 Harness 时，权限按 DSH 原生沙箱模式映射（原生完全权限对应 Claude Code 的完全权限与 Codex 的完全权限）；新会话自动沿用上次选择的 Harness，以及该 Harness 上次选择的模型与推理强度。额度胶囊与上下文环形图按剩余量显示，余量低于 30% 转为琥珀色，低于 10% 转为红色。
 
 Harness 在第一条消息后固定；需要换 Harness 时新建会话。不同会话可分别使用 DSH、Codex、Claude Code。
 
@@ -47,7 +48,7 @@ Claude Code 可执行文件可用 `CODEXHOST_CLAUDE_COMMAND` 环境变量指定�
 
 ### 当前边界
 
-- 暂不支持附件输入、图片工具结果导入、插入正在运行的一轮、会话分支、回滚、插件内权限/思考强度选择。服务会拒绝不支持的操作。
+- 暂不支持附件输入、图片工具结果导入、插入正在运行的一轮、会话分支、回滚。服务会拒绝不支持的操作。
 - DSH 通用问答框没有密码输入契约，因此包含保密输入的问题会停止该请求。
 - 断连或记录失败导致请求结果无法确认时，插件停止原生执行并暂停该会话发送，避免自动重发产生重复操作；当前没有自动对账或手动恢复界面。
 - Claude Code 未报告的 Provider 不作猜测，DSH 消息来源记为 `unreported`。

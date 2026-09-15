@@ -7,13 +7,19 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-api-session-controller';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-typert-registry';
-import type { HarnessAdapter } from '@codexhost/harness-adapter';
-import { harnessModelRefSchema } from '@codexhost/shared-contracts';
+import type { HarnessAdapter, HarnessInspection } from '@codexhost/harness-adapter';
+import type {} from '@deepseek-ai/dsh-session-projection';
+import type {} from '@deepseek-ai/dsh-settings';
+import type {} from '@deepseek-ai/dsh-credentials';
+import type {} from '@deepseek-ai/dsh-permission-presets';
+import type {} from '@deepseek-ai/dsh-shell';
+import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, type HarnessAccountSnapshot } from '@codexhost/shared-contracts';
 import { z } from 'zod';
 import { Bindings, type Binding } from './bindings.js';
 import { CodexAdapter } from './codex-adapter.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
-import { address, contribution, selectRequest, modelRequest } from './remote.js';
+import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
+import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest } from './remote.js';
 
 export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions'];
 export const configSchema = z.object({
@@ -35,11 +41,22 @@ export async function apply(ctx: Context, rawConfig: unknown = {}): Promise<void
   new HarnessService(ctx, resolve(config.root ?? resolve(process.env.DSH_HOME ?? resolve(homedir(), '.dsh'), 'harness-plugin')), adapters);
 }
 
+type Ready = Extract<HarnessInspection, { status: 'ready' }>;
+
+// DSH native sandbox mode -> the Harness permission mode it most closely matches, so switching Harness keeps the
+// permission the user already picked. Claude Code has no sandbox tiers below full access; those fall to its default.
+const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>> = {
+  codex: { 'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess' },
+  'claude-code': { 'danger-full-access': 'bypassPermissions' },
+};
+
 export class HarnessService extends TypertRemoteService {
   readonly bindings: Bindings;
   readonly runner: DshRunner;
   // ponytail: per-cwd catalog cache; each inspect spawns a native process.
-  private readonly catalogs = new Map<string, { until: number; models: { id: string; label: string }[] }>();
+  private readonly catalogs = new Map<string, { until: number; inspection: Ready }>();
+  // ponytail: per-source quota cache; account probes are rate-limited upstream and identical across sessions.
+  private readonly quotas = new Map<string, { until: number; work: Promise<Quota> }>();
   constructor(ctx: Context, root: string, private readonly adapters: Record<Binding['harness'], HarnessAdapter>) {
     super(ctx, 'harness');
     this.bindings = new Bindings(root);
@@ -66,9 +83,13 @@ export class HarnessService extends TypertRemoteService {
 
   async state(raw: unknown) {
     const { sessionId } = address.parse(raw);
-    await this.agent(sessionId); // Same authorization/ownership rules as native Session commands.
+    const agent = await this.agent(sessionId); // Same authorization/ownership rules as native Session commands.
     const binding = await this.bindings.read(sessionId);
-    return this.view(binding);
+    if (binding || !this.fresh(agent)) return this.view(binding);
+    // A fresh session starts on the Harness picked last time; failures fall back to native silently.
+    const remembered = (await this.bindings.readDefaults()).harness;
+    if (!remembered || remembered === 'dsh' || !agent.session.header.cwd) return this.view();
+    return this.bindings.serial(sessionId, async () => this.view(await this.bindings.read(sessionId) ?? await this.bind(agent, sessionId, remembered).catch(() => undefined)));
   }
 
   async select(raw: unknown) {
@@ -76,32 +97,75 @@ export class HarnessService extends TypertRemoteService {
     return this.bindings.serial(request.sessionId, async () => {
       const agent = await this.agent(request.sessionId);
       const current = await this.bindings.read(request.sessionId);
-      if (agent.status === 'running' || current?.locked || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0)
-        || agent.session.snapshotEvents().some(event => event.type === 'turn/start' || event.type === 'user/message')) {
-        throw new Error('开始对话后不能切换 Harness，请新建会话');
-      }
+      if (current?.locked || !this.fresh(agent)) throw new Error('开始对话后不能切换 Harness，请新建会话');
+      const defaults = await this.bindings.readDefaults();
+      await this.bindings.writeDefaults({ ...defaults, harness: request.harness });
       if (request.harness === 'dsh') { await this.bindings.remove(request.sessionId); return this.view(); }
-      const cwd = agent.session.header.cwd;
-      if (!cwd) throw new Error('请先连接工作目录');
-      const binding: Binding = { version: 1, sessionId: request.sessionId, harness: request.harness, cwd, locked: false };
-      await this.bindings.write(binding);
-      return this.view(binding);
+      return this.view(await this.bind(agent, request.sessionId, request.harness));
     });
+  }
+
+  private fresh(agent: Awaited<ReturnType<HarnessService['agent']>>): boolean {
+    return agent.status !== 'running' && agent.inbox.nextTurn.length === 0 && agent.inbox.nextStep.length === 0
+      && !agent.session.snapshotEvents().some(event => event.type === 'turn/start' || event.type === 'user/message');
+  }
+
+  /** Bind a fresh session to a Harness, seeding permission from the native sandbox and model / thinking from the last pick. */
+  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness']): Promise<Binding> {
+    const cwd = agent.session.header.cwd;
+    if (!cwd) throw new Error('请先连接工作目录');
+    const binding: Binding = { version: 1, sessionId, harness, cwd, locked: false };
+    const sandbox = this.ctx.get('sessionProjections')?.stateOf(agent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
+    const seeded = sandbox && NATIVE_PERMISSION_MODES[harness][sandbox];
+    const remembered = (await this.bindings.readDefaults())[harness];
+    if (seeded || remembered) {
+      const inspection = await this.inspection(binding);
+      if (!('error' in inspection)) {
+        if (seeded && inspection.permissionModes?.modes.some(mode => mode.id === seeded)) binding.permission = harnessPermissionModeIdSchema.parse(seeded);
+        // The last model / thinking picked for this Harness carries into the new session while the catalog still offers it.
+        const model = remembered?.model && inspection.catalog.models.find(entry => entry.ref.id === remembered.model!.id);
+        if (model) binding.model = remembered!.model;
+        const allowed = model?.supportedThinkingOptionIds ?? inspection.catalog.thinkingOptions.map(option => option.id);
+        if (remembered?.thinking && inspection.catalog.thinkingOptions.some(option => option.id === remembered.thinking) && allowed.includes(remembered.thinking)) binding.thinking = remembered.thinking;
+      }
+    }
+    await this.bindings.write(binding);
+    return binding;
   }
 
   async models(raw: unknown) {
     const { sessionId } = address.parse(raw);
     await this.agent(sessionId);
     const binding = await this.bindings.read(sessionId);
-    if (!binding) return { models: [], error: null };
+    const empty = { models: [], defaultModel: null, thinkingOptions: [], defaultThinkingOptionId: null, permissionModes: [], defaultPermissionModeId: null };
+    if (!binding) return { ...empty, error: null };
+    const inspection = await this.inspection(binding);
+    if ('error' in inspection) return { ...empty, error: inspection.error };
+    const { catalog } = inspection;
+    const fallback = catalog.defaultModel && catalog.models.find(model => model.ref.id === catalog.defaultModel!.id);
+    return {
+      models: catalog.models.map(model => ({ id: model.ref.id, label: model.label, resolved: model.resolvedModelLabel ?? null, thinkingOptionIds: model.supportedThinkingOptionIds ?? null })),
+      defaultModel: catalog.defaultModel ? { id: catalog.defaultModel.id, label: fallback?.label ?? catalog.defaultModel.id, resolved: fallback?.resolvedModelLabel ?? null } : null,
+      thinkingOptions: catalog.thinkingOptions.map(option => ({ id: option.id, label: option.label })),
+      defaultThinkingOptionId: catalog.defaultThinkingOptionId ?? null,
+      permissionModes: (inspection.permissionModes?.modes ?? []).map(mode => ({ id: mode.id, label: mode.label, dangerous: mode.dangerous === true })),
+      defaultPermissionModeId: inspection.permissionModes?.defaultModeId ?? null,
+      error: null,
+    };
+  }
+
+  private async inspection(binding: Binding): Promise<Ready | { error: string }> {
     const key = `${binding.harness}\0${binding.cwd}`;
     const cached = this.catalogs.get(key);
-    if (cached && cached.until > Date.now()) return { models: cached.models, error: null };
+    if (cached && cached.until > Date.now()) return cached.inspection;
     const result = await this.adapters[binding.harness].inspect({ cwd: binding.cwd });
-    if (result.status !== 'ready') return { models: [], error: result.error.message };
-    const models = result.catalog.models.map(model => ({ id: model.ref.id, label: model.label }));
-    this.catalogs.set(key, { until: Date.now() + 60_000, models });
-    return { models, error: null };
+    if (result.status !== 'ready') return { error: result.error.message };
+    this.catalogs.set(key, { until: Date.now() + 60_000, inspection: result });
+    return result;
+  }
+  private async catalog(binding: Binding) {
+    const inspection = await this.inspection(binding);
+    return 'error' in inspection ? inspection : inspection.catalog;
   }
 
   async selectModel(raw: unknown) {
@@ -111,20 +175,129 @@ export class HarnessService extends TypertRemoteService {
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) throw new Error('请使用 DSH 原生模型选择器');
       if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending) throw new Error('请等待当前请求结束');
-      const catalog = await this.models({ sessionId: request.sessionId });
-      if (!catalog.models.some(model => model.id === request.model)) throw new Error(catalog.error ?? 'Harness 未提供这个模型');
+      const catalog = await this.catalog(binding);
+      if ('error' in catalog) throw new Error(catalog.error);
+      const entry = catalog.models.find(model => model.ref.id === request.model);
+      if (!entry) throw new Error('Harness 未提供这个模型');
       const model = harnessModelRefSchema.parse({ id: request.model });
       const live = this.runner.live.get(request.sessionId);
       if (live) unwrap(await live.session.execute({ type: 'model.select', model }));
       binding.model = model;
+      // A thinking level the new model does not support falls back to the Harness default.
+      if (binding.thinking && entry.supportedThinkingOptionIds && !entry.supportedThinkingOptionIds.includes(binding.thinking)) delete binding.thinking;
+      await this.bindings.write(binding);
+      await this.remember(binding);
+      return this.view(binding);
+    });
+  }
+
+  async selectThinking(raw: unknown) {
+    const request = thinkingRequest.parse(raw);
+    return this.bindings.serial(request.sessionId, async () => {
+      const agent = await this.agent(request.sessionId);
+      const binding = await this.bindings.read(request.sessionId);
+      if (!binding) throw new Error('请使用 DSH 原生模型选择器');
+      if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending) throw new Error('请等待当前请求结束');
+      const catalog = await this.catalog(binding);
+      if ('error' in catalog) throw new Error(catalog.error);
+      const modelId = binding.model?.id ?? catalog.defaultModel?.id;
+      const model = catalog.models.find(entry => entry.ref.id === modelId);
+      const allowed = model?.supportedThinkingOptionIds ?? catalog.thinkingOptions.map(option => option.id);
+      if (!catalog.thinkingOptions.some(option => option.id === request.thinking) || !allowed.includes(harnessThinkingOptionIdSchema.parse(request.thinking))) {
+        throw new Error('当前模型不支持这个推理强度');
+      }
+      const thinkingOptionId = harnessThinkingOptionIdSchema.parse(request.thinking);
+      const live = this.runner.live.get(request.sessionId);
+      if (live) unwrap(await live.session.execute({ type: 'thinking.select', thinkingOptionId }));
+      binding.thinking = thinkingOptionId;
+      await this.bindings.write(binding);
+      await this.remember(binding);
+      return this.view(binding);
+    });
+  }
+
+  /** Persist the session's model / thinking as the Harness default for future sessions. */
+  private async remember(binding: Binding): Promise<void> {
+    const defaults = await this.bindings.readDefaults();
+    await this.bindings.writeDefaults({ ...defaults, [binding.harness]: { ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinking: binding.thinking } : {}) } });
+  }
+
+  async selectPermission(raw: unknown) {
+    const request = permissionRequest.parse(raw);
+    return this.bindings.serial(request.sessionId, async () => {
+      const agent = await this.agent(request.sessionId);
+      const binding = await this.bindings.read(request.sessionId);
+      if (!binding) throw new Error('请使用 DSH 原生权限选择器');
+      if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending) throw new Error('请等待当前请求结束');
+      const inspection = await this.inspection(binding);
+      if ('error' in inspection) throw new Error(inspection.error);
+      if (!inspection.permissionModes?.modes.some(mode => mode.id === request.permission)) throw new Error('这个 Harness 不支持切换权限模式');
+      const permissionModeId = harnessPermissionModeIdSchema.parse(request.permission);
+      const live = this.runner.live.get(request.sessionId);
+      if (live) unwrap(await live.session.execute({ type: 'permissionMode.select', permissionModeId }));
+      binding.permission = permissionModeId;
       await this.bindings.write(binding);
       return this.view(binding);
     });
   }
 
+  async usage(raw: unknown) {
+    const { sessionId } = address.parse(raw);
+    await this.agent(sessionId);
+    const usage = this.runner.live.get(sessionId)?.usage ?? (await this.bindings.read(sessionId))?.usage;
+    if (!usage || (usage.contextUsedTokens === undefined && usage.totalTokens === undefined)) return null;
+    return { contextUsedTokens: usage.contextUsedTokens ?? null, contextWindowTokens: usage.contextWindowTokens ?? null, totalTokens: usage.totalTokens ?? null };
+  }
+
+  async quota(raw: unknown): Promise<Quota> {
+    const { sessionId } = address.parse(raw);
+    const agent = await this.agent(sessionId);
+    const binding = await this.bindings.read(sessionId);
+    if (binding) {
+      const adapter = this.adapters[binding.harness];
+      if (!adapter.inspectAccount) return null;
+      return this.cachedQuota(binding.harness, async () => accountQuota(await adapter.inspectAccount!(), binding.harness));
+    }
+    const route = await this.nativeRoute(agent);
+    if (!route) return null;
+    return this.cachedQuota(`native\0${route.source}\0${route.baseURL}`, () => fetchNativeQuota(route));
+  }
+
+  private cachedQuota(key: string, probe: () => Promise<Quota>): Promise<Quota> {
+    const cached = this.quotas.get(key);
+    if (cached && cached.until > Date.now()) return cached.work;
+    const work = probe().catch(error => { this.quotas.delete(key); throw error; });
+    this.quotas.set(key, { until: Date.now() + 60_000, work });
+    return work;
+  }
+
+  /** Endpoint and key of the native provider the session currently routes to; null when the host exposes neither. */
+  private async nativeRoute(agent: Awaited<ReturnType<HarnessService['agent']>>): Promise<NativeRoute | null> {
+    const ctx = this.ctx;
+    const selection = ctx.get('sessionProjections')?.stateOf(agent.session, 'modelSelection');
+    const provider = selection?.pending?.provider ?? selection?.lastUsed?.provider ?? agent.session.requestHeader()?.config.provider
+      ?? ctx.get('agentDefaultModel')?.currentSelection().provider;
+    const settings = ctx.get('settings');
+    if (!provider || !settings) return null;
+    let baseURL: string | undefined, apiKeyEnv: string | undefined;
+    if (provider === 'deepseek-official') {
+      const section = (settings.get('llm-deepseek') ?? {}) as { baseURL?: string; apiKeyEnv?: string };
+      baseURL = section.baseURL ?? process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com';
+      apiKeyEnv = section.apiKeyEnv ?? 'DEEPSEEK_API_KEY';
+    } else {
+      const section = (settings.get('llm-pi-ai') ?? {}) as { providers?: Record<string, { baseURL?: string; apiKeyEnv?: string }> };
+      baseURL = section.providers?.[provider]?.baseURL;
+      apiKeyEnv = section.providers?.[provider]?.apiKeyEnv;
+    }
+    if (!baseURL || !apiKeyEnv) return null;
+    const stored = await ctx.get('credentials')?.resolve(apiKeyEnv as never);
+    const apiKey = stored?.value ?? process.env[apiKeyEnv];
+    return apiKey ? { baseURL, apiKey, source: provider } : null;
+  }
+
   private view(binding?: Binding) {
     return { harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? false,
-      model: binding?.model?.id ?? null, recoveryRequired: !!binding?.pending };
+      model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null, recoveryRequired: !!binding?.pending };
   }
   private async agent(id: string) {
     const result = await this.ctx.sessionController.resolveAgent(SessionId(id));
@@ -190,4 +363,15 @@ export class HarnessService extends TypertRemoteService {
       };
     }, 'harness: original Session command integration');
   }
+}
+
+/** Flattens the shared account snapshot into quota windows: the primary credits window first, then per-product windows. */
+export function accountQuota(snapshot: HarnessAccountSnapshot | null, source: string): Quota {
+  if (!snapshot) return null;
+  const { credits } = snapshot;
+  const windows: QuotaWindow[] = [{ id: credits.periodType, label: credits.label ?? credits.periodType, usedPercent: credits.usedPercent, resetsAt: credits.resetsAt ?? null }];
+  for (const product of credits.productUsage ?? []) {
+    windows.push({ id: `product:${product.product}`, label: product.product, usedPercent: product.usagePercent, resetsAt: product.resetsAt ?? null });
+  }
+  return { kind: 'windows', source, plan: snapshot.plan ?? null, windows };
 }
