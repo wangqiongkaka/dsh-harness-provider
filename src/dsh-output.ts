@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { agentEvents, type Agent, type AssistantStreamFrame } from '@deepseek-ai/dsh-agent';
 import {
   AssistantStreamAccumulator, createAssistantMessage, createToolResultMessage, createUserMessage, LlmAttemptId, ToolCallId,
-  type ContentBlock, type StreamChunk,
+  type ContentBlock, type StreamChunk, type TokenUsage,
 } from '@deepseek-ai/dsh-llm';
 import type { Context } from '@deepseek-ai/cordis';
+import type { SessionEventMap } from '@deepseek-ai/dsh-session';
 import type { HostItem, HostItemSnapshot, HostItemUpdate } from '@codexhost/harness-adapter';
 
 /** Projects external activities into DSH's existing message/tool/stream contracts. */
@@ -12,6 +13,8 @@ export class DshOutput {
   private readonly active = new Map<string, {
     item: HostItem; stream: AssistantStreamAccumulator; attemptId: ReturnType<typeof LlmAttemptId>; index: number;
   }>();
+  /** The last agent message waits for the turn's usage so the native stats fold sees tokens on the message that produced them. */
+  private deferred?: { data: SessionEventMap['assistant/message']; attemptId: ReturnType<typeof LlmAttemptId>; index: number };
   constructor(private readonly ctx: Context, private readonly agent: Agent,
     private readonly position: { turn: number; step: number },
     private readonly revision: () => number,
@@ -19,6 +22,7 @@ export class DshOutput {
 
   start(item: HostItem): void {
     if (this.active.has(item.itemId)) throw new Error('Duplicate Harness item');
+    this.flush();
     const entry = { item: structuredClone(item), stream: new AssistantStreamAccumulator(),
       attemptId: LlmAttemptId(`harness:${randomUUID()}`), index: 0 };
     this.active.set(item.itemId, entry);
@@ -58,19 +62,21 @@ export class DshOutput {
       const block: ContentBlock = { type: item.type === 'reasoning' ? 'reasoning' : 'text', text: item.text };
       this.push(item.itemId, { type: 'block-end', index: 0, block });
       this.push(item.itemId, { type: 'finish', reason: interrupted ? { kind: 'aborted', failure: { code: 'UNKNOWN', message: 'Harness item interrupted' } } : { kind: 'stop' } });
-      const event = this.agent.session.append('assistant/message', {
+      this.flush();
+      this.deferred = { attemptId: entry.attemptId, index: entry.index, data: {
         ...this.position, message: createAssistantMessage({ source: this.source(), content: [block] }),
         stream: [...entry.stream.snapshot()], ...(interrupted ? { interrupted: true as const } : {}),
-      }, { surfaceOp: 'append' });
-      this.emit({ type: 'end', attemptId: entry.attemptId, revision: this.revision(), index: entry.index,
-        outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } });
+      } };
+      if (item.type === 'reasoning') this.flush();
     } else if (item.type === 'contextCompaction' || item.type === 'subagentDelegation') {
+      this.flush();
       this.agent.session.append('user/message', createUserMessage({
         source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice',
           summary: item.type === 'contextCompaction' ? 'Harness context compaction' : 'Harness subagent activity' },
         content: [{ type: 'text', text: JSON.stringify(snapshot) }],
       }), { surfaceOp: 'append' });
     } else {
+      this.flush();
       this.agent.session.append('tool/result', { ...this.position,
         message: createToolResultMessage({ callId: ToolCallId(item.itemId),
           content: toolOutput(item), isError: snapshot.outcome.status !== 'succeeded' }),
@@ -82,6 +88,22 @@ export class DshOutput {
 
   interrupt(): void {
     for (const entry of [...this.active.values()]) this.complete({ item: entry.item, outcome: { status: 'cancelled' } }, true);
+  }
+  /** Commit the deferred agent message with the turn's token usage; without one, a surface-less attempt still carries the count. */
+  finish(usage?: TokenUsage): void {
+    this.interrupt();
+    if (this.deferred || !usage) return this.flush(usage);
+    const stream = new AssistantStreamAccumulator();
+    stream.push({ time: Date.now(), chunk: { type: 'usage', usage } });
+    this.agent.session.append('assistant/attempt', { ...this.position, stream: [...stream.snapshot()] });
+  }
+  private flush(usage?: TokenUsage): void {
+    const pending = this.deferred;
+    if (!pending) return;
+    this.deferred = undefined;
+    const event = this.agent.session.append('assistant/message', { ...pending.data, ...(usage ? { usage } : {}) }, { surfaceOp: 'append' });
+    this.emit({ type: 'end', attemptId: pending.attemptId, revision: this.revision(), index: pending.index,
+      outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } });
   }
   private push(id: string, chunk: StreamChunk): void {
     const entry = this.active.get(id)!;

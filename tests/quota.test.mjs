@@ -9,8 +9,8 @@ test('智谱 Coding Plan limits[] 映射为 5 小时与周窗口，忽略 MCP TI
   { type: 'TOKENS_LIMIT', unit: 3, number: 5, percentage: 23, nextResetTime: 1_700_000_000_000 },
   { type: 'CREDIT_LIMIT', unit: 6, number: 1, currentValue: 47, usage: 100 },
   { type: 'TIME_LIMIT', unit: 5, number: 1, percentage: 99 },
- ] } }, 'glm');
- assert.deepEqual(quota, { kind: 'windows', source: 'glm', plan: null, windows: [
+ ], level: 'lite' } }, 'glm');
+ assert.deepEqual(quota, { kind: 'windows', source: 'glm', plan: 'lite', windows: [
   { id: 'five_hour', label: 'five_hour', usedPercent: 23, resetsAt: new Date(1_700_000_000_000).toISOString() },
   { id: 'seven_day', label: 'seven_day', usedPercent: 47, resetsAt: null },
  ] });

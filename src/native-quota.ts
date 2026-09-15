@@ -11,7 +11,7 @@ export type Quota =
 // limits[] 每行 percentage 为已用比例，nextResetTime 为重置时间（unix ms），unit 3/number 5 = 5 小时窗，unit 6/number 1 = 周窗。
 const zaiLimits = z.object({
   success: z.boolean().optional(),
-  data: z.object({ limits: z.array(z.object({
+  data: z.object({ level: z.string().optional(), limits: z.array(z.object({
     type: z.string(), unit: z.number().optional(), number: z.number().optional(),
     percentage: z.number().optional(), currentValue: z.number().optional(), usage: z.number().optional(),
     nextResetTime: z.number().optional(),
@@ -30,7 +30,7 @@ export function parseZaiQuota(raw: unknown, source: string): Quota {
     windows.push({ id, label: id, usedPercent: Math.max(0, Math.min(100, percent)),
       resetsAt: row.nextResetTime ? new Date(row.nextResetTime).toISOString() : null });
   }
-  return windows.length ? { kind: 'windows', source, plan: null, windows } : null;
+  return windows.length ? { kind: 'windows', source, plan: body.data.level ?? null, windows } : null;
 }
 
 // DeepSeek 开放平台：GET https://api.deepseek.com/user/balance（Bearer），balance_infos[] 含 total/granted/topped_up。

@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import type { UserMessage } from '@deepseek-ai/dsh-llm';
+import type { UserMessage, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HostInteraction, HostInteractionResponse, HarnessSessionState, HostUsage } from '@codexhost/harness-adapter';
 import { hostTurnIdSchema } from '@codexhost/shared-contracts';
@@ -23,6 +23,22 @@ function pump(live: Live): void {
       }
     } finally { live.ended = true; live.wake(); }
   })();
+}
+/** Persisted across restarts: the context reading for display, and the cumulative counters usageDelta subtracts from. */
+const USAGE_KEYS = ['contextUsedTokens', 'contextWindowTokens', 'totalTokens', 'inputTokens', 'cachedInputTokens', 'cacheWriteInputTokens', 'outputTokens'] as const;
+/**
+ * This turn's token usage as DSH's per-message buckets: the Harness reports cumulative counts with cached input included.
+ * Codex reports cached input separately; Claude Code lumps it into inputTokens and reports the latest request's hit rate,
+ * so its cache split is an estimate.
+ */
+export function usageDelta(before: HostUsage | null, after: HostUsage | null): TokenUsage | undefined {
+  if (!after) return undefined;
+  const step = (key: 'inputTokens' | 'cachedInputTokens' | 'cacheWriteInputTokens' | 'outputTokens') => Math.max(0, (after[key] ?? 0) - (before?.[key] ?? 0));
+  const input = step('inputTokens'), outputTokens = step('outputTokens');
+  if (!input && !outputTokens) return undefined;
+  const cacheReadTokens = after.cachedInputTokens !== undefined ? step('cachedInputTokens') : Math.round(input * (after.cacheHitRatePercent ?? 0) / 100);
+  const cacheWriteTokens = step('cacheWriteInputTokens');
+  return { inputTokens: Math.max(0, input - cacheReadTokens - cacheWriteTokens), outputTokens, cacheReadTokens, cacheWriteTokens };
 }
 async function take(live: Live): Promise<HarnessOutput | undefined> {
   while (!live.queue.length) {
@@ -77,6 +93,7 @@ export class DshRunner {
       provider: 'sourceProvider' in current.session && typeof current.session.sourceProvider === 'string' ? current.session.sourceProvider : 'unreported',
       model: binding.model?.id ?? current.session.initialState.effectiveModel?.id ?? 'unreported',
     }));
+    const usageBefore = current.usage;
     let submitted = false;
     let cancelWork: Promise<void> | undefined;
     let interactionError: unknown;
@@ -120,12 +137,10 @@ export class DshRunner {
           case 'item.updated': output.update(event.itemId, event.update); break;
           case 'item.completed': output.complete(event.snapshot); break;
           case 'turn.completed': {
-            output.interrupt();
+            output.finish(usageDelta(usageBefore, current.usage));
             await this.ctx.sessions.flush(agent.session);
             const uncertain = event.outcome.status === 'failed' && ['processExited', 'protocolError', 'internalError'].includes(event.outcome.error.code);
-            if (current.usage) binding.usage = { ...(current.usage.contextUsedTokens !== undefined ? { contextUsedTokens: current.usage.contextUsedTokens } : {}),
-              ...(current.usage.contextWindowTokens !== undefined ? { contextWindowTokens: current.usage.contextWindowTokens } : {}),
-              ...(current.usage.totalTokens !== undefined ? { totalTokens: current.usage.totalTokens } : {}) };
+            if (current.usage) binding.usage = Object.fromEntries(USAGE_KEYS.flatMap(key => current.usage![key] !== undefined ? [[key, current.usage![key]]] : []));
             if (!uncertain) delete binding.pending;
             await this.bindings.write(binding);
             completed = true;
@@ -152,7 +167,7 @@ export class DshRunner {
       turnAbort.abort();
       await Promise.allSettled(questions);
       await cancelWork;
-      try { output.interrupt(); } finally { agent.session.append('step/end', { turn, step }); }
+      try { output.finish(); } finally { agent.session.append('step/end', { turn, step }); }
     }
   }
 

@@ -30,7 +30,15 @@ await cp(resolve(reference, 'packages/host-runtime/dist/plugins/claude-code'), '
   const source = await readFile(file, 'utf8');
   const probe = 'stdio: ["ignore", "pipe", "ignore"]';
   if (source.split(probe).length !== 2) throw new Error(`build: expected exactly one shell-environment probe in ${file}`);
-  await writeFile(file, source.replace(probe, `${probe},\n    detached: process.platform !== "win32"`));
+  let patched = source.replace(probe, `${probe},\n    detached: process.platform !== "win32"`);
+  // The adapter deliberately pairs canUseTool (questions / plan approval) with every permission mode, so the SDK's
+  // bypassPermissions shadowing notice fires on each native query and lands on DSH's stderr as a process warning.
+  // Only that bypass notice is dropped; the allowedTools variant is kept.
+  const shadowed = /return "canUseTool will not be invoked: permissionMode 'bypassPermissions'[^"]*";/g;
+  const hits = patched.match(shadowed)?.length ?? 0;
+  if (hits === 1) patched = patched.replace(shadowed, 'return void 0;');
+  else console.warn(`build: expected one bypassPermissions canUseTool notice in ${file}, found ${hits}; left unpatched`);
+  await writeFile(file, patched);
 }
 
 await build({

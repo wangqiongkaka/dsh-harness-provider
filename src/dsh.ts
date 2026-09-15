@@ -244,7 +244,10 @@ export class HarnessService extends TypertRemoteService {
   async usage(raw: unknown) {
     const { sessionId } = address.parse(raw);
     await this.agent(sessionId);
-    const usage = this.runner.live.get(sessionId)?.usage ?? (await this.bindings.read(sessionId))?.usage;
+    const live = this.runner.live.get(sessionId);
+    // Claude Code only reads its context window when asked (the adapter rate-limits repeats); the reading lands as a usage event.
+    await live?.session.refreshUsage?.().catch(() => {});
+    const usage = live?.usage ?? (await this.bindings.read(sessionId))?.usage;
     if (!usage || (usage.contextUsedTokens === undefined && usage.totalTokens === undefined)) return null;
     return { contextUsedTokens: usage.contextUsedTokens ?? null, contextWindowTokens: usage.contextWindowTokens ?? null, totalTokens: usage.totalTokens ?? null };
   }

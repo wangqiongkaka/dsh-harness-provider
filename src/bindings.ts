@@ -10,8 +10,9 @@ const bindingSchema = z.object({
   cwd: z.string().min(1), locked: z.boolean(),
   model: harnessModelRefSchema.optional(), thinking: harnessThinkingOptionIdSchema.optional(), permission: harnessPermissionModeIdSchema.optional(),
   nativeRef: nativeSessionRefSchema.optional(),
-  /** Last context reading the Harness reported, kept so a cold-resumed session still shows it. */
-  usage: z.object({ contextUsedTokens: z.number().optional(), contextWindowTokens: z.number().optional(), totalTokens: z.number().optional() }).optional(),
+  /** Last usage the Harness reported: the context reading a cold-resumed session still shows, and the cumulative baseline for per-turn deltas. */
+  usage: z.object({ contextUsedTokens: z.number().optional(), contextWindowTokens: z.number().optional(), totalTokens: z.number().optional(),
+    inputTokens: z.number().optional(), cachedInputTokens: z.number().optional(), cacheWriteInputTokens: z.number().optional(), outputTokens: z.number().optional() }).optional(),
   pending: z.string().optional(),
 }).strict().refine(value => !value.nativeRef || value.nativeRef.harnessId === value.harness, 'Harness identity mismatch');
 export type Binding = z.infer<typeof bindingSchema>;

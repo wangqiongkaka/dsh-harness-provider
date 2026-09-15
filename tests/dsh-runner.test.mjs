@@ -15,9 +15,9 @@ import Persistence from '@deepseek-ai/dsh-session-persistence-jsonl';
 import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence';
 import { HarnessOutputChannel } from '@codexhost/harness-adapter';
 import { Bindings } from '../dist/bindings.js';
-import { DshRunner } from '../dist/dsh-runner.js';
+import { DshRunner, usageDelta } from '../dist/dsh-runner.js';
 
-function fakeAdapter(log) {
+function fakeAdapter(log,native) {
  const sessions=[];
  return {
   async open(input) {
@@ -37,7 +37,7 @@ function fakeAdapter(log) {
      assert.equal(command.type,'turn.start');active=command.turnId;
      emit({type:'turn.started',turnId:active});
      const text=command.input.map(p=>p.text).join('|');
-     if(text==='broken'){emit({type:'item.updated',turnId:active,itemId:'unknown-item',update:{type:'text.append',text:'invalid'}});return {ok:true,value:{turnId:active}};}
+     if(text==='broken'){emit({type:'item.completed',turnId:active,snapshot:{item:{type:'agentMessage',itemId:'answer',text:'reply:broken'},outcome:{status:'succeeded'}}});emit({type:'item.updated',turnId:active,itemId:'unknown-item',update:{type:'text.append',text:'invalid'}});return {ok:true,value:{turnId:active}};}
      emit({type:'item.started',turnId:active,item:{type:'agentMessage',itemId:'answer',text:''}});
      emit({type:'item.updated',turnId:active,itemId:'answer',update:{type:'text.append',text:'reply:'+text}});
      if(text==='wait') return {ok:true,value:{turnId:active}};
@@ -45,6 +45,9 @@ function fakeAdapter(log) {
      emit({type:'item.started',turnId:active,item:{type:'commandExecution',itemId:'tool',command:'pwd'}});
      emit({type:'item.completed',turnId:active,snapshot:{item:{type:'commandExecution',itemId:'tool',command:'pwd',output:'/workspace',exitCode:0},outcome:{status:'succeeded'}}});
      emit({type:'item.completed',turnId:active,snapshot:{item:{type:'contextCompaction',itemId:'compaction'},outcome:{status:'succeeded'}}});
+     if(text!=='three'){emit({type:'item.started',turnId:active,item:{type:'agentMessage',itemId:'final',text:'done'}});
+      emit({type:'item.completed',turnId:active,snapshot:{item:{type:'agentMessage',itemId:'final',text:'done'},outcome:{status:'succeeded'}}});}
+     const turns=++native.turns;emit({type:'session.usage.changed',usage:{inputTokens:1000*turns,cachedInputTokens:100*turns,outputTokens:50*turns}});
      emit({type:'turn.completed',turnId:active,outcome:{status:'succeeded'}});
      active=undefined;return {ok:true,value:{turnId:command.turnId}};
     },
@@ -58,7 +61,7 @@ function fakeAdapter(log) {
 
 test('real DSH loop persists streams/tools, handles cancellation, and cold-resumes external identity', {timeout:10000}, async()=>{
  const root=await mkdtemp(join(tmpdir(),'dsh-harness-runner-'));
- const contexts=[],logs=[];
+ const contexts=[],logs=[],native={turns:0};
  const bindings=new Bindings(join(root,'bindings'));
  const id=SessionId('integration-session');
  const frames=[];
@@ -66,7 +69,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   const ctx=new Context();contexts.push(ctx);
   for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
   await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
-  const adapter=fakeAdapter(logs);
+  const adapter=fakeAdapter(logs,native);
   const runner=new DshRunner(ctx,bindings,{codex:adapter});
   ctx.on('agent/assistant-stream',({frame})=>frames.push(frame));
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
@@ -81,7 +84,11 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   const ends=agent.session.snapshotEvents().filter(e=>e.type==='turn/end');
   assert.deepEqual(ends.map(e=>e.data.reason.kind),['completed','completed']);
   assert.equal(agent.session.snapshotEvents().filter(e=>e.type==='tool/result').length,2);
-  assert.equal(frames.filter(f=>f.type==='chunk' && f.chunk.type==='text-delta').length,2);
+  assert.equal(frames.filter(f=>f.type==='chunk' && f.chunk.type==='text-delta').length,4);
+  // The turn's usage delta rides the last agent message; earlier messages of the turn carry none.
+  const answers=agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='text');
+  assert.deepEqual(answers.map(e=>e.data.usage),[undefined,{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0},undefined,{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0}]);
+  assert.equal(frames.filter(f=>f.type==='end').length,4);
   assert.equal((await bindings.read(id)).pending,undefined);
   validateStoredEvents(agent.session.header,structuredClone(agent.session.snapshotEvents()));
   await first.ctx.fiber.dispose();await first.adapter.close();
@@ -91,6 +98,10 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   assert.equal(logs.length,2);
   assert.equal(logs[1].kind,'resume');assert.equal(logs[1].nativeRef.nativeSessionId,'native-fixed');
   assert.equal(resumed.agent.session.snapshotEvents().filter(e=>e.type==='user/message' && e.data.source.kind==='user').length,3);
+  // A turn that ends without an agent message still records its usage on a surface-less attempt;
+  // the baseline is restored from the binding, so the thread's pre-restart totals are not counted again.
+  const attempt=resumed.agent.session.snapshotEvents().filter(e=>e.type==='assistant/attempt').at(-1);
+  assert.deepEqual(attempt.data.stream.at(-1).chunk,{type:'usage',usage:{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0}});
   const started=Promise.withResolvers();
   const dispose=second.ctx.on('agent/assistant-stream',({frame})=>{if(frame.type==='chunk' && frame.chunk.type==='text-delta' && frame.chunk.text==='reply:wait') started.resolve();});
   const waiting=prompt(resumed.agent,'wait');await started.promise;
@@ -103,6 +114,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   await prompt(resumed.agent,'broken');
   assert.ok((await bindings.read(id)).pending);
   assert.equal(logs.filter(entry=>entry.kind==='cancel').length,2);
+  assert.equal(resumed.agent.session.snapshotEvents().filter(e=>e.type==='assistant/message').at(-1).data.message.content[0].text,'reply:broken');
   assert.equal(resumed.agent.session.snapshotEvents().filter(e=>e.type==='turn/end').at(-1).data.reason.kind,'error');
   await second.ctx.fiber.dispose();await second.adapter.close();
  } finally {
@@ -124,4 +136,12 @@ test('cancellation during native session initialization never starts a native tu
   await assert.rejects(runner.run({agent,messages:[createUserMessage({content:[{type:'text',text:'cancelled'}],source:{kind:'user'}})],turn:1,step:1,signal:abort.signal},binding),{name:'AbortError'});
   assert.equal(starts,0);assert.equal((await bindings.read(agent.id)).pending,undefined);
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});
+
+test('usageDelta splits cumulative Harness counts into per-turn buckets, estimating Claude Code cache reads from the hit rate',()=>{
+ assert.equal(usageDelta(null,null),undefined);
+ assert.equal(usageDelta({inputTokens:5,outputTokens:1},{inputTokens:5,outputTokens:1}),undefined);
+ assert.deepEqual(usageDelta({inputTokens:1000,cachedInputTokens:100,outputTokens:10},{inputTokens:1600,cachedInputTokens:400,outputTokens:25}),
+  {inputTokens:300,outputTokens:15,cacheReadTokens:300,cacheWriteTokens:0});
+ assert.deepEqual(usageDelta(null,{inputTokens:2000,outputTokens:40,cacheHitRatePercent:61}),{inputTokens:780,outputTokens:40,cacheReadTokens:1220,cacheWriteTokens:0});
 });

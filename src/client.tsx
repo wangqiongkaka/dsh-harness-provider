@@ -190,8 +190,12 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
     level = tier(tight.usedPercent);
     // Windows read as what is left: the chip and bars shrink toward empty as the quota runs out.
     const left = (percent: number) => Math.max(0, 100 - Math.round(percent));
+    // The chip lists the plan-wide windows (5-hour, weekly); per-model windows stay in the panel. Color follows the tightest.
+    const headline = quota.windows.filter(window => !window.id.startsWith('product:')).slice(0, 2);
+    const shown = headline.length ? headline : [tight];
     trigger = <>
-      {windowIcon(tight.id)}<span>{windowLabel(t, tight.id, tight.label)} {left(tight.usedPercent)}%</span>
+      {windowIcon(shown[0]!.id)}
+      {shown.map((window, index) => <span key={window.id} className={index ? 'hp-chip-effort' : undefined}>{index ? '· ' : ''}{windowLabel(t, window.id, window.label)} {left(window.usedPercent)}%</span>)}
       <span className="hp-mini"><span className={`hp-mini-fill${level}`} style={{ width: `${left(tight.usedPercent)}%` }} /></span>
     </>;
     panel = quota.windows.map((window, index) => {
@@ -210,7 +214,7 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
     </button>
     {open && <div className="hp-panel hp-panel-left" role="dialog" aria-label={t('quotaAria')}>
       {panel}
-      <div className="hp-foot">{t('quotaSource', { source: quota.source })}</div>
+      <div className="hp-foot">{t('quotaSource', { source: quota.kind === 'windows' && quota.plan ? `${quota.source} · ${quota.plan}` : quota.source })}</div>
     </div>}
   </div>;
 }
