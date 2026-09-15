@@ -13,7 +13,8 @@
     "check": "npm run typecheck && npm run build && npm test",
     "probe:codex": "node experiments/codex-native-probe.mjs",
     "probe:web": "node experiments/dsh-web-probe.mjs",
-    "probe:claude": "node experiments/claude-native-probe.mjs"
+    "probe:claude": "node experiments/claude-native-probe.mjs",
+    "sync:codexhost": "node scripts/sync-codexhost.mjs"
   },
   "files": [
     "dist/dsh.js",
@@ -59,5 +60,14 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "devDependencies": {
+    "@codexhost/harness-adapter": "file:vendor/codexhost/harness-adapter",
+    "@codexhost/shared-contracts": "file:vendor/codexhost/shared-contracts",
+    "@playwright/test": "1.62.0",
+    "@types/node": "24.13.3",
+    "esbuild": "0.28.1",
+    "typescript": "6.0.3",
+    "zod": "4.4.3"
   }
 }

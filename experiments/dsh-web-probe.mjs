@@ -7,7 +7,7 @@ import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 const reference=resolve(process.env.DSH_REFERENCE_ROOT ?? '../../deepseek-harness');
-const require=createRequire(resolve(process.env.CODEXHOST_REFERENCE_ROOT ?? '../../codex-host','package.json'));
+const require=createRequire(import.meta.url);
 const {chromium,expect}=require('@playwright/test');
 const {startResponsesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-codex/tests/responses-fixture.ts')));
 const {startMessagesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-claude-code/tests/messages-fixture.ts')));

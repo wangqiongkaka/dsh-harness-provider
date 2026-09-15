@@ -77,9 +77,10 @@ Claude Code 可执行文件可用 `CODEXHOST_CLAUDE_COMMAND` 环境变量指定�
 
 ## 开发
 
-需要已构建的参考项目 `codex-host` 与 `deepseek-harness`（默认位于上两级目录 `../../`），或用 `DSH_REFERENCE_ROOT` / `CODEXHOST_REFERENCE_ROOT` 指定：
+需要已构建的参考项目 `deepseek-harness`（默认位于上两级目录 `../../`），或用 `DSH_REFERENCE_ROOT` 指定。先 `npm install` 再 `npm run dev:link`；之后每次 `npm install` 都会清掉 DSH 链接，需要重新执行 `dev:link`：
 
 ```sh
+npm install
 npm run dev:link
 npm run check
 node experiments/codex-native-probe.mjs
@@ -90,7 +91,9 @@ node experiments/dsh-web-probe.mjs
 DSH_DELEGATION_PROBE=1 node experiments/dsh-web-probe.mjs
 ```
 
-开发链接只写本插件的 `node_modules`。构建产物不依赖 codexhost 工作区。Web 验证通过官方 `dsh plugin` 安装临时 Profile，使用真实 CLI、本地模拟模型服务和 Chromium；结束后清理临时状态，不使用真实模型端点。
+开发链接只写本插件的 `node_modules`。构建产物不依赖 codexhost 工作区。
+
+codexhost 的公共契约与 Claude Code Adapter 以构建产物形式放在 `vendor/codexhost/`，来源提交记录在 `SOURCE.json`；构建、类型检查和测试不需要本机有 `codex-host`。升级时在已构建的 codex-host 上执行 `npm run sync:codexhost -- /path/to/codex-host`，确认 `zod` 版本与 `package.json` 一致，再运行 `npm run check`。Web 验证通过官方 `dsh plugin` 安装临时 Profile，使用真实 CLI、本地模拟模型服务和 Chromium；结束后清理临时状态，不使用真实模型端点。
 
 ## 验证记录
 

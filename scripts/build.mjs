@@ -1,10 +1,7 @@
-import { createRequire } from 'node:module';
+import { build } from 'esbuild';
 import { mkdir, cp, copyFile, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-const reference = resolve(process.env.CODEXHOST_REFERENCE_ROOT ?? '../../codex-host');
-const require = createRequire(resolve(reference, 'package.json'));
-const { build } = require('esbuild');
 await mkdir('dist', { recursive: true });
 await copyFile('src/delegate-cli.mjs', 'dist/delegate-cli.mjs');
 await build({
@@ -17,10 +14,9 @@ await build({
   target: 'node22',
   sourcemap: true,
   logLevel: 'warning',
-  nodePaths: [resolve(reference, 'node_modules')],
 });
 
-await cp(resolve(reference, 'packages/host-runtime/dist/plugins/claude-code'), 'dist/claude-code', { recursive: true });
+await cp('vendor/codexhost/claude-code', 'dist/claude-code', { recursive: true });
 
 // The vendored adapter probes the user's login environment with a synchronous interactive shell (`zsh -ilc`).
 // An interactive shell with a controlling terminal takes over the terminal's foreground process group and leaves
@@ -45,7 +41,7 @@ await cp(resolve(reference, 'packages/host-runtime/dist/plugins/claude-code'), '
 await build({
   entryPoints: ['src/client.tsx'], outfile: 'dist/client.js', bundle: true,
   platform: 'browser', format: 'cjs', target: 'es2022', jsx: 'automatic',
-  external: ['react', 'react/jsx-runtime'], nodePaths: [resolve(reference, 'node_modules')],
+  external: ['react', 'react/jsx-runtime'],
   banner: { js: 'window.__ModuleLoader__.load({id:"dsh-harness-provider",factory:(require)=>{var module={exports:{}};var exports=module.exports;' },
   footer: { js: 'return module.exports;}});' },
 });
@@ -53,7 +49,7 @@ await build({
 await mkdir('dist/licenses', { recursive: true });
 for (const [source, target] of [
   ['node_modules/zod/LICENSE', 'zod.txt'],
-  ['node_modules/@anthropic-ai/claude-agent-sdk/LICENSE.md', 'claude-agent-sdk.md'],
-  ['node_modules/@anthropic-ai/claude-agent-sdk/README.md', 'claude-agent-sdk-README.md'],
-  ['LICENSE', 'codexhost.txt'],
-]) await copyFile(resolve(reference, source), resolve('dist/licenses', target));
+  ['vendor/codexhost/claude-agent-sdk/LICENSE.md', 'claude-agent-sdk.md'],
+  ['vendor/codexhost/claude-agent-sdk/README.md', 'claude-agent-sdk-README.md'],
+  ['vendor/codexhost/LICENSE', 'codexhost.txt'],
+]) await copyFile(source, resolve('dist/licenses', target));
