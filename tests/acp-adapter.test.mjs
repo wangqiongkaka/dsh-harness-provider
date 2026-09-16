@@ -83,7 +83,8 @@ const app = agent({ name: 'peer' })
     if (text === 'url') { const answer = await client.request('elicitation/create', { sessionId, mode: 'url', elicitationId: 'e1', message: 'Sign in', url: 'https://example.com/auth' }); note({ url: answer }); await reply('url:' + answer.action); return end(); }
     if (text === 'tool') {
       await update({ sessionUpdate: 'agent_thought_chunk', messageId: 'th1', content: { type: 'text', text: 'thinking' } });
-      await update({ sessionUpdate: 'tool_call', toolCallId: 'cmd', title: 'Terminal', name: 'Bash', kind: 'execute', status: 'pending', rawInput: {} });
+      // Claude streams command before the required description; the client must not freeze the incomplete input.
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'cmd', title: 'echo hi', name: 'Bash', kind: 'execute', status: 'pending', rawInput: { command: 'echo hi', cwd: '/tmp' } });
       await update({ sessionUpdate: 'tool_call_update', toolCallId: 'cmd', title: 'echo hi', status: 'in_progress', rawInput: { command: 'echo hi', cwd: '/tmp', description: 'Say hi' }, content: [{ type: 'content', content: { type: 'text', text: 'Say hi' } }] });
       await update({ sessionUpdate: 'tool_call_update', toolCallId: 'cmd', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'formatted hi' } }], rawOutput: { output: 'hi\\n', exitCode: 0 } });
       await update({ sessionUpdate: 'tool_call', toolCallId: 'edit', title: 'Edit a.txt', name: 'Edit', kind: 'edit', status: 'in_progress', rawInput: { file_path: '/tmp/a.txt', old_string: 'old', new_string: 'new' } });

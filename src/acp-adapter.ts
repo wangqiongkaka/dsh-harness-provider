@@ -742,6 +742,9 @@ class AcpSession implements HarnessSession {
             edits.forEach((diff, index) => this.#emitDone(active, diffTool(`${update.toolCallId}#${index}`, diff), outcome));
             return;
           }
+          // Claude streams Bash input one field at a time; wait for its required description before creating the DSH row.
+          if (merged.name === 'Bash' && commandOf(merged.rawInput)
+            && !text(record(merged.rawInput).description, 200) && !ended) return;
           if (!hasInput(merged.rawInput) && !ended) return;
           if (!merged.title && !merged.name) return;
           active.announced.delete(update.toolCallId);
