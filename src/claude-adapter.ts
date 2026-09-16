@@ -69,7 +69,8 @@ class ToolLifecycle {
     if (this.#tools.has(event.callId)) throw new Error('Claude Code Tool started more than once');
     const args = event.arguments;
     const command = event.toolName === 'Bash' && typeof args === 'object' && args !== null && !Array.isArray(args) && typeof args.command === 'string' ? args.command : undefined;
-    const item: ToolItem = command ? { type: 'commandExecution', itemId: newItemId(), command, cwd: this.cwd }
+    const item: ToolItem = command ? { type: 'commandExecution', itemId: newItemId(), command, cwd: this.cwd,
+      ...(typeof args === 'object' && args !== null && !Array.isArray(args) && typeof args.description === 'string' && args.description.trim() ? { description: args.description } : {}) }
       : { type: 'toolExecution', itemId: newItemId(), toolName: isTaskTool(event.toolName) ? 'Todo' : event.toolName, arguments: isTaskTool(event.toolName) ? {} : args };
     this.#tools.set(event.callId, { item, name: event.toolName, args, startedAt: Date.now(), elapsedMs: 0 });
     this.emit({ type: 'item.started', turnId: this.turnId, item });

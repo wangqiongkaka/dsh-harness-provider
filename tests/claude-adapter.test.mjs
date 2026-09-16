@@ -73,10 +73,11 @@ test('streams text, projects Bash and Edit activity, and reports exact per-proce
   const { adapter, session, out } = await openSession(sdk);
   const q = await startTurn(sdk, session, 'turn-1');
   assert.equal(q.options.sessionId.length, 36);
+  assert.match(q.options.systemPrompt?.append ?? '', /进展反馈/);
   assert.equal(q.prompts[0].message.content, 'hello');
   q.push({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start', message: { id: 'm1' } } });
   q.push({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Look' } } });
-  q.push(assistant('m1', [{ type: 'text', text: 'Looking' }, { type: 'tool_use', id: 'bash', name: 'Bash', input: { command: 'ls' } }, { type: 'tool_use', id: 'edit', name: 'Edit', input: { file_path: 'a.txt' } }],
+  q.push(assistant('m1', [{ type: 'text', text: 'Looking' }, { type: 'tool_use', id: 'bash', name: 'Bash', input: { command: 'ls', description: '查看项目文件' } }, { type: 'tool_use', id: 'edit', name: 'Edit', input: { file_path: 'a.txt' } }],
     { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 20, cache_read_input_tokens: 70 }));
   q.push({ type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result', tool_use_id: 'bash', content: 'a.txt' }] } });
   q.push({ type: 'user', parent_tool_use_id: null, tool_use_result: { filePath: '/workspace/a.txt', structuredPatch: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-a', '+b'] }] },
@@ -88,6 +89,7 @@ test('streams text, projects Bash and Edit activity, and reports exact per-proce
   assert.deepEqual(completed.map(item => item.type), ['agentMessage', 'commandExecution', 'toolExecution', 'fileChange']);
   assert.equal(completed[0].text, 'Looking');
   assert.equal(completed[1].output, 'a.txt');
+  assert.equal(completed[1].description, '查看项目文件');
   assert.equal(completed[3].changes[0].unifiedDiff, '--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n');
   const usage = out.seen.filter(eventOf('session.usage.changed')).at(-1).event.usage;
   assert.deepEqual(usage, { contextUsedTokens: 100, contextWindowTokens: 200000, inputTokens: 100, cachedInputTokens: 70, cacheWriteInputTokens: 20, outputTokens: 5 });

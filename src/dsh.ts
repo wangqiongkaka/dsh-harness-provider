@@ -30,7 +30,7 @@ import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from
 import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, secretAnswerRequest, recoveryRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest } from './delegation.js';
 
-export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions'];
+export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions', 'attachments', 'fileUploads'];
 export const configSchema = z.object({
   root: z.string().optional(), codexCommand: z.string().min(1).default('codex'),
 }).strict();

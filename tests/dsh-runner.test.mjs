@@ -47,8 +47,8 @@ function fakeAdapter(log,native) {
      emit({type:'item.updated',turnId:active,itemId:'answer',update:{type:'text.append',text:'reply:'+text}});
      if(text==='wait') return {ok:true,value:{turnId:active}};
      emit({type:'item.completed',turnId:active,snapshot:{item:{type:'agentMessage',itemId:'answer',text:'reply:'+text},outcome:{status:'succeeded'}}});
-     emit({type:'item.started',turnId:active,item:{type:'commandExecution',itemId:'tool',command:'pwd'}});
-     emit({type:'item.completed',turnId:active,snapshot:{item:{type:'commandExecution',itemId:'tool',command:'pwd',output:'/workspace',exitCode:0},outcome:{status:'succeeded'}}});
+     emit({type:'item.started',turnId:active,item:{type:'commandExecution',itemId:'tool',command:'pwd',description:'确认工作目录'}});
+     emit({type:'item.completed',turnId:active,snapshot:{item:{type:'commandExecution',itemId:'tool',command:'pwd',description:'确认工作目录',output:'/workspace',exitCode:0},outcome:{status:'succeeded'}}});
      emit({type:'item.completed',turnId:active,snapshot:{item:{type:'contextCompaction',itemId:'compaction'},outcome:{status:'succeeded'}}});
      if(text!=='three'){emit({type:'item.started',turnId:active,item:{type:'agentMessage',itemId:'final',text:'done'}});
       emit({type:'item.completed',turnId:active,snapshot:{item:{type:'agentMessage',itemId:'final',text:'done'},outcome:{status:'succeeded'}}});}
@@ -94,6 +94,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   const calls=agent.session.snapshotEvents().filter(e=>e.type==='tool/call');
   assert.deepEqual(calls.map(e=>e.data.name),['bash','bash']);
   assert.equal(JSON.parse(calls[0].data.arguments).command,'pwd');
+  assert.equal(JSON.parse(calls[0].data.arguments).description,'确认工作目录');
   assert.equal(frames.filter(f=>f.type==='chunk' && f.chunk.type==='text-delta').length,4);
   // The turn's usage delta rides the last agent message; earlier messages of the turn carry none.
   const answers=agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='text');

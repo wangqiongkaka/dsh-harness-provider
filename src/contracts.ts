@@ -129,7 +129,7 @@ export type HostItem =
   | { type: 'agentMessage'; itemId: HostItemId; text: string; phase?: 'commentary' | 'final_answer' }
   | { type: 'reasoning'; itemId: HostItemId; text: string }
   | { type: 'contextCompaction'; itemId: HostItemId }
-  | { type: 'commandExecution'; itemId: HostItemId; command: string; cwd?: string; output?: string; outputTruncated?: boolean; exitCode?: number | null; durationMs?: number }
+  | { type: 'commandExecution'; itemId: HostItemId; command: string; description?: string; cwd?: string; output?: string; outputTruncated?: boolean; exitCode?: number | null; durationMs?: number }
   | { type: 'toolExecution'; itemId: HostItemId; toolName: string; namespace?: string; arguments: JsonValue; output?: HostToolOutput; durationMs?: number }
   | { type: 'fileChange'; itemId: HostItemId; changes: HostFileChange[] }
   | { type: 'subagentDelegation'; itemId: HostItemId; operation: 'spawn' | 'send'; prompt?: string; subagents: HostSubagentState[] };

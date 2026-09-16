@@ -96,7 +96,28 @@ try{
  page.on('pageerror',error=>{logs+='\nBrowser: '+error.message;});
  await page.goto(url);await dismiss();
  const created=await rpc('workspace/create',{path:workspace});
- if(delegationProbe){
+ if(process.env.DSH_IMAGE_PROBE === '1'){
+  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC','base64');
+  for(const [harness,label,reply] of [['codex','Codex','Codex native first'],['claude-code','Claude Code','Claude native reply']]){
+   if(harness==='codex'){
+    await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:'image-'+harness});
+    await page.reload();
+   }else await page.getByRole('button').filter({hasText:'New Session'}).first().click();
+   await dismiss();
+   const selector=page.getByLabel('Select Harness',{exact:true});await selector.click();
+   await page.getByRole('menuitemradio',{name:label,exact:true}).click();
+   await page.locator('input[type="file"]').setInputFiles({name:'fixture.png',mimeType:'image/png',buffer:png});
+   await page.locator('[contenteditable="true"][role="textbox"]').fill('Describe the attached image');
+   const responsePromise=page.waitForResponse(response=>response.url().includes('/api/session/prompt'));
+   await page.getByRole('button',{name:'Send message',exact:true}).click();
+   const response=await responsePromise; const payload=await response.json();
+   assert.equal(payload.result?.ok,true,JSON.stringify(payload));
+   await expect(page.getByText(reply,{exact:true})).toBeVisible({timeout:45000});
+   const requests=harness==='codex'?codex.requests:claude.requests;
+   assert.ok(requests.some(request=>JSON.stringify(request.body).includes(harness==='codex'?'input_image':'"type":"image"')),'native model request must contain image');
+   console.log('PASS: '+label+' composer image upload reaches the native model request');
+  }
+ }else if(delegationProbe){
   const sessionId='claude-delegation-parent';
   await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId});
   await rpc('harness/select',{sessionId,harness:'claude-code'});
@@ -104,7 +125,11 @@ try{
   await page.reload();await dismiss();
   await rpc('session/prompt',{sessionId,requestId:'delegate-web-parent',mode:'queue',content:[{type:'text',text:'Use Codex to review this workspace'}]});
   const review=page.getByText('Codex review',{exact:true});
-  await review.waitFor({timeout:60000});await review.click();
+  await review.waitFor({timeout:60000});
+  await page.getByRole('button',{name:'1 tool call',exact:true}).click();
+  await expect(page.getByText('Create visible Codex review',{exact:true})).toBeVisible({timeout:10000});
+  console.log('PASS: Bash activity displays its purpose description instead of a raw command');
+  await review.click();
   await page.getByText('Codex native first',{exact:true}).waitFor({timeout:60000});
   const childId='session-'+createHash('sha256').update(JSON.stringify([sessionId,'web-review'])).digest('hex');
   assert.equal((await rpc('harness/state',{sessionId:childId})).harness,'codex');

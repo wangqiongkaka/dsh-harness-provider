@@ -1,3 +1,4 @@
+import { feedbackInstructions } from './feedback.js';
 import {
   HarnessOutputChannel, validateHostInteractionResponse,
   type HarnessAdapter, type HarnessOutput, type HarnessSession, type HarnessSessionState,
@@ -226,6 +227,7 @@ class CodexSession implements HarnessSession {
       const requested = input.permissionModeId ? permissionModeOf(input.permissionModeId) : undefined;
       const response = opened.parse(await session.rpc.request(input.kind === 'create' ? 'thread/start' : 'thread/resume', {
         cwd: input.cwd,
+        developerInstructions: feedbackInstructions,
         ...(input.model ? { model: input.model.id } : {}),
         ...(requested ? { sandbox: requested.sandbox, approvalPolicy: requested.approval } : {}),
         ...(input.kind === 'create' ? { ephemeral: false } : { threadId: input.nativeRef.nativeSessionId }),

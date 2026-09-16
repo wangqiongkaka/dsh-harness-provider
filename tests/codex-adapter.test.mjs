@@ -13,6 +13,7 @@ for await (const line of createInterface({input:process.stdin})) {
  if(req.method==='initialized') continue;
  if(req.method==='initialize') send({id:req.id,result:{}});
  else if(req.method==='thread/start' || req.method==='thread/resume') {
+  if(!p.developerInstructions?.includes('进展反馈')) process.exit(10);
   if(req.method==='thread/start' && p.ephemeral!==false) process.exit(2);
   if(req.method==='thread/resume' && p.threadId!=='native-thread') process.exit(3);
   send({id:req.id,result:{thread:{id:'native-thread',cwd:p.cwd,ephemeral:false,turns:[]},model:'test-model',modelProvider:process.env.DSH_TEST_SESSION ?? 'test-provider',sandbox:{type:p.sandbox==='read-only'?'readOnly':'dangerFullAccess'}}});

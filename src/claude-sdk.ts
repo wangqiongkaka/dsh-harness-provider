@@ -1,3 +1,4 @@
+import { feedbackInstructions } from './feedback.js';
 /** Claude Code processes: executable discovery, environment, and the Agent SDK query each native session runs on. */
 import { execFile, spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import fs from 'node:fs';
@@ -277,6 +278,7 @@ export class ClaudeTransport {
       prompt: this.#input,
       options: {
         cwd: options.cwd,
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: feedbackInstructions },
         ...(options.openMode === 'resume' ? { resume: options.sessionId } : { sessionId: options.sessionId }),
         ...(options.model ? { model: options.model } : {}),
         // Adaptive thinking is redacted by default (empty thinking deltas); summarized display is the readable channel.

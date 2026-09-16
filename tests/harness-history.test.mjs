@@ -32,6 +32,7 @@ async function fixture() {
   };
   await ctx.plugin(Typert);await ctx.plugin(Commands);
   ctx.provide('agents',{get:()=>agent});ctx.provide('sessions',{async flush(){}});ctx.provide('userQuestions',{});
+  ctx.provide('attachments',{});ctx.provide('fileUploads',{});
   await ctx.plugin({inject,apply(scope){new HarnessService(scope,root,{codex:adapter,'claude-code':adapter});}});
   await ctx.harness.bindings.write({version:1,sessionId:'session',harness:'codex',cwd:root,locked:true,nativeRef:ref,pending:'dsh:session:2',pendingNative:'last',turns:[{turn:1,key:'first'},{turn:2,key:'last'}]});
   return {ctx,root,events,calls,agent,setOutcome(value){outcome=value;},async close(){await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}};

@@ -4,6 +4,7 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Context,Service} from '@deepseek-ai/cordis';
+import LocalAttachments from '@deepseek-ai/dsh-attachment-local';
 import Typert from '@deepseek-ai/dsh-typert-registry';
 import {HarnessService,inject} from '../dist/dsh.js';
 
@@ -20,6 +21,8 @@ test('public command wrapper preserves native routing, deduplicates external adm
   updateQueue(){return {};}
  }
  try{
+  await ctx.plugin(LocalAttachments,{dshHome:root});
+  ctx.provide('fileUploads',{resolve:()=>undefined});
   await ctx.plugin(Typert);await ctx.plugin(NativeCommands);
   ctx.provide('agents',{get:()=>agent});ctx.provide('sessions',{});ctx.provide('userQuestions',{});
   const adapter={async close(){}};
@@ -32,6 +35,12 @@ test('public command wrapper preserves native routing, deduplicates external adm
   await ctx.harness.select({sessionId:'bound',harness:'codex'});
   await controller.prompt(request,signal);await controller.prompt(request,signal);
   assert.equal(nativePrompts,1);assert.equal(agent.inbox.nextTurn.length,1);
+  const png='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC';
+  await controller.prompt({...request,requestId:'image-request',content:[{type:'image',mediaType:'image/png',data:png}]},signal);
+  assert.equal(agent.inbox.nextTurn[1].content[0].type,'image');
+  assert.ok((await ctx.attachments.readImage(agent.inbox.nextTurn[1].content[0].attachment)).data.length);
+  await assert.rejects(controller.prompt({...request,requestId:'file-request',content:[{type:'file',receiptId:'foreign'}]},signal),/附件不属于/);
+
   await assert.rejects(ctx.harness.select({sessionId:'bound',harness:'claude-code'}),/新建会话/);
   assert.equal(ctx.typert.local.get('harness/state').service,'harness');
   await fiber.dispose();

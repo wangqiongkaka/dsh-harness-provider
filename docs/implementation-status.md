@@ -38,6 +38,12 @@
 
 以上真实 CLI 与浏览器检查使用本地模拟模型服务，没有调用真实云模型。未执行真实云模型、真实写文件审批、Windows/Linux 和独立 Desktop 发行包验证；未安装到用户日常 Profile。
 
+## 图片发送修复
+
+修复 `cannot get property "attachments" without inject (gateway/internal)`：插件入口漏声明 `attachments` 和 `fileUploads`，导致真实 Cordis 插件作用域拒绝访问。直接在根 Context 上验证附件转换无法发现这一问题。
+
+回归检查改为通过声明依赖的插件作用域发送图片，并验证文件上传票据隔离。`npm run check` 的类型检查、构建和 28 项测试通过。`DSH_IMAGE_PROBE=1 DSH_PLUGIN_TAR=.cache/dsh-harness-provider-0.1.2.tgz node experiments/dsh-web-probe.mjs` 使用真实输入框上传 PNG，并检查实际原生模型请求包含图片；模型服务仍使用本地模拟端点。
+
 ## 保留的边界
 
 - 普通文件提供已校验的本地附件路径，由原生工具按权限读取；不内置通用文档解析器。远程图片 URL 保留引用，不自动下载。

@@ -31,6 +31,7 @@ test('thinking selection validates against the catalog, persists, and quota read
   await ctx.plugin(Typert);await ctx.plugin(NativeCommands);
   ctx.provide('agents',{get:()=>agent});ctx.provide('sessions',{});ctx.provide('userQuestions',{});
   ctx.provide('sessionProjections',{stateOf:(session,key)=>{assert.equal(session.header.cwd,root);return key==='permissions'?{sandbox:'danger-full-access'}:undefined;}});
+  ctx.provide('attachments',{});ctx.provide('fileUploads',{});
   await ctx.plugin({inject,apply(scope){new HarnessService(scope,root,{codex:adapter,'claude-code':adapter});}});
   const h=ctx.harness;
   assert.equal(await h.quota({sessionId:'bound'}),null); // native session, no provider route exposed here

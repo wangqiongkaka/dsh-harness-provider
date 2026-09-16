@@ -64,6 +64,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
   await ctx.plugin(Commands);
   ctx.provide('userQuestions',{});ctx.provide('workspaceRegistry',{list:()=>[workspace]});
+  ctx.provide('attachments',{});ctx.provide('fileUploads',{});
   await ctx.plugin({inject,apply(scope){new HarnessService(scope,join(root,'bindings'),{codex:adapter('codex'),'claude-code':adapter('claude-code')});}});
   ctx.on('agent/pre-step',async(payload,next)=>payload.agent.id==='other'?{kind:'enter',messages:[]}:next());
   await ctx.plugin(Loop,{agents:[]});
