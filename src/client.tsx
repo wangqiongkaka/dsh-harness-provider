@@ -541,7 +541,7 @@ const styles = `
 .hp-chevron{flex:none;color:var(--dsw-alias-label-caption);transition:transform 120ms ease}
 .hp-chevron-open{transform:rotate(180deg)}
 .hp-quota-ring{flex:none}
-.hp-bar-fill{display:block;height:100%;border-radius:999px;background:var(--dsw-alias-label-tertiary)}
+.hp-bar-fill{display:block;height:100%;border-radius:999px;background:var(--dsw-alias-state-success-primary)}
 .hp-bar-fill.hp-warn{background:var(--dsw-alias-state-warn-primary)}.hp-bar-fill.hp-danger{background:var(--dsw-alias-state-error-primary)}
 .hp-menu{position:absolute;bottom:calc(100% + 8px);z-index:100;display:flex;flex-direction:column;box-sizing:border-box;width:max-content;min-width:240px;max-width:min(420px,calc(100vw - 32px));max-height:min(360px,calc(100vh - 96px));overflow-y:auto;padding:4px;border:0;border-radius:20px;background:var(--dsw-specific-menu);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-primary);text-align:left}
 .hp-menu-left,.hp-panel-left{left:0}.hp-menu-right,.hp-panel-right{right:0}
