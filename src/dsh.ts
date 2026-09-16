@@ -28,7 +28,7 @@ import { AcpAdapter } from './acp-adapter.js';
 import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
-import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, secretAnswerRequest, recoveryRequest } from './remote.js';
+import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest } from './delegation.js';
 
 export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions', 'attachments', 'fileUploads'];
@@ -151,7 +151,7 @@ export class HarnessService extends TypertRemoteService {
     if (!binding.nativeRef) throw new Error('尚未保存原生会话身份，无法读取或分支');
     const session = unwrap(await this.adapters[binding.harness].open({ kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef,
       ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
-      ...(binding.permission ? { permissionModeId: binding.permission } : {}) }));
+      ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(binding.configs ? { configValues: binding.configs } : {}) }));
     try { return await work(session); } finally { await session.close(); }
   }
 
@@ -407,7 +407,7 @@ export class HarnessService extends TypertRemoteService {
     const { sessionId } = address.parse(raw);
     await this.agent(sessionId);
     const binding = await this.bindings.read(sessionId);
-    const empty = { models: [], defaultModel: null, thinkingOptions: [], defaultThinkingOptionId: null, permissionModes: [], defaultPermissionModeId: null };
+    const empty = { models: [], defaultModel: null, thinkingOptions: [], defaultThinkingOptionId: null, permissionModes: [], defaultPermissionModeId: null, configOptions: [] };
     if (!binding) return { ...empty, error: null };
     const inspection = await this.inspection(binding);
     if ('error' in inspection) return { ...empty, error: inspection.error };
@@ -420,6 +420,9 @@ export class HarnessService extends TypertRemoteService {
       defaultThinkingOptionId: catalog.defaultThinkingOptionId ?? null,
       permissionModes: (inspection.permissionModes?.modes ?? []).map(mode => ({ id: mode.id, label: mode.label, dangerous: mode.dangerous === true })),
       defaultPermissionModeId: inspection.permissionModes?.defaultModeId ?? null,
+      configOptions: (catalog.configOptions ?? []).map(option => ({ id: option.id, label: option.label, description: option.description ?? null,
+        currentValue: binding.configs?.[option.id] ?? option.currentValue,
+        choices: option.choices?.map(choice => ({ value: choice.value, label: choice.label, description: choice.description ?? null })) ?? null })),
       error: null,
     };
   }
@@ -511,6 +514,26 @@ export class HarnessService extends TypertRemoteService {
     });
   }
 
+  async selectConfig(raw: unknown) {
+    const request = configRequest.parse(raw);
+    return this.bindings.serial(request.sessionId, async () => {
+      const agent = await this.agent(request.sessionId);
+      const binding = await this.bindings.read(request.sessionId);
+      if (!binding) throw new Error('请使用 DSH 原生配置');
+      if (agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length || binding.pending) throw new Error('请等待当前请求结束');
+      const catalog = await this.catalog(binding);
+      if ('error' in catalog) throw new Error(catalog.error);
+      const option = catalog.configOptions?.find(entry => entry.id === request.configId);
+      if (!option || typeof option.currentValue !== typeof request.value
+        || (option.choices && !option.choices.some(choice => choice.value === request.value))) throw new Error('Harness 未提供这个配置值');
+      const live = this.runner.live.get(request.sessionId);
+      if (live) unwrap(await live.session.execute({ type: 'config.select', configId: option.id, value: request.value }));
+      binding.configs = { ...binding.configs, [option.id]: request.value };
+      await this.bindings.write(binding);
+      return this.view(binding);
+    });
+  }
+
   async usage(raw: unknown) {
     const { sessionId } = address.parse(raw);
     await this.agent(sessionId);
@@ -570,7 +593,8 @@ export class HarnessService extends TypertRemoteService {
 
   private view(binding?: Binding) {
     return { harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? false,
-      model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null, recoveryRequired: !!binding?.pending };
+      model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null,
+      configs: binding?.configs ?? {}, recoveryRequired: !!binding?.pending };
   }
   private async agent(id: string) {
     const result = await this.ctx.sessionController.resolveAgent(SessionId(id));

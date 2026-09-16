@@ -22,7 +22,8 @@ test('thinking selection validates against the catalog, persists, and quota read
  const adapter={
   async inspect(){inspections++;return {status:'ready',capabilities:{},catalog:{
    models:[{ref:{id:'m1'},label:'One',resolvedModelLabel:'one-2026',supportedThinkingOptionIds:['low','high']},{ref:{id:'m2'},label:'Two',supportedThinkingOptionIds:['low']}],
-   thinkingOptions:[{id:'low',label:'Low'},{id:'high',label:'High'}],defaultModel:{id:'m1'},defaultThinkingOptionId:'high'},
+   thinkingOptions:[{id:'low',label:'Low'},{id:'high',label:'High'}],defaultModel:{id:'m1'},defaultThinkingOptionId:'high',
+   configOptions:[{id:'collaboration_mode',label:'Collaboration mode',currentValue:'default',choices:[{value:'default',label:'Default'},{value:'plan',label:'Plan'}]},{id:'fast-mode',label:'Fast mode',currentValue:false}]},
    permissionModes:{modes:[{id:'default',label:'Default'},{id:'bypassPermissions',label:'Bypass',dangerous:true}],defaultModeId:'default'}};},
   async inspectAccount(){accounts++;return {plan:'pro',credits:{usedPercent:40,periodType:'five_hour',productUsage:[{product:'Opus · 7-day',usagePercent:12}]}};},
   async close(){},
@@ -46,6 +47,10 @@ test('thinking selection validates against the catalog, persists, and quota read
   assert.deepEqual(catalog.defaultModel,{id:'m1',label:'One',resolved:'one-2026'});
   assert.deepEqual(catalog.permissionModes,[{id:'default',label:'Default',dangerous:false},{id:'bypassPermissions',label:'Bypass',dangerous:true}]);
   assert.equal(catalog.defaultPermissionModeId,'default');
+  assert.deepEqual(catalog.configOptions.map(option=>[option.id,option.currentValue]),[['collaboration_mode','default'],['fast-mode',false]]);
+  assert.equal((await h.selectConfig({sessionId:'bound',configId:'collaboration_mode',value:'plan'})).configs.collaboration_mode,'plan');
+  assert.equal((await h.selectConfig({sessionId:'bound',configId:'fast-mode',value:true})).configs['fast-mode'],true);
+  await assert.rejects(h.selectConfig({sessionId:'bound',configId:'collaboration_mode',value:'invalid'}),/未提供/);
   assert.equal((await h.selectPermission({sessionId:'bound',permission:'bypassPermissions'})).permission,'bypassPermissions');
   await assert.rejects(h.selectPermission({sessionId:'bound',permission:'root'}),/不支持/);
   let state=await h.selectThinking({sessionId:'bound',thinking:'low'});

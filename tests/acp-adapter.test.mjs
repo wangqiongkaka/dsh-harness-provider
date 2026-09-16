@@ -17,12 +17,13 @@ const history = process.env.PEER_HISTORY;
 const load = () => { try { return JSON.parse(readFileSync(history, 'utf8')); } catch { return []; } };
 const save = entries => writeFileSync(history, JSON.stringify(entries));
 const note = value => appendFileSync(process.env.PEER_LOG, JSON.stringify(value) + '\\n');
-let ctx, sessionId = 'native-session', current = { mode: 'agent', model: 'gpt-5.5', effort: 'high' }, cancelled = false, steered;
+let ctx, sessionId = 'native-session', current = { mode: 'agent', model: 'gpt-5.5', effort: 'high', collaboration: 'default', fast: false }, cancelled = false, steered;
 const options = () => [
   { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: current.mode, options: [{ value: 'read-only', name: 'Ask' }, { value: 'agent', name: 'Approve for me' }, { value: 'agent-full-access', name: 'Full access', _meta: { kind: 'full_access' } }] },
   { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: current.model, options: [{ value: 'gpt-5.5', name: 'GPT-5.5' }, { value: 'gpt-5.5-mini', name: 'Mini' }, { value: 'opus[1m]', name: 'Opus' }], _meta: { jetbrains: { air: { version: 1, recommendedValue: 'gpt-5.5-mini' } } } },
   { id: 'reasoning_effort', name: 'Effort', category: 'thought_level', type: 'select', currentValue: current.effort, options: [{ value: 'low', name: 'Low' }, { value: 'high', name: 'High' }] },
-  { id: 'fast-mode', name: 'Fast', category: 'model_config', type: 'boolean', currentValue: false },
+  { id: 'collaboration_mode', name: 'Collaboration mode', category: 'collaboration_mode', type: 'select', currentValue: current.collaboration, options: [{ value: 'default', name: 'Default' }, { value: 'plan', name: 'Plan' }] },
+  { id: 'fast-mode', name: 'Fast', category: 'model_config', type: 'boolean', currentValue: current.fast },
 ];
 const opened = () => ({ modes: { currentModeId: current.mode, availableModes: [{ id: 'read-only', name: 'Ask', _meta: { kind: 'standard' } }, { id: 'agent', name: 'Approve for me' }, { id: 'agent-full-access', name: 'Full access', _meta: { kind: 'full_access' } }] },
   configOptions: options(), models: { availableModels: [{ modelId: 'gpt-5.5[low]', name: '' }, { modelId: 'gpt-5.5[high]', name: '' }, { modelId: 'gpt-5.5-mini[low]', name: '' }], currentModelId: 'gpt-5.5[high]' } });
@@ -45,7 +46,7 @@ const app = agent({ name: 'peer' })
   })
   .onRequest('session/fork', async ({ params }) => { note({ fork: params._meta ?? null }); return { sessionId: 'forked-' + (params._meta?.jetbrains?.air?.fork?.messageId ?? 'all') }; })
   .onRequest('session/close', async () => ({}))
-  .onRequest('session/set_config_option', async ({ params }) => { if (params.configId === 'model') current.model = params.value; else if (params.configId === 'reasoning_effort') current.effort = params.value; else if (params.configId === 'mode') current.mode = params.value; else process.exit(23); return { configOptions: options() }; })
+  .onRequest('session/set_config_option', async ({ params }) => { if (params.configId === 'model') current.model = params.value; else if (params.configId === 'reasoning_effort') current.effort = params.value; else if (params.configId === 'mode') current.mode = params.value; else if (params.configId === 'collaboration_mode') current.collaboration = params.value; else if (params.configId === 'fast-mode') current.fast = params.value; else process.exit(23); return { configOptions: options() }; })
   .onRequest('session/set_mode', async ({ params }) => { current.mode = params.modeId; await update({ sessionUpdate: 'current_mode_update', currentModeId: params.modeId }); return {}; })
   .onRequest('_session/steering', value => value, async ({ params }) => { steered = params.prompt[0].text; return { outcome: 'injected' }; })
   .onNotification('session/cancel', () => { cancelled = true; })
@@ -149,6 +150,9 @@ test('inspection reads catalogs, modes and skills from a throwaway session; quot
     assert.equal(inspection.catalog.models[2].supportedThinkingOptionIds, undefined);
     assert.equal(inspection.catalog.defaultModel.id, 'gpt-5.5-mini'); // AIR recommended value beats the current value
     assert.equal(inspection.catalog.defaultThinkingOptionId, 'high');
+    assert.deepEqual(inspection.catalog.configOptions.map(option => [option.id, option.currentValue, option.choices?.map(choice => choice.value) ?? null]), [
+      ['collaboration_mode', 'default', ['default', 'plan']], ['fast-mode', false, null],
+    ]);
     assert.deepEqual(inspection.permissionModes.modes.map(mode => [mode.id, mode.dangerous === true]), [['read-only', false], ['agent', false], ['agent-full-access', true]]);
     assert.equal(inspection.permissionModes.defaultModeId, 'agent');
     assert.deepEqual(inspection.capabilities, { configuration: { selectModel: true, selectThinkingOption: true, selectPermissionMode: true, permissionModeScope: 'live' }, history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true } });
@@ -162,11 +166,13 @@ test('turns stream text, apply hints, steer, cancel, and carry cumulative usage 
   const f = await fixture();
   const adapter = new AcpAdapter({ profile: f.profile, environment: {} });
   try {
-    const session = value(await adapter.open({ kind: 'create', cwd: f.root, model: modelRef('opus[1m]'), thinkingOptionId: 'auto', permissionModeId: 'dangerFullAccess', usage: { inputTokens: 1000, outputTokens: 100, cachedInputTokens: 0, cacheWriteInputTokens: 0 } }));
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root, model: modelRef('opus[1m]'), thinkingOptionId: 'auto', permissionModeId: 'dangerFullAccess',
+      configValues: { collaboration_mode: 'plan', 'fast-mode': true }, usage: { inputTokens: 1000, outputTokens: 100, cachedInputTokens: 0, cacheWriteInputTokens: 0 } }));
     assert.equal(session.initialState.nativeRef.nativeSessionId, 'native-session');
     assert.equal(session.initialState.effectiveModel.id, 'b64.b3B1c1sxbV0');
     assert.equal(session.initialState.effectivePermissionModeId, 'agent-full-access');
     assert.equal(session.initialState.effectiveThinkingOptionId, 'high');
+    assert.deepEqual(session.initialState.configValues, { collaboration_mode: 'plan', 'fast-mode': true });
     assert.deepEqual(await session.listSkills(), [{ name: 'probe-skill', description: 'probe', modelInvocable: true }, { name: 'status', description: 'Show status <none>', modelInvocable: true }]);
     const output = session.outputs[Symbol.asyncIterator]();
     value(await session.execute({ type: 'turn.start', turnId: 'host-1', input: [{ type: 'text', text: 'first' }] }));
@@ -196,12 +202,15 @@ test('turns stream text, apply hints, steer, cancel, and carry cumulative usage 
     value(await session.execute({ type: 'model.select', model: modelRef('gpt-5.5-mini') }));
     value(await session.execute({ type: 'thinking.select', thinkingOptionId: 'low' }));
     value(await session.execute({ type: 'permissionMode.select', permissionModeId: 'read-only' }));
+    value(await session.execute({ type: 'config.select', configId: 'collaboration_mode', value: 'default' }));
+    value(await session.execute({ type: 'config.select', configId: 'fast-mode', value: false }));
     assert.equal((await session.execute({ type: 'permissionMode.select', permissionModeId: 'bogus' })).ok, false);
-    const states = [];
-    while (states.length < 3) { const next = await output.next(); if (next.value.event?.type === 'session.state.changed') states.push(next.value.event.state); }
-    assert.equal(states[0].effectiveModel.id, 'gpt-5.5-mini'); assert.equal(states[0].resolvedModelLabel, 'Mini');
-    assert.equal(states[1].effectiveThinkingOptionId, 'low');
-    assert.equal(states[2].effectivePermissionModeId, 'read-only');
+    let state;
+    while (state?.effectiveModel?.id !== 'gpt-5.5-mini' || state.effectiveThinkingOptionId !== 'low' || state.effectivePermissionModeId !== 'read-only'
+      || state.configValues?.collaboration_mode !== 'default' || state.configValues?.['fast-mode'] !== false) {
+      const next = await output.next(); if (next.value.event?.type === 'session.state.changed') state = next.value.event.state;
+    }
+    assert.equal(state.resolvedModelLabel, 'Mini');
     const snapshot = value(await session.readSnapshot());
     assert.deepEqual(snapshot.turns.map(turn => [turn.input[0].text, turn.outcome.status]), [['PREFIX first', 'succeeded'], ['second', 'succeeded'], ['$probe-skill go\nmore', 'succeeded'], ['/status now', 'succeeded'], ['', 'succeeded'], ['wait', 'succeeded'], ['cancel', 'unknown']]);
     await session.close();

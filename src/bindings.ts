@@ -9,6 +9,7 @@ const bindingSchema = z.object({
   version: z.literal(1), sessionId: z.string().min(1), harness: harnessChoice,
   cwd: z.string().min(1), locked: z.boolean(),
   model: harnessModelRefSchema.optional(), thinking: harnessThinkingOptionIdSchema.optional(), permission: harnessPermissionModeIdSchema.optional(),
+  configs: z.record(z.string(), z.union([z.string(), z.boolean()])).optional(),
   nativeRef: nativeSessionRefSchema.optional(),
   /** Last usage the Harness reported: the context reading a cold-resumed session still shows, and the cumulative baseline for per-turn deltas. */
   usage: z.object({ contextUsedTokens: z.number().optional(), contextWindowTokens: z.number().optional(), totalTokens: z.number().optional(),

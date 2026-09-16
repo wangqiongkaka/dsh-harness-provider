@@ -89,7 +89,8 @@ export class DshRunner {
     if (!live) {
       const hints = { ...(delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) } } : {}),
         ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
-        ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(binding.usage ? { usage: binding.usage } : {}) };
+        ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(binding.configs ? { configValues: binding.configs } : {}),
+        ...(binding.usage ? { usage: binding.usage } : {}) };
       const session = unwrap(await this.adapters[binding.harness].open(binding.nativeRef
         ? { kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef, ...hints }
         : { kind: 'create', cwd: binding.cwd, ...hints }));
@@ -114,7 +115,7 @@ export class DshRunner {
     const turnAbort = new AbortController();
     const questionSignal = AbortSignal.any([signal, turnAbort.signal]);
     const output = new DshOutput(this.ctx, agent, { turn, step }, () => ++current.revision, () => ({
-      provider: 'sourceProvider' in current.session && typeof current.session.sourceProvider === 'string' ? current.session.sourceProvider : 'unreported',
+      provider: 'sourceProvider' in current.session && typeof current.session.sourceProvider === 'string' ? current.session.sourceProvider : current.session.harnessId || binding.harness,
       model: binding.model?.id ?? current.session.initialState.effectiveModel?.id ?? 'unreported',
     }));
     const usageBefore = current.usage;
@@ -217,6 +218,7 @@ export class DshRunner {
     if (state.effectiveModel) binding.model = state.effectiveModel;
     if (state.effectiveThinkingOptionId) binding.thinking = state.effectiveThinkingOptionId;
     if (state.effectivePermissionModeId) binding.permission = state.effectivePermissionModeId;
+    if (state.configValues) binding.configs = state.configValues;
     await this.bindings.write(binding);
   }
 

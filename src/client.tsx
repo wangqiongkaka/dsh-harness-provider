@@ -26,6 +26,7 @@ type Api = {
   selectModel(request: {sessionId: string; model: string}): Promise<RemoteResult<State>>;
   selectThinking(request: {sessionId: string; thinking: string}): Promise<RemoteResult<State>>;
   selectPermission(request: {sessionId: string; permission: string}): Promise<RemoteResult<State>>;
+  selectConfig(request: {sessionId: string; configId: string; value: string | boolean}): Promise<RemoteResult<State>>;
   usage(request: {sessionId: string}): Promise<RemoteResult<Usage>>;
   quota(request: {sessionId: string}): Promise<RemoteResult<Quota>>;
 };
@@ -34,6 +35,7 @@ const zh = {
   retry: '重试', locked: '开始对话后 Harness 固定；切换请新建会话',
   recovery: '上次请求结果未确认，已暂停发送以避免重复执行。', loading: '加载中',
   menuModel: '模型', menuEffort: '强度', effortDefault: '默认', emptyModels: '没有可用模型', emptyEfforts: '当前模型不支持调整强度',
+  fastMode: '快速模式', collaborationMode: '协作模式', enabled: '开启', disabled: '关闭',
   'effort.off': '关闭', 'effort.auto': '自动', 'effort.minimal': '极低', 'effort.low': '低', 'effort.medium': '中',
   'effort.high': '高', 'effort.xhigh': '极高', 'effort.max': '最大', 'effort.ultra': '极限', 'effort.default': '默认',
   permissionAria: '权限模式', 'mode.plan': '计划模式', 'mode.default': '默认', 'mode.acceptEdits': '接受编辑', 'mode.auto': '自动',
@@ -51,6 +53,7 @@ const en: Record<keyof typeof zh,string> = {
   retry:'Retry', locked:'Harness is fixed after the first prompt. Start a new session to switch.',
   recovery:'The previous request was not confirmed. Sending is paused to avoid duplicate execution.', loading:'Loading',
   menuModel:'Model', menuEffort:'Effort', effortDefault:'Default', emptyModels:'No models available', emptyEfforts:'This model has no effort levels',
+  fastMode:'Fast mode', collaborationMode:'Collaboration mode', enabled:'On', disabled:'Off',
   'effort.off':'Off', 'effort.auto':'Auto', 'effort.minimal':'Minimal', 'effort.low':'Low', 'effort.medium':'Medium',
   'effort.high':'High', 'effort.xhigh':'Extra High', 'effort.max':'Max', 'effort.ultra':'Ultra', 'effort.default':'Default',
   permissionAria:'Permission mode', 'mode.plan':'Plan mode', 'mode.default':'Default', 'mode.acceptEdits':'Accept edits', 'mode.auto':'Auto mode',
@@ -86,6 +89,7 @@ interface Injected {
   selectModel(id: string, model: string): Promise<State>;
   selectThinking(id: string, thinking: string): Promise<State>;
   selectPermission(id: string, permission: string): Promise<State>;
+  selectConfig(id: string, configId: string, value: string | boolean): Promise<State>;
   usage(id: string): Promise<Usage>;
   quota(id: string): Promise<Quota>;
   changed(id: string, external: boolean): void;
@@ -117,6 +121,9 @@ const windowLabel = (t: T, id: string, label: string) => {
 };
 const effortLabel = (t: T, id: string, fallback: string) => { const key = `effort.${id}` as Key; return key in zh ? t(key) : fallback; };
 const modeLabel = (t: T, id: string, fallback: string) => { const key = `mode.${id}` as Key; return key in zh ? t(key) : fallback; };
+const configLabel = (t: T, id: string, fallback: string) => id === 'fast' || id === 'fast-mode' ? t('fastMode') : id === 'collaboration_mode' ? t('collaborationMode') : fallback;
+const configValueLabel = (t: T, value: string | boolean, fallback?: string) => typeof value === 'boolean' ? t(value ? 'enabled' : 'disabled')
+  : value === 'default' ? t('mode.default') : value === 'plan' ? t('mode.plan') : fallback ?? value;
 // Copied from the host's PermissionSelect glyphs (dsh-client-ui-primitives SHIELD_OUTLINE_PATH + mode marks) so external
 // Harness rows show the same shields as DSH native: check = read-only / plan, pencil = write, exclamation = full access.
 const SHIELD = 'M8.20554 0.899994L14.7901 3.36857V7.01026C14.7901 12 11.0466 14.2103 8.20554 15.3C5.36446 14.2103 1.62012 12 1.62012 7.01026V3.36857L8.20554 0.899994Z';
@@ -435,13 +442,13 @@ export function HarnessPermission({ sessionId, locked, useSessions, read, models
 }
 
 // ---- model seat (external Harness only): context ring + "model · effort" chip with the host's two-level menu ----
-export function HarnessModel({ sessionId, locked, useSessions, read, models, selectModel, selectThinking, usage, subscribe, t }: ModelProps) {
+export function HarnessModel({ sessionId, locked, useSessions, read, models, selectModel, selectThinking, selectConfig, usage, subscribe, t }: ModelProps) {
   const [state,setState] = useState<State>();
   const [catalog,setCatalog] = useState<Models>();
   const [error,setError] = useState<string>();
   const [busy,setBusy] = useState(false);
   const [open,setOpen] = useState(false);
-  const [pane,setPane] = useState<'root' | 'model' | 'effort'>('root');
+  const [pane,setPane] = useState<'root' | 'model' | 'effort' | `config:${string}`>('root');
   const [reload,setReload] = useState(0);
   const generation = useRef(0);
   const root = useRef<HTMLDivElement>(null);
@@ -477,6 +484,7 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
   const effective = state.thinking ?? catalog?.defaultThinkingOptionId ?? null;
   const effortOption = efforts.find(option => option.id === effective);
   const effortText = efforts.length ? (effortOption ? effortLabel(t, effortOption.id, effortOption.label) : effective ?? t('effortDefault')) : undefined;
+  const configs = catalog?.configOptions ?? [];
   const disabled = locked || busy || !!summary?.running || state.recoveryRequired;
   return <div ref={root} className="hp-root hp-model-seat">
     <div className="hp-anchor">
@@ -490,6 +498,12 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
         {pane === 'root' && <>
           <Cell label={t('menuModel')} value={modelLabel} onClick={() => setPane('model')} />
           {efforts.length > 0 && <Cell label={t('menuEffort')} value={effortText ?? ''} onClick={() => setPane('effort')} />}
+          {configs.map(option => {
+            const current = state.configs[option.id] ?? option.currentValue;
+            const choice = option.choices?.find(entry => entry.value === current);
+            return <Cell key={option.id} label={configLabel(t, option.id, option.label)} value={configValueLabel(t, current, choice?.label)}
+              onClick={() => option.choices ? setPane(`config:${option.id}`) : void choose(() => selectConfig(sessionId, option.id, !current))} />;
+          })}
         </>}
         {pane === 'model' && <>
           <button type="button" role="menuitem" className="hp-cell" onClick={() => setPane('root')}><span className="hp-cell-back"><Back /></span><span className="hp-cell-label">{t('menuModel')}</span></button>
@@ -508,6 +522,17 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
           {efforts.map(option => <Option key={option.id} label={effortLabel(t, option.id, option.label)} selected={option.id === effective}
             onClick={() => { if (option.id !== state.thinking) void choose(() => selectThinking(sessionId, option.id)); else close(); }} />)}
         </>}
+        {pane.startsWith('config:') && (() => {
+          const option = configs.find(entry => entry.id === pane.slice(7));
+          if (!option?.choices) return null;
+          const current = state.configs[option.id] ?? option.currentValue;
+          return <>
+            <button type="button" role="menuitem" className="hp-cell" onClick={() => setPane('root')}><span className="hp-cell-back"><Back /></span><span className="hp-cell-label">{configLabel(t, option.id, option.label)}</span></button>
+            <div className="hp-separator" />
+            {option.choices.map(choice => <Option key={choice.value} label={configValueLabel(t, choice.value, choice.label)} hint={choice.description ?? undefined}
+              selected={choice.value === current} onClick={() => { if (choice.value !== current) void choose(() => selectConfig(sessionId, option.id, choice.value)); else close(); }} />)}
+          </>;
+        })()}
       </div>}
     </div>
     <ContextRing usage={usageView} t={t} />
@@ -608,6 +633,7 @@ export async function apply(ctx: Context): Promise<void> {
       selectModel:(id,model)=>value(scope.remote.harness.selectModel({sessionId:id,model})),
       selectThinking:(id,thinking)=>value(scope.remote.harness.selectThinking({sessionId:id,thinking})),
       selectPermission:(id,permission)=>value(scope.remote.harness.selectPermission({sessionId:id,permission})),
+      selectConfig:(id,configId,value_)=>value(scope.remote.harness.selectConfig({sessionId:id,configId,value:value_})),
       usage:id=>value(scope.remote.harness.usage({sessionId:id})),
       quota:id=>value(scope.remote.harness.quota({sessionId:id})),
       changed:(id,external)=>{known.set(id,external);syncModel();for (const listener of listeners) listener();},

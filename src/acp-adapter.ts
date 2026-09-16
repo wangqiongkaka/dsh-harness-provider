@@ -86,6 +86,7 @@ type Opened = acp.NewSessionResponse | acp.LoadSessionResponse;
 interface Catalogs {
   catalog: HarnessModelCatalog; permissionModes?: HarnessPermissionModeCatalog;
   modelConfigId?: string; thinkingConfigId?: string; currentModel?: string; currentThinking?: string; currentMode?: string;
+  configOptions: Map<string, acp.SessionConfigOption>;
 }
 const recommended = (option: acp.SessionConfigOption): string | undefined => text(record(record(record(option._meta).jetbrains).air).recommendedValue, 512);
 type SelectOption = acp.SessionConfigOption & { type: 'select' };
@@ -97,6 +98,7 @@ export function catalogsOf(opened: Opened): Catalogs {
   const options = opened.configOptions ?? [];
   const model = options.filter(isSelect).find(option => option.category === 'model');
   const thinking = options.filter(isSelect).find(option => option.category === 'thought_level');
+  const auxiliary = options.filter(option => option !== model && option !== thinking && option.category !== 'mode');
   const modes = opened.modes;
   const efforts = new Map<string, Set<string>>();
   for (const entry of record(record(opened as unknown).models).availableModels as unknown[] ?? []) {
@@ -112,13 +114,16 @@ export function catalogsOf(opened: Opened): Catalogs {
   const defaultThinking = thinking ? recommended(thinking) ?? thinking.currentValue : undefined;
   return {
     catalog: { models, thinkingOptions, ...(defaultModel ? { defaultModel: modelRef(defaultModel) } : {}),
-      ...(defaultThinking ? { defaultThinkingOptionId: harnessThinkingOptionIdSchema.parse(defaultThinking) } : {}) },
+      ...(defaultThinking ? { defaultThinkingOptionId: harnessThinkingOptionIdSchema.parse(defaultThinking) } : {}),
+      configOptions: auxiliary.map(option => ({ id: option.id, label: option.name, ...(text(option.description, 256) ? { description: text(option.description, 256)! } : {}),
+        currentValue: option.currentValue, ...(isSelect(option) ? { choices: selectOptions(option).map(entry => ({ value: entry.value, label: entry.name,
+          ...(text(entry.description, 256) ? { description: text(entry.description, 256)! } : {}) })) } : {}) })) },
     ...(modes ? { permissionModes: { modes: modes.availableModes.map(mode => ({ id: harnessPermissionModeIdSchema.parse(mode.id), label: mode.name,
       ...(text(mode.description) ? { description: text(mode.description)! } : {}), ...(record(mode._meta).kind === 'full_access' ? { dangerous: true } : {}) })),
       defaultModeId: harnessPermissionModeIdSchema.parse(modes.currentModeId) } } : {}),
     ...(model ? { modelConfigId: model.id, currentModel: model.currentValue } : {}),
     ...(thinking ? { thinkingConfigId: thinking.id, currentThinking: thinking.currentValue } : {}),
-    ...(modes ? { currentMode: modes.currentModeId } : {}),
+    ...(modes ? { currentMode: modes.currentModeId } : {}), configOptions: new Map(auxiliary.map(option => [option.id, option])),
   };
 }
 const capabilitiesOf = (agent: acp.AgentCapabilities | undefined, catalogs: Catalogs): HarnessSessionCapabilities => ({
@@ -448,6 +453,7 @@ class AcpSession implements HarnessSession {
       ...(catalogs.currentModel ? { effectiveModel: modelRef(catalogs.currentModel), resolvedModelLabel: selectOptions(opened.configOptions!.find(option => option.id === catalogs.modelConfigId)!).find(option => option.value === catalogs.currentModel)?.name ?? catalogs.currentModel } : {}),
       ...(catalogs.currentThinking ? { effectiveThinkingOptionId: harnessThinkingOptionIdSchema.parse(catalogs.currentThinking), availableThinkingOptions: catalogs.catalog.thinkingOptions } : {}),
       ...(catalogs.currentMode ? { effectivePermissionModeId: harnessPermissionModeIdSchema.parse(catalogs.currentMode) } : {}),
+      ...(catalogs.configOptions.size ? { configValues: Object.fromEntries([...catalogs.configOptions].map(([id, option]) => [id, option.currentValue])) } : {}),
     };
     // Counters restart with each agent process; the persisted totals stay the baseline the Host subtracts from.
     this.initialUsage = this.#usage = options.input.usage ?? null;
@@ -499,6 +505,10 @@ class AcpSession implements HarnessSession {
     if (thinking && this.#catalogs.thinkingConfigId && thinking !== this.#catalogs.currentThinking && this.#catalogs.catalog.thinkingOptions.some(option => option.id === thinking)) await this.#setConfig(this.#catalogs.thinkingConfigId, thinking);
     const mode = input.permissionModeId ? profile.legacyPermissionModes?.[input.permissionModeId] ?? input.permissionModeId : undefined;
     if (mode && this.#catalogs.permissionModes?.modes.some(entry => entry.id === mode) && mode !== this.#catalogs.currentMode) await this.#setMode(mode);
+    for (const [id, value] of Object.entries(input.configValues ?? {})) {
+      const option = this.#catalogs.configOptions.get(id);
+      if (option && option.currentValue !== value) await this.#setConfig(id, value);
+    }
   }
   get profile(): AcpProfile { return this.#profile; }
   /** State once the requested model / thinking / permission have been applied. */
@@ -551,6 +561,7 @@ class AcpSession implements HarnessSession {
   execute(command: TurnCancelCommand): Promise<HarnessResult<{ cancellationRequested: true }>>;
   execute(command: InteractionRespondCommand): Promise<HarnessResult<{ accepted: true }>>;
   execute(command: ModelSelectCommand | ThinkingSelectCommand | PermissionModeSelectCommand): Promise<HarnessResult<{ completed: true }>>;
+  execute(command: import('./contracts.js').ConfigSelectCommand): Promise<HarnessResult<{ completed: true }>>;
   async execute(command: HostCommand): Promise<HarnessResult<unknown>> {
     if (this.#fault) return { ok: false, error: this.#fault };
     if (this.#closing) return failed('invalidState', 'ACP session closed');
@@ -583,12 +594,22 @@ class AcpSession implements HarnessSession {
           await this.#setMode(command.permissionModeId);
           return { ok: true, value: { completed: true } };
         }
+        case 'config.select': {
+          if (this.#active) return failed('sessionBusy', 'Configuration selection requires an idle session', true);
+          const option = this.#catalogs.configOptions.get(command.configId);
+          if (!option || typeof option.currentValue !== typeof command.value
+            || (isSelect(option) && !selectOptions(option).some(entry => entry.value === command.value))) return failed('invalidRequest', 'Unknown configuration value');
+          await this.#setConfig(command.configId, command.value);
+          return { ok: true, value: { completed: true } };
+        }
       }
     } catch (cause) { return { ok: false, error: toError(cause, 'ACP operation failed') }; }
   }
 
-  async #setConfig(configId: string, value: string): Promise<void> {
-    const response = await request<acp.SetSessionConfigOptionResponse>(this.#process.agent, 'session/set_config_option', { sessionId: this.#sessionId, configId, value });
+  async #setConfig(configId: string, value: string | boolean): Promise<void> {
+    const response = await request<acp.SetSessionConfigOptionResponse>(this.#process.agent, 'session/set_config_option', {
+      sessionId: this.#sessionId, configId, value, ...(typeof value === 'boolean' ? { type: 'boolean' as const } : {}),
+    });
     this.#configChanged(response.configOptions);
   }
   async #setMode(modeId: string): Promise<void> {
@@ -598,10 +619,10 @@ class AcpSession implements HarnessSession {
   #configChanged(options: acp.SessionConfigOption[]): void {
     let state = this.#state;
     for (const option of options) {
-      if (!isSelect(option)) continue;
-      if (option.id === this.#catalogs.modelConfigId) state = { ...state, effectiveModel: modelRef(option.currentValue), resolvedModelLabel: selectOptions(option).find(entry => entry.value === option.currentValue)?.name ?? option.currentValue };
-      else if (option.id === this.#catalogs.thinkingConfigId) state = { ...state, effectiveThinkingOptionId: harnessThinkingOptionIdSchema.parse(option.currentValue) };
-      else if (option.category === 'mode') state = { ...state, effectivePermissionModeId: harnessPermissionModeIdSchema.parse(option.currentValue) };
+      if (isSelect(option) && option.id === this.#catalogs.modelConfigId) state = { ...state, effectiveModel: modelRef(option.currentValue), resolvedModelLabel: selectOptions(option).find(entry => entry.value === option.currentValue)?.name ?? option.currentValue };
+      else if (isSelect(option) && option.id === this.#catalogs.thinkingConfigId) state = { ...state, effectiveThinkingOptionId: harnessThinkingOptionIdSchema.parse(option.currentValue) };
+      else if (isSelect(option) && option.category === 'mode') state = { ...state, effectivePermissionModeId: harnessPermissionModeIdSchema.parse(option.currentValue) };
+      else if (this.#catalogs.configOptions.has(option.id)) state = { ...state, configValues: { ...state.configValues, [option.id]: option.currentValue } };
     }
     if (state !== this.#state) this.#publish(state);
   }

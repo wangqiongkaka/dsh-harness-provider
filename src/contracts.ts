@@ -31,8 +31,14 @@ export interface NativeTurnRef { harnessId: HarnessId; nativeSessionId: string; 
 
 export interface HarnessThinkingOption { id: HarnessThinkingOptionId; label: string }
 export interface HarnessModel { ref: HarnessModelRef; label: string; resolvedModelLabel?: string; supportedThinkingOptionIds?: HarnessThinkingOptionId[] }
+export type HarnessConfigValue = string | boolean;
+export interface HarnessConfigOption {
+  id: string; label: string; description?: string; currentValue: HarnessConfigValue;
+  choices?: Array<{ value: string; label: string; description?: string }>;
+}
 export interface HarnessModelCatalog {
   models: HarnessModel[]; defaultModel?: HarnessModelRef; thinkingOptions: HarnessThinkingOption[]; defaultThinkingOptionId?: HarnessThinkingOptionId;
+  configOptions?: HarnessConfigOption[];
 }
 export interface HarnessPermissionMode { id: HarnessPermissionModeId; label: string; description?: string; dangerous?: boolean }
 export interface HarnessPermissionModeCatalog { modes: HarnessPermissionMode[]; defaultModeId: HarnessPermissionModeId }
@@ -71,6 +77,7 @@ export interface HostUsage {
 interface SessionHints {
   cwd: string; environment?: Record<string, string | undefined>;
   model?: HarnessModelRef; thinkingOptionId?: HarnessThinkingOptionId; permissionModeId?: HarnessPermissionModeId;
+  configValues?: Record<string, HarnessConfigValue>;
   /** The last usage the Host persisted for this session; each adapter decides what of it still holds after reopening. */
   usage?: HostUsage;
 }
@@ -80,6 +87,7 @@ export interface HarnessSessionState {
   nativeRef?: NativeSessionRef; effectiveModel?: HarnessModelRef; resolvedModelLabel?: string;
   effectiveThinkingOptionId?: HarnessThinkingOptionId; availableThinkingOptions?: HarnessThinkingOption[];
   effectivePermissionModeId?: HarnessPermissionModeId;
+  configValues?: Record<string, HarnessConfigValue>;
 }
 
 export interface HostTextInput { type: 'text'; text: string }
@@ -89,6 +97,7 @@ export interface TurnCancelCommand { type: 'turn.cancel'; turnId: HostTurnId }
 export interface ModelSelectCommand { type: 'model.select'; model: HarnessModelRef }
 export interface ThinkingSelectCommand { type: 'thinking.select'; thinkingOptionId: HarnessThinkingOptionId }
 export interface PermissionModeSelectCommand { type: 'permissionMode.select'; permissionModeId: HarnessPermissionModeId }
+export interface ConfigSelectCommand { type: 'config.select'; configId: string; value: HarnessConfigValue }
 
 export interface HostChoiceQuestion {
   id: string; type: 'choice'; prompt: string; options: Array<{ value: string; label: string; description?: string }>;
@@ -110,13 +119,14 @@ export interface HostQuestionResponse { type: 'question'; answers: Record<string
 export interface HostApprovalResponse { type: 'approval'; actionId: string }
 export type HostInteractionResponse = HostQuestionResponse | HostApprovalResponse;
 export interface InteractionRespondCommand { type: 'interaction.respond'; interactionId: HostInteractionId; response: HostInteractionResponse }
-export type HostCommand = TurnStartCommand | TurnCancelCommand | InteractionRespondCommand | ModelSelectCommand | ThinkingSelectCommand | PermissionModeSelectCommand;
+export type HostCommand = TurnStartCommand | TurnCancelCommand | InteractionRespondCommand | ModelSelectCommand | ThinkingSelectCommand | PermissionModeSelectCommand | ConfigSelectCommand;
 export interface TurnStartAccepted { turnId: HostTurnId }
 export interface TurnCancelAccepted { cancellationRequested: true }
 export interface InteractionRespondAccepted { accepted: true }
 export interface ModelSelectCompleted { completed: true }
 export interface ThinkingSelectCompleted { completed: true }
 export interface PermissionModeSelectCompleted { completed: true }
+export interface ConfigSelectCompleted { completed: true }
 
 export interface HostToolOutput { content: Array<{ type: 'text'; text: string } | { type: 'image'; mimeType: string; base64Data: string } | { type: 'imageFile'; path: string }>; truncated?: boolean }
 export interface HostFileChange { path: string; kind: 'add' | 'update' | 'delete'; unifiedDiff: string }
@@ -176,6 +186,7 @@ export interface HarnessSession {
   execute(command: ModelSelectCommand): Promise<HarnessResult<ModelSelectCompleted>>;
   execute(command: ThinkingSelectCommand): Promise<HarnessResult<ThinkingSelectCompleted>>;
   execute(command: PermissionModeSelectCommand): Promise<HarnessResult<PermissionModeSelectCompleted>>;
+  execute(command: ConfigSelectCommand): Promise<HarnessResult<ConfigSelectCompleted>>;
   close(): Promise<void>;
 }
 export interface HarnessSkill { name: string; description: string; path?: string; modelInvocable: boolean }
