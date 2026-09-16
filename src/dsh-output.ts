@@ -83,10 +83,32 @@ export class DshOutput {
       this.agent.session.append('tool/result', { ...this.position,
         message: createToolResultMessage({ callId: ToolCallId(item.itemId),
           content: await toolOutput(this.ctx, item), isError: snapshot.outcome.status !== 'succeeded' }),
-        meta: { harnessItem: JSON.parse(JSON.stringify(item.type === 'toolExecution' && item.output?.content.some(part => part.type !== 'text') ? { ...item, output: undefined } : item)), outcome: JSON.parse(JSON.stringify(snapshot.outcome)) },
+        meta: { harnessItem: JSON.parse(JSON.stringify(item.type === 'toolExecution' && item.output?.content.some(part => part.type !== 'text') ? { ...item, output: undefined } : item)), outcome: JSON.parse(JSON.stringify(snapshot.outcome)),
+          ...editDiffs(item) },
       }, { surfaceOp: 'append' });
     }
     this.active.delete(item.itemId);
+  }
+
+  /** A Harness question as DSH's native `ask_user_question` row: waiting while the user answers, then the answers or the verdict. */
+  async question<T extends { answers: readonly unknown[] }>(id: string, questions: readonly unknown[], ask: () => Promise<T>): Promise<T> {
+    this.flush();
+    const call = { type: 'tool-call' as const, id: ToolCallId(`question:${id}`), name: 'ask_user_question', arguments: JSON.stringify({ questions }) };
+    this.agent.session.append('assistant/message', { ...this.position, message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [] }, { surfaceOp: 'append' });
+    this.agent.session.append('tool/call', { ...this.position, callId: call.id, name: call.name, arguments: call.arguments });
+    const result = (text: string, error?: { name: string; code: string }) => this.agent.session.append('tool/result', { ...this.position,
+      message: createToolResultMessage({ callId: call.id, content: [{ type: 'text', text }], isError: !!error }), ...(error ? { error } : {}) }, { surfaceOp: 'append' });
+    try {
+      const answer = await ask();
+      result(JSON.stringify({ answers: answer.answers }));
+      return answer;
+    } catch (error) {
+      const failure = error as { name?: unknown; code?: unknown; message?: unknown };
+      // DSH names the user's dismissal ASK_CANCELLED and an interrupt ASK_ABORTED; anything else keeps its own identity.
+      result(typeof failure.message === 'string' ? failure.message : String(error),
+        { name: typeof failure.name === 'string' ? failure.name : 'Error', code: typeof failure.code === 'string' ? failure.code : failure.name === 'AbortError' ? 'ASK_ABORTED' : 'UNKNOWN' });
+      throw error;
+    }
   }
 
   async interrupt(): Promise<void> {
@@ -116,6 +138,12 @@ export class DshOutput {
   private emit(frame: AssistantStreamFrame): void {
     agentEvents(this.ctx, this.agent).emit('agent/assistant-stream', { frame });
   }
+}
+/** DSH's edit card shows the applied hunk from result metadata; a Harness edit row carries it in its arguments. */
+function editDiffs(item: HostItem): { diffs?: Array<{ path: string; oldText: string | null; newText: string }> } {
+  if (item.type !== 'toolExecution' || item.toolName !== 'edit' || typeof item.arguments !== 'object' || item.arguments === null || Array.isArray(item.arguments)) return {};
+  const { file_path: path, old_string: oldText, new_string: newText } = item.arguments;
+  return typeof path === 'string' && typeof newText === 'string' ? { diffs: [{ path, oldText: typeof oldText === 'string' && oldText ? oldText : null, newText }] } : {};
 }
 function toolCall(item: HostItem): Extract<ContentBlock, { type: 'tool-call' }> {
   const name = item.type === 'commandExecution' ? 'bash' : item.type === 'toolExecution' ? item.toolName : item.type;

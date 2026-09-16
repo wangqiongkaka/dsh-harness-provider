@@ -17,12 +17,13 @@ import Tools from '@deepseek-ai/dsh-tools';
 import Persistence from '@deepseek-ai/dsh-session-persistence-jsonl';
 import { HarnessOutputChannel } from '../dist/contracts.js';
 import { HarnessService, inject } from '../dist/dsh.js';
+import { delegationInstructions } from '../dist/delegation.js';
 
 const exec = promisify(execFile);
 test('session CLI creates a visible independent harness session, reads its result, and rejects duplicate changes and foreign access', {timeout:15000}, async () => {
  const root = await mkdtemp(join(tmpdir(), 'dsh-delegate-'));
  const ctx = new Context();
- const opens = [], turns = [], created = [];
+ const opens = [], turns = [], created = [], renamed = [];
  let unavailable = false, reply = 'Review complete: no findings';
  const workspace = {id:'workspace',path:root,sessionIds:['parent','other']};
  class Commands extends Service {
@@ -35,11 +36,12 @@ test('session CLI creates a visible independent harness session, reads its resul
    workspace.sessionIds.push(agent.id);return {sessionId:agent.id};
   }
   async prompt() { throw new Error('Must route through selected Harness'); }
+  async rename(request) { renamed.push(request); }
   async fork() {} async selectModel() {} updateQueue() {}
  }
  const adapter = harness => ({
   async inspect() { return unavailable ? {status:'unavailable',error:{message:'fixture unavailable'}} : {status:'ready',catalog:{models:[],thinkingOptions:[]},
-   permissionModes:{modes:[{id:'read-only',label:'Read only'},{id:'default',label:'Default'}],defaultModeId:'read-only'}}; },
+   permissionModes:{modes:[{id:'read-only',label:'Read only'},{id:'agent',label:'Agent'},{id:'default',label:'Default'},{id:'acceptEdits',label:'Accept edits'}],defaultModeId:'read-only'}}; },
   async open(input) {
    opens.push({harness,input});
    if (harness === 'codex') assert.equal(input.environment,undefined);
@@ -62,7 +64,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
   await ctx.plugin(Commands);
   ctx.provide('userQuestions',{});ctx.provide('workspaceRegistry',{list:()=>[workspace]});
-  ctx.provide('attachments',{});ctx.provide('fileUploads',{});
+  ctx.provide('attachments',{});ctx.provide('fileUploads',{});ctx.provide('sessionTitle',{});
   await ctx.plugin({inject,apply(scope){new HarnessService(scope,join(root,'bindings'),{codex:adapter('codex'),'claude-code':adapter('claude-code')});}});
   ctx.on('agent/pre-step',async(payload,next)=>payload.agent.id==='other'?{kind:'enter',messages:[]}:next());
   await ctx.plugin(Loop,{agents:[]});
@@ -78,8 +80,10 @@ test('session CLI creates a visible independent harness session, reads its resul
   assert.equal(first.sessionId,retry.sessionId);assert.equal(created.length,1);
   const child=ctx.agents.get(first.sessionId);await child.whenIdle();
   assert.equal(opens.length,1);assert.equal(opens[0].harness,'codex');assert.equal(opens[0].input.kind,'create');
-  assert.equal(opens[0].input.cwd,root);assert.equal(opens[0].input.permissionModeId,'read-only');
+  assert.equal(opens[0].input.cwd,root);assert.equal(opens[0].input.permissionModeId,'agent');
   assert.equal(opens[0].input.nativeRef,undefined);
+  // Without a title the list shows the harness and the task's first line.
+  assert.deepEqual(renamed,[{sessionId:first.sessionId,title:'Codex · Review this diff without editing'}]);
   assert.ok(workspace.sessionIds.includes(first.sessionId));
   assert.deepEqual(await h.bindings.readDefaults(),{harness:'claude-code'});
   assert.equal((await h.bindings.read('parent')).harness,'claude-code');
@@ -138,5 +142,9 @@ test('session CLI creates a visible independent harness session, reads its resul
   const nativeRead=await ctx.tools.execute({callId:'native-read',name:'harness_delegate_read',arguments:{sessionId:nativeChild.sessionId},agent:nativeAgent,signal:new AbortController().signal});
   assert.equal(nativeRead.isError,false,JSON.stringify(nativeRead));
   assert.equal(JSON.parse(nativeRead.content[0].text).status,'completed');
+  const titled=await cli('create',{...request,requestId:'titled-task',title:'修复登录错误'});
+  assert.deepEqual(renamed.at(-1),{sessionId:titled.sessionId,title:'修复登录错误'});
+  // Delegation is for any work the user hands off, not only review.
+  assert.doesNotMatch(delegationInstructions(),/只审查|review\/审查|codex exec review/);
  } finally { await ctx.fiber.dispose();await rm(root,{recursive:true,force:true}); }
 });

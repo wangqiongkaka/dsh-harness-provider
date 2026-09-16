@@ -83,8 +83,15 @@ const app = agent({ name: 'peer' })
       await update({ sessionUpdate: 'tool_call', toolCallId: 'cmd', title: 'Terminal', name: 'Bash', kind: 'execute', status: 'pending', rawInput: {} });
       await update({ sessionUpdate: 'tool_call_update', toolCallId: 'cmd', title: 'echo hi', status: 'in_progress', rawInput: { command: 'echo hi', cwd: '/tmp', description: 'Say hi' }, content: [{ type: 'content', content: { type: 'text', text: 'Say hi' } }] });
       await update({ sessionUpdate: 'tool_call_update', toolCallId: 'cmd', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'formatted hi' } }], rawOutput: { output: 'hi\\n', exitCode: 0 } });
-      await update({ sessionUpdate: 'tool_call', toolCallId: 'edit', title: 'Edit a.txt', kind: 'edit', status: 'in_progress', rawInput: { file_path: '/tmp/a.txt' } });
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'edit', title: 'Edit a.txt', name: 'Edit', kind: 'edit', status: 'in_progress', rawInput: { file_path: '/tmp/a.txt', old_string: 'old', new_string: 'new' } });
       await update({ sessionUpdate: 'tool_call_update', toolCallId: 'edit', status: 'completed', content: [{ type: 'diff', path: '/tmp/a.txt', oldText: 'old', newText: 'new' }] });
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'grep', title: 'grep x', name: 'Grep', kind: 'search', status: 'completed', rawInput: { pattern: 'x', path: 'src', glob: '*.ts', output_mode: 'content' } });
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'ask', title: 'Pick?', name: 'AskUserQuestion', kind: 'other', status: 'in_progress', rawInput: { questions: [{ question: 'Pick?' }] } });
+      await update({ sessionUpdate: 'tool_call_update', toolCallId: 'ask', status: 'completed' });
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'read', title: "Read file 'b.txt'", kind: 'read', status: 'completed', locations: [{ path: '/tmp/b.txt' }] });
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'search', title: "Search for 'foo' in src", kind: 'search', status: 'completed' });
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'web', title: 'Web search: acp', kind: 'search', status: 'completed', rawInput: { type: 'webSearch', id: 'web', query: 'acp', action: { type: 'search', query: 'acp' } } });
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'patch', title: 'Editing files', kind: 'edit', status: 'completed', content: [{ type: 'diff', path: '/tmp/c.txt', oldText: null, newText: 'c' }, { type: 'diff', path: '/tmp/d.txt', oldText: 'd0', newText: 'd1' }] });
       await update({ sessionUpdate: 'plan', entries: [{ content: 'step one', priority: 'high', status: 'in_progress' }] });
       await update({ sessionUpdate: 'compaction_update', compactionId: 'c1', status: 'in_progress' });
       await update({ sessionUpdate: 'compaction_update', compactionId: 'c1', status: 'completed' });
@@ -232,11 +239,19 @@ test('permissions, forms (secret + custom answers), URL steps, failures and tool
     value(await session.execute({ type: 'turn.start', turnId: 'host-d', input: [{ type: 'text', text: 'tool' }] }));
     seen = await until(output, 'turn.completed');
     const completed = events(seen, 'item.completed').map(event => event.snapshot);
-    assert.deepEqual(completed.map(snapshot => snapshot.item.type), ['reasoning', 'commandExecution', 'toolExecution', 'fileChange', 'toolExecution', 'contextCompaction', 'agentMessage']);
+    assert.deepEqual(completed.map(snapshot => snapshot.item.type), ['reasoning', 'commandExecution', ...Array(8).fill('toolExecution'), 'contextCompaction', 'agentMessage']);
     assert.deepEqual(completed[1].item, { type: 'commandExecution', itemId: 'cmd', command: 'echo hi', description: 'Say hi', cwd: '/tmp', output: 'hi\n', outputTruncated: false, exitCode: 0 });
-    assert.equal(completed[2].item.toolName, 'Edit a.txt');
-    assert.match(completed[3].item.changes[0].unifiedDiff, /^--- \/tmp\/a\.txt\n\+\+\+ \/tmp\/a\.txt\n@@ -1,1 \+1,1 @@\n-old\n\+new$/);
-    assert.deepEqual(completed[4].item.arguments, [{ content: 'step one', priority: 'high', status: 'in_progress' }]);
+    // Claude Code tools, Codex's described commands and bare diffs all land on DSH's own rows; AskUserQuestion is left to the question row.
+    assert.deepEqual(completed.slice(2, 10).map(snapshot => [snapshot.item.toolName, snapshot.item.arguments]), [
+      ['edit', { file_path: '/tmp/a.txt', old_string: 'old', new_string: 'new' }],
+      ['grep', { pattern: 'x', path: 'src', include: '*.ts' }],
+      ['read', { file_path: '/tmp/b.txt' }],
+      ['grep', { pattern: 'foo', path: 'src' }],
+      ['web_search', { queries: ['acp'] }],
+      ['write', { file_path: '/tmp/c.txt', content: 'c' }],
+      ['edit', { file_path: '/tmp/d.txt', old_string: 'd0', new_string: 'd1' }],
+      ['todo_write', { todos: [{ content: 'step one', priority: 'high', status: 'in_progress' }] }],
+    ]);
     assert.deepEqual(events(seen, 'session.usage.changed').find(event => event.usage.contextUsedTokens).usage.contextUsedTokens, 4200);
     value(await session.execute({ type: 'turn.start', turnId: 'host-e', input: [{ type: 'text', text: 'fail' }] }));
     seen = await until(output, 'turn.completed');

@@ -56,9 +56,10 @@ const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>
   codex: { 'read-only': 'read-only', 'workspace-write': 'agent', 'danger-full-access': 'agent-full-access' },
   'claude-code': { 'danger-full-access': 'bypassPermissions' },
 };
-/** Full access on either side maps to full access on the other; anything else lands on the target's cautious default. */
+/** Full access on either side maps to full access on the other. */
 const FULL_ACCESS: Record<Binding['harness'], string> = { codex: 'agent-full-access', 'claude-code': 'bypassPermissions' };
-const CAUTIOUS: Record<Binding['harness'], string> = { codex: 'read-only', 'claude-code': 'default' };
+/** Cross-harness delegation below full access still lets the child work: Codex auto-approves, Claude Code accepts edits. */
+const DELEGATED: Record<Binding['harness'], string> = { codex: 'agent', 'claude-code': 'acceptEdits' };
 
 export class HarnessService extends TypertRemoteService {
   readonly bindings: Bindings;
@@ -100,8 +101,9 @@ export class HarnessService extends TypertRemoteService {
     ctx.on('agent/created', async ({ agent }) => { void agent.whenIdle().then(() => this.notifyDelegation(agent.id)).catch(() => {}); });
     ctx.inject(['tools'], scope => {
       scope.tools.register(defineTool({
-        name: 'harness_delegate', description: '用户明确要求委派给 Codex 或 Claude Code 时，创建可见独立会话。完成后自动唤醒来源会话；重试保持 requestId 和所有参数不变。',
-        parameters: { requestId: { type: 'string', required: true }, harness: { type: 'string', enum: ['codex', 'claude-code'], required: true }, prompt: { type: 'string', required: true } },
+        name: 'harness_delegate', description: '用户明确要求把工作（实现、修复、调研、审查等）委派给 Codex 或 Claude Code 时，创建同工作区的可见独立会话。新会话没有本会话历史，prompt 须写全目标、范围、约束和验收要求。完成后自动唤醒来源会话；重试保持 requestId 和所有参数不变。',
+        parameters: { requestId: { type: 'string', required: true }, harness: { type: 'string', enum: ['codex', 'claude-code'], required: true }, prompt: { type: 'string', required: true },
+          title: { type: 'string', description: '可选的简短任务标题，显示在会话列表' } },
         output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
         execute: async (args, exec) => { if (!exec.agent) throw new Error('委派需要来源会话'); return JSON.stringify(await this.delegate(exec.agent.id, args)); },
       }));
@@ -280,7 +282,7 @@ export class HarnessService extends TypertRemoteService {
           const nativeSandbox = this.ctx.get('sessionProjections')?.stateOf(parent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
           const permission = !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox]
             : parentBinding?.harness === request.harness ? parentBinding.permission
-            : parentBinding && parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? FULL_ACCESS[request.harness] : CAUTIOUS[request.harness];
+            : parentBinding && parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? FULL_ACCESS[request.harness] : DELEGATED[request.harness];
           if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
           const workspace = this.ctx.get('workspaceRegistry')?.list().find(workspace => workspace.sessionIds.includes(parent.id));
           // Hold the same lock as state/select/prompt so the UI cannot auto-bind the new session to its remembered Harness.
@@ -293,7 +295,7 @@ export class HarnessService extends TypertRemoteService {
               delegation: { parentSessionId: source, requestHash },
             });
             if (this.ctx.get('sessionTitle')) await this.ctx.sessionController.rename({ sessionId,
-              title: `${request.harness === 'codex' ? 'Codex' : 'Claude Code'} review` });
+              title: request.title ?? `${request.harness === 'codex' ? 'Codex' : 'Claude Code'} · ${request.prompt.split('\n').find(line => line.trim())!.trim().slice(0, 40)}` });
           });
         }
         await this.ctx.sessionController.prompt({ sessionId, requestId: brandString<SessionRequestId>(request.requestId), mode: 'queue',

@@ -155,7 +155,7 @@ try{
   await rpc('harness/selectPermission',{sessionId,permission:'bypassPermissions'});
   await page.reload();await dismiss();
   await rpc('session/prompt',{sessionId,requestId:'delegate-web-parent',mode:'queue',content:[{type:'text',text:'Use Codex to review this workspace'}]});
-  const review=page.getByText('Codex review',{exact:true});
+  const review=page.getByText('Codex · Review this workspace without editing',{exact:true});
   await review.waitFor({timeout:60000});
   await page.getByRole('button',{name:'1 tool call',exact:true}).click();
   await expect(page.getByText('Create visible Codex review',{exact:true})).toBeVisible({timeout:10000});
@@ -167,7 +167,7 @@ try{
   assert.equal((await rpc('harness/state',{sessionId})).harness,'claude-code');
   await expect.poll(()=>claude.requests.some(request=>JSON.stringify(request.body.messages).includes(`委派会话 ${childId} 已结束`)),{timeout:60000}).toBe(true);
   await page.screenshot({path:resolve('.cache/delegation-web.png')});
-  console.log('PASS: real Claude Code tool created a Codex review in the live DSH sidebar; selecting it displayed its native reply');
+  console.log('PASS: real Claude Code tool created a delegated Codex session in the live DSH sidebar; selecting it displayed its native reply');
   console.log('PASS: delegation completion automatically woke the source Claude Code session with the result-reading instruction');
  }else{
  await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:'codex-web-probe'});

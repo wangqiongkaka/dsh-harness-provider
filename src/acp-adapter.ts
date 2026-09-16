@@ -310,9 +310,45 @@ function toolItem(call: acp.ToolCall | acp.ToolCallUpdate): HostItemOf<'commandE
   const description = text(record(call.rawInput).description, 200) ?? (title && title !== command ? title : undefined);
   if (command) return { type: 'commandExecution', itemId: hostItemIdSchema.parse(call.toolCallId), command,
     ...(description ? { description } : {}), ...(text(record(call.rawInput).cwd, 1000) ? { cwd: text(record(call.rawInput).cwd, 1000)! } : {}) };
-  return { type: 'toolExecution', itemId: hostItemIdSchema.parse(call.toolCallId), toolName: text(call.name, 120) ?? title ?? call.kind ?? 'tool',
-    ...(call.kind ? { namespace: call.kind } : {}), arguments: jsonOf(call.rawInput) };
+  const native = dshTool(call);
+  return { type: 'toolExecution', itemId: hostItemIdSchema.parse(call.toolCallId), toolName: native?.toolName ?? text(call.name, 120) ?? title ?? call.kind ?? 'tool',
+    ...(call.kind ? { namespace: call.kind } : {}), arguments: native?.arguments ?? jsonOf(call.rawInput) };
 }
+/**
+ * DSH renders `read`, `grep`, `glob`, `edit`, `write`, `web_fetch` and `web_search` as dedicated rows keyed by those names and
+ * their DSH arguments. Claude Code names its tools with inputs of nearly the same shape; Codex describes read/search commands
+ * only by kind, title and locations.
+ */
+function dshTool(call: acp.ToolCall | acp.ToolCallUpdate): { toolName: string; arguments: JsonValue } | undefined {
+  const input = record(call.rawInput);
+  const row = (toolName: string, args: Record<string, unknown>) => ({ toolName, arguments: jsonOf(args) });
+  switch (call.name) {
+    case 'Read': return text(input.file_path) ? row('read', { file_path: input.file_path, offset: input.offset, limit: input.limit }) : undefined;
+    case 'Grep': return typeof input.pattern === 'string' ? row('grep', { pattern: input.pattern, path: input.path, include: input.glob }) : undefined;
+    case 'Glob': return typeof input.pattern === 'string' ? row('glob', { pattern: input.pattern, path: input.path }) : undefined;
+    case 'Edit': return text(input.file_path) && typeof input.new_string === 'string'
+      ? row('edit', { file_path: input.file_path, old_string: input.old_string, new_string: input.new_string, replace_all: input.replace_all }) : undefined;
+    case 'Write': return text(input.file_path) && typeof input.content === 'string' ? row('write', { file_path: input.file_path, content: input.content }) : undefined;
+    case 'WebFetch': return text(input.url) ? row('web_fetch', { url: input.url }) : undefined;
+    case 'WebSearch': return text(input.query) ? row('web_search', { queries: [input.query] }) : undefined;
+  }
+  if (input.type === 'webSearch') {
+    const action = record(input.action);
+    if (text(action.url)) return row('web_fetch', { url: action.url });
+    const queries = (Array.isArray(action.queries) && action.queries.length ? action.queries : [action.query ?? input.query]).filter(query => text(query));
+    return queries.length ? row('web_search', { queries }) : undefined;
+  }
+  const title = typeof call.title === 'string' ? call.title : '';
+  const read = call.kind === 'read' && /^Read file '(.+)'$/s.exec(title);
+  if (read) return row('read', { file_path: call.locations?.[0]?.path ?? read[1] });
+  const search = call.kind === 'search' && /^Search for '(.+)'(?: in (.+))?$/s.exec(title);
+  if (search) return row('grep', { pattern: search[1], path: search[2] });
+  return undefined;
+}
+/** A reported diff as DSH's own edit row (or write row for a new file); the edit card reads its hunk from these arguments. */
+const diffTool = (itemId: string, diff: acp.Diff): HostItemOf<'toolExecution'> => ({ type: 'toolExecution', itemId: hostItemIdSchema.parse(itemId), namespace: 'edit',
+  ...(diff.oldText ? { toolName: 'edit', arguments: { file_path: diff.path, old_string: diff.oldText, new_string: diff.newText } }
+    : { toolName: 'write', arguments: { file_path: diff.path, content: diff.newText } }) });
 
 // ── Session ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -627,7 +663,18 @@ class AcpSession implements HarnessSession {
           // Agents announce a call before its input has streamed (Claude Code's Bash); the card waits for the input or a terminal status.
           const merged = { ...active.announced.get(update.toolCallId), ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined && value !== null)) } as acp.ToolCallUpdate;
           active.announced.set(update.toolCallId, merged);
-          if (!hasInput(merged.rawInput) && update.status !== 'completed' && update.status !== 'failed') return;
+          const ended = update.status === 'completed' || update.status === 'failed';
+          // Claude Code asks through an elicitation; the host records that exchange as its own question row.
+          if (merged.name === 'AskUserQuestion') { if (ended) active.announced.delete(update.toolCallId); return; }
+          // A call first seen finished that only carried diffs (Codex's "Editing files") is shown as those edits alone.
+          const edits = (merged.content ?? []).flatMap(part => part.type === 'diff' ? [part] : []);
+          if (ended && merged.kind === 'edit' && edits.length && !dshTool(merged)) {
+            active.announced.delete(update.toolCallId);
+            const outcome: HostItemOutcome = update.status === 'completed' ? { status: 'succeeded' } : { status: 'failed', error: error('nativeFailure', 'File edit failed') };
+            edits.forEach((diff, index) => this.#emitDone(active, diffTool(`${update.toolCallId}#${index}`, diff), outcome));
+            return;
+          }
+          if (!hasInput(merged.rawInput) && !ended) return;
           if (!merged.title && !merged.name) return;
           active.announced.delete(update.toolCallId);
           item = toolItem({ ...merged, title: merged.title ?? merged.name ?? 'tool' });
@@ -655,17 +702,17 @@ class AcpSession implements HarnessSession {
           const snapshot = { item, outcome };
           active.transcript.items.push(snapshot);
           this.#emit({ type: 'item.completed', turnId, snapshot });
-          for (const diff of diffs) {
-            const change: HostItem = { type: 'fileChange', itemId: newItemId(), changes: [{ path: diff.path, kind: diff.oldText ? 'update' : 'add', unifiedDiff: unifiedDiff(diff) }] };
-            this.#emit({ type: 'item.started', turnId, item: change });
-            this.#emit({ type: 'item.completed', turnId, snapshot: { item: change, outcome } });
+          // Claude Code's Edit/Write row already shows its change; any other call's diffs become edit rows of their own.
+          if (item.type !== 'toolExecution' || (item.toolName !== 'edit' && item.toolName !== 'write')) {
+            diffs.forEach((diff, index) => this.#emitDone(active, diffTool(`${update.toolCallId}#${index}`, diff), outcome));
           }
         }
         return;
       }
       case 'plan': case 'plan_update': {
         const plan = update.sessionUpdate === 'plan' ? update.entries : update.plan.type === 'items' ? update.plan.entries : update.plan.type === 'markdown' ? update.plan.content : update.plan.uri;
-        const item: HostItem = { type: 'toolExecution', itemId: newItemId(), toolName: 'Todo', arguments: jsonOf(plan) };
+        const item: HostItem = Array.isArray(plan) ? { type: 'toolExecution', itemId: newItemId(), toolName: 'todo_write', arguments: jsonOf({ todos: plan }) }
+          : { type: 'toolExecution', itemId: newItemId(), toolName: 'Todo', arguments: jsonOf(plan) };
         this.#emit({ type: 'item.started', turnId, item });
         this.#emit({ type: 'item.completed', turnId, snapshot: { item, outcome: { status: 'succeeded' } } });
         return;
@@ -690,6 +737,12 @@ class AcpSession implements HarnessSession {
       }
       default: return;
     }
+  }
+  #emitDone(active: ActiveTurn, item: HostItem, outcome: HostItemOutcome): void {
+    const snapshot = { item, outcome };
+    active.transcript.items.push(snapshot);
+    this.#emit({ type: 'item.started', turnId: active.hostId, item });
+    this.#emit({ type: 'item.completed', turnId: active.hostId, snapshot });
   }
   #completeMessage(active: ActiveTurn, outcome: HostItemOutcome): void {
     const item = active.message;
@@ -754,6 +807,9 @@ class AcpSession implements HarnessSession {
       } };
       const onAbort = () => { this.#emit({ type: 'interaction.closed', interactionId: interaction.interactionId, turnId: active.hostId, reason: 'cancelled' }); pending.settle(kind === 'permission' ? { outcome: { outcome: 'cancelled' } } : { action: 'cancel' }); };
       signal.addEventListener('abort', onAbort, { once: true });
+      // Text streamed before the agent asks belongs ahead of the question in the conversation.
+      this.#completeMessage(active, { status: 'succeeded' });
+      this.#completeThought(active, { status: 'succeeded' });
       active.interactions.set(interaction.interactionId, pending);
       this.#channel.emit({ kind: 'interaction', interaction });
     });
@@ -828,11 +884,6 @@ function sessionFailure(meta: unknown): { title: string; details?: string; sever
   const failure = record(record(record(record(meta).jetbrains).air).sessionFailure);
   const title = text(failure.title, 1000);
   return title ? { title, severity: String(failure.severity), ...(text(failure.details, 4000) ? { details: text(failure.details, 4000)! } : {}) } : undefined;
-}
-function unifiedDiff(diff: acp.Diff): string {
-  const before = (diff.oldText ?? '').split('\n'), after = diff.newText.split('\n');
-  return [`--- ${diff.oldText ? diff.path : '/dev/null'}`, `+++ ${diff.path}`, `@@ -1,${before.length} +1,${after.length} @@`,
-    ...(diff.oldText ? before.map(line => `-${line}`) : []), ...after.map(line => `+${line}`)].join('\n');
 }
 
 // ── Adapter ─────────────────────────────────────────────────────────────────────────────────────────────────────────

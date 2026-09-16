@@ -16,6 +16,7 @@ import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence';
 import { HarnessOutputChannel } from '../dist/contracts.js';
 import { Bindings } from '../dist/bindings.js';
 import { DshRunner, usageDelta } from '../dist/dsh-runner.js';
+import { DshOutput } from '../dist/dsh-output.js';
 
 function fakeAdapter(log,native) {
  const sessions=[];
@@ -36,7 +37,7 @@ function fakeAdapter(log,native) {
       emit({type:'turn.completed',turnId:command.turnId,outcome:{status:'cancelled'}});
       active=undefined;return {ok:true,value:{cancellationRequested:true}};
      }
-     assert.equal(command.type,'turn.start');active=command.turnId;
+     assert.equal(command.type,'turn.start');active=command.turnId;(native.inputs??=[]).push(command.input);
      emit({type:'turn.started',turnId:active});
      const text=command.input.map(p=>p.text).join('|');
      if(text==='broken'){emit({type:'item.completed',turnId:active,snapshot:{item:{type:'agentMessage',itemId:'answer',text:'reply:broken'},outcome:{status:'succeeded'}}});emit({type:'item.updated',turnId:active,itemId:'unknown-item',update:{type:'text.append',text:'invalid'}});return {ok:true,value:{turnId:active}};}
@@ -162,4 +163,42 @@ test('usageDelta splits cumulative Harness counts into per-turn buckets',()=>{
  assert.deepEqual(usageDelta({inputTokens:1000,cachedInputTokens:100,outputTokens:10},{inputTokens:1600,cachedInputTokens:400,outputTokens:25}),
   {inputTokens:300,outputTokens:15,cacheReadTokens:300,cacheWriteTokens:0});
  assert.deepEqual(usageDelta(null,{inputTokens:2000,cachedInputTokens:1200,cacheWriteInputTokens:300,outputTokens:40}),{inputTokens:500,outputTokens:40,cacheReadTokens:1200,cacheWriteTokens:300});
+});
+
+test('Harness questions and edits land on DSH native ask_user_question and edit rows',async()=>{
+ const appended=[];
+ const agent={session:{append(type,data){appended.push({type,data});return {seq:appended.length};}}};
+ const output=new DshOutput({},agent,{turn:1,step:1},()=>1,()=>({provider:'fixture',model:'fixture'}));
+ const questions=[{id:'q',question:'Pick?',options:[{label:'A'}]}];
+ const answer={answers:[{id:'q',selected:['A']}]};
+ assert.equal(await output.question('i1',questions,async()=>answer),answer);
+ const cancelled=Object.assign(new Error('dismissed'),{name:'UserQuestionError',code:'ASK_CANCELLED'});
+ await assert.rejects(output.question('i2',questions,async()=>{throw cancelled;}),cancelled);
+ await output.complete({item:{type:'toolExecution',itemId:'e',toolName:'edit',arguments:{file_path:'/a.txt',old_string:'old',new_string:'new'}},outcome:{status:'succeeded'}});
+ const calls=appended.filter(e=>e.type==='tool/call'),results=appended.filter(e=>e.type==='tool/result');
+ assert.deepEqual(calls.map(e=>[e.data.name,JSON.parse(e.data.arguments).questions?.[0].id]),[['ask_user_question','q'],['ask_user_question','q'],['edit',undefined]]);
+ assert.deepEqual(JSON.parse(results[0].data.message.content[0].content[0].text),answer);
+ assert.deepEqual(results[1].data.error,{name:'UserQuestionError',code:'ASK_CANCELLED'});
+ assert.equal(results[1].data.message.content[0].isError,true);
+ assert.deepEqual(results[2].data.meta.diffs,[{path:'/a.txt',oldText:'old',newText:'new'}]);
+});
+
+test('delegation instructions follow the user input so a leading /skill and the native title stay the user\'s',{timeout:10000},async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-delegation-order-')),ctx=new Context(),native={turns:0};
+ const bindings=new Bindings(join(root,'bindings')),id=SessionId('delegation-order');
+ try{
+  for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+  await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+  const adapter=fakeAdapter([],native);
+  const runner=new DshRunner(ctx,bindings,{codex:adapter},{environment:async()=>({DSH_DELEGATE_TOKEN:'fixture'})});
+  ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+  await ctx.plugin(Loop,{agents:[]});
+  await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
+  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  agent.followup(createUserMessage({content:[{type:'text',text:'/review now'}],source:{kind:'user'}}));await agent.whenIdle();
+  const [input]=native.inputs;
+  assert.equal(input[0].text,'/review now');
+  assert.match(input.at(-1).text,/^\[DSH 会话能力，由宿主提供\]/);
+  await adapter.close();
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });

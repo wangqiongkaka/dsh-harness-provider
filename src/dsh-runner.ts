@@ -83,7 +83,8 @@ export class DshRunner {
     const input = await harnessInput(this.ctx, messages, signal);
     if (!input.length) throw new Error('Harness prompt is empty');
     const delegation = binding.delegation ? undefined : this.delegation;
-    if (delegation) input.unshift({ type: 'text', text: delegationInstructions() });
+    // Host capabilities follow the user's input: a leading `/skill` stays first, and the native title comes from the user's words.
+    if (delegation) input.push({ type: 'text', text: delegationInstructions() });
     let live = this.live.get(agent.id);
     if (!live) {
       const hints = { ...(delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) } } : {}),
@@ -148,7 +149,7 @@ export class DshRunner {
         const value = await take(current);
         if (!value) throw new Error('Harness disconnected before confirming the turn');
         if (value.kind === 'interaction') {
-          const task = this.answer(agent, value.interaction, questionSignal, current.session)
+          const task = this.answer(agent, value.interaction, questionSignal, current.session, output)
             .catch(error => { if (!questionSignal.aborted) { interactionError = error; cancel(); } })
             .finally(() => questions.delete(task));
           questions.add(task);
@@ -219,7 +220,7 @@ export class DshRunner {
     await this.bindings.write(binding);
   }
 
-  private async answer(agent: Agent, interaction: HostInteraction, signal: AbortSignal, session: HarnessSession): Promise<void> {
+  private async answer(agent: Agent, interaction: HostInteraction, signal: AbortSignal, session: HarnessSession, output: DshOutput): Promise<void> {
     if (interaction.type === 'question' && interaction.questions.some(q => q.type === 'text' && q.secret)) {
       const response = await this.secrets.ask(agent.id, interaction, signal);
       if (!response) return;
@@ -234,7 +235,9 @@ export class DshRunner {
       id: question.id, question: question.prompt,
       ...(question.type === 'choice' ? { options: question.options.map(option => ({ label: option.label, description: option.description })), multiSelect: question.multiple } : {}),
     }));
-    const answer = await this.ctx.userQuestions.ask({ agent, questions, signal });
+    const ask = () => this.ctx.userQuestions.ask({ agent, questions, signal });
+    // Approvals stay transient like DSH's own; a question leaves the same answered row DSH's ask_user_question tool does.
+    const answer = interaction.type === 'approval' ? await ask() : await output.question(interaction.interactionId, questions, ask);
     signal.throwIfAborted();
     let response: HostInteractionResponse;
     if (interaction.type === 'approval') {
