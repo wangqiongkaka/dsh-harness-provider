@@ -43,12 +43,28 @@ export function itemOf(value: unknown): HostItem | undefined {
           .parse(item.changes).map(change => ({ path: change.path, kind: change.kind.type, unifiedDiff: change.diff })),
       };
     case 'contextCompaction': return { type: 'contextCompaction', itemId };
+    case 'collabAgentToolCall': {
+      const states = object.safeParse(item.agentsStates);
+      const ids = Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds.filter((value): value is string => typeof value === 'string') : [];
+      const statusOf = (value: unknown) => value === 'completed' || value === 'shutdown' ? 'completed' as const
+        : value === 'errored' || value === 'notFound' ? 'failed' as const : value === 'interrupted' ? 'interrupted' as const
+          : value === 'running' ? 'running' as const : 'pending' as const;
+      return {
+        type: 'subagentDelegation', itemId, operation: item.tool === 'spawnAgent' || item.tool === 'resumeAgent' ? 'spawn' : 'send',
+        ...(typeof item.prompt === 'string' ? { prompt: item.prompt } : {}),
+        subagents: ids.map(nativeSubagentId => {
+          const state = states.success && object.safeParse(states.data[nativeSubagentId]).success ? states.data[nativeSubagentId] as Record<string, unknown> : {};
+          return { subagentId: nativeSubagentId, nativeSubagentId, description: typeof item.prompt === 'string' ? item.prompt : String(item.tool),
+            background: true, status: statusOf(state.status), ...(typeof state.message === 'string' ? { resultSummary: state.message } : {}),
+            ...(typeof item.model === 'string' ? { model: item.model } : {}), ...(typeof item.reasoningEffort === 'string' ? { reasoningEffort: item.reasoningEffort } : {}) };
+        }),
+      };
+    }
     case 'mcpToolCall':
     case 'dynamicToolCall':
     case 'webSearch':
     case 'imageView':
     case 'imageGeneration':
-    case 'collabAgentToolCall':
       return {
         type: 'toolExecution', itemId,
         toolName: typeof item.tool === 'string' ? item.tool : item.type,
@@ -68,7 +84,10 @@ export function itemOf(value: unknown): HostItem | undefined {
             : { type: 'text' as const, text: part.type === 'text' ? text.parse(part.text) : JSON.stringify(part) })
           : [{ type: 'text', text: JSON.stringify(item.result ?? item) }], truncated: false },
       };
-    default: throw new Error(`Unsupported Codex item type: ${item.type}`);
+    default:
+      // Codex adds presentation-only item kinds regularly; preserve them without faulting the native session.
+      return { type: 'toolExecution', itemId, toolName: item.type, arguments: JSON.parse(JSON.stringify(activity)),
+        output: { content: [{ type: 'text', text: JSON.stringify(item) }], truncated: false } };
   }
 }
 

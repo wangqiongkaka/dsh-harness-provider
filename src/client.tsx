@@ -177,6 +177,8 @@ function usePolled<V>(load: () => Promise<V>, everyMs: number, deps: unknown[]):
   return state;
 }
 
+const RADIUS = 5.5, CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+
 // ---- quota chip: one 28px chip after the Harness chip, showing the tightest window (or the balance) ----
 /** Usage tier for color reminders: amber from 70%, red from 90%. */
 const tier = (percent: number) => percent >= 90 ? ' hp-danger' : percent >= 70 ? ' hp-warn' : '';
@@ -205,7 +207,11 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
     trigger = <>
       {windowIcon(shown[0]!.id)}
       {shown.map((window, index) => <span key={window.id} className={index ? 'hp-chip-effort' : undefined}>{index ? '· ' : ''}{windowLabel(t, window.id, window.label)} {left(window.usedPercent)}%</span>)}
-      <span className="hp-mini"><span className={`hp-mini-fill${level}`} style={{ width: `${left(tight.usedPercent)}%` }} /></span>
+      <svg className="hp-quota-ring" width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+        <circle className="hp-track" cx="7" cy="7" r={RADIUS} />
+        <circle className={`hp-fill${level}`} cx="7" cy="7" r={RADIUS} strokeDasharray={CIRCUMFERENCE}
+          strokeDashoffset={CIRCUMFERENCE * tight.usedPercent / 100} transform="rotate(-90 7 7)" />
+      </svg>
     </>;
     panel = quota.windows.map((window, index) => {
       const reset = clock(window.resetsAt);
@@ -229,7 +235,6 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
 }
 
 // ---- context ring (host ContextMeter geometry: 28px trigger, 14px ring, 264px panel) ----
-const RADIUS = 5.5, CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 function ContextRing({ usage, t }: { usage: Usage | undefined; t: T }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLSpanElement>(null);
@@ -279,7 +284,7 @@ function SessionActions({ sessionId, recover, rollback, running, recoveryRequire
         <p>上次请求结果未确认。先核对原生记录；手动解除暂停会保留原生上下文，不重发原请求。</p>
         <button disabled={busy || running} onClick={() => void act('check')}>核对原生记录</button>
         <button disabled={busy || running} onClick={() => void act('unlock')}>解除暂停，不重发</button>
-      </> : <button disabled={busy || running} onClick={() => void act('rollback')}>回退最后一轮（保留文件）</button>}
+      </> : <button disabled={busy || running} onClick={() => void act('rollback')}>回退对话上下文</button>}
       {detail && <p role="status" style={{whiteSpace:'pre-wrap',maxHeight:240,overflow:'auto'}}>{detail}</p>}
     </div>}
   </span>;
@@ -535,9 +540,9 @@ const styles = `
 .hp-chip.hp-warn,.hp-figure.hp-warn{color:var(--dsw-alias-state-warn-label)}.hp-chip.hp-danger,.hp-figure.hp-danger{color:var(--dsw-alias-state-error-primary)}
 .hp-chevron{flex:none;color:var(--dsw-alias-label-caption);transition:transform 120ms ease}
 .hp-chevron-open{transform:rotate(180deg)}
-.hp-mini{display:inline-block;width:28px;height:4px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover);overflow:hidden}
-.hp-mini-fill,.hp-bar-fill{display:block;height:100%;border-radius:999px;background:var(--dsw-alias-label-tertiary)}
-.hp-mini-fill.hp-warn,.hp-bar-fill.hp-warn{background:var(--dsw-alias-state-warn-primary)}.hp-mini-fill.hp-danger,.hp-bar-fill.hp-danger{background:var(--dsw-alias-state-error-primary)}
+.hp-quota-ring{flex:none}
+.hp-bar-fill{display:block;height:100%;border-radius:999px;background:var(--dsw-alias-label-tertiary)}
+.hp-bar-fill.hp-warn{background:var(--dsw-alias-state-warn-primary)}.hp-bar-fill.hp-danger{background:var(--dsw-alias-state-error-primary)}
 .hp-menu{position:absolute;bottom:calc(100% + 8px);z-index:100;display:flex;flex-direction:column;box-sizing:border-box;width:max-content;min-width:240px;max-width:min(420px,calc(100vw - 32px));max-height:min(360px,calc(100vh - 96px));overflow-y:auto;padding:4px;border:0;border-radius:20px;background:var(--dsw-specific-menu);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-primary);text-align:left}
 .hp-menu-left,.hp-panel-left{left:0}.hp-menu-right,.hp-panel-right{right:0}
 .hp-cell{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;height:40px;padding:0 10px;border:none;border-radius:10px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;text-align:left;cursor:pointer}
@@ -559,7 +564,7 @@ const styles = `
 .hp-ring{display:grid;place-items:center;flex:none;width:28px;height:28px;border:none;border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}
 .hp-ring:hover,.hp-ring[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover)}
 .hp-track{fill:none;stroke:var(--dsw-alias-border-l3);stroke-width:2}
-.hp-fill{fill:none;stroke:var(--dsw-alias-label-tertiary);stroke-width:2;stroke-linecap:round}.hp-ring.hp-warn .hp-fill{stroke:var(--dsw-alias-state-warn-primary)}.hp-ring.hp-danger .hp-fill{stroke:var(--dsw-alias-state-error-primary)}
+.hp-fill{fill:none;stroke:var(--dsw-alias-label-tertiary);stroke-width:2;stroke-linecap:round}.hp-fill.hp-warn,.hp-ring.hp-warn .hp-fill{stroke:var(--dsw-alias-state-warn-primary)}.hp-fill.hp-danger,.hp-ring.hp-danger .hp-fill{stroke:var(--dsw-alias-state-error-primary)}
 .hp-panel{position:absolute;bottom:calc(100% + 8px);z-index:100;box-sizing:border-box;width:264px;padding:12px;border:0;border-radius:12px;background:var(--dsw-specific-menu);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);font-size:12px;line-height:20px;font-weight:400;color:var(--dsw-alias-label-secondary);text-align:left;white-space:normal;cursor:default}
 .hp-panel-head{display:flex;align-items:center;gap:6px}
 .hp-panel-icon{display:inline-flex;color:var(--dsw-alias-label-tertiary)}

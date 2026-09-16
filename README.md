@@ -28,6 +28,7 @@ Harness 在第一条消息后固定；需要换 Harness 时新建会话。不同
 在 DSH 原生、Codex 或 Claude Code 会话里说“用 Codex review 当前改动”或“新建 Claude Code 会话审查这段代码”，agent 可调用插件随会话提供的委派入口：
 
 - 在同一工作区创建独立的 **Codex review / Claude Code review** 会话，原会话不切换 harness；新会话从空历史开始，由 agent 写入完整审查任务。
+- 被委派出来的会话不会再获得委派入口，也不能继续创建下一级委派，避免完成通知触发递归创建。
 - 左侧会话列表显示新会话，点开可查看进度、回复，也可继续对话。来源 agent 可查询其创建的会话状态与结果；任务结束后会自动通知并唤醒来源会话继续处理，通知按目标结束事件去重。
 - 同一请求标识和参数重试复用原会话；标识相同但任务不同会被拒绝。提交结果不明确时停止自动重发，错误会包含目标会话 ID。
 - 同 harness 沿用来源权限；跨 harness 的完全权限映射为目标的完全权限，其余映射到 Codex 只读 / Claude Code 默认审批。模型和推理强度沿用目标 harness 上次选择，不改变全局选择。
@@ -47,6 +48,10 @@ Harness 在第一条消息后固定；需要换 Harness 时新建会话。不同
 
 Claude Code 可执行文件可用 `CODEXHOST_CLAUDE_COMMAND` 环境变量指定（沿用早期版本的变量名）；未指定时依次查找 PATH、常见安装目录和 Node.js 版本管理器目录。
 
+Claude Code 主会话按原生 CLI 范围加载用户、项目和本地设置，包括 `CLAUDE.md`、`.claude/settings.json`、`.claude/settings.local.json` 以及其中启用的 skills、MCP、plugins 和 hooks。MCP 表单提问会转成 DSH 问题卡，原生斜杠命令与 hook 提示会显示在回复中。项目 hooks 与直接运行 Claude Code 一样会执行本地命令，应只在可信工作区使用。用于读取模型目录和额度的短时检查进程保持无工具模式，不执行项目任务。
+
+Codex 会按原生 app-server 加载 `config.toml`、`AGENTS.md`、skills、MCP 和 hooks。MCP 工具审批支持一次、本会话和永久授权，普通 MCP 表单与多选表单会转成 DSH 问题卡；额外网络/文件权限请求也会转交 DSH。`/skills`、`/hooks`、`/mcp`、`/compact`、`/review` 以及状态类命令由原生目录或 API 执行，不会作为普通提示词发送给模型。未识别的斜杠命令仍交给 Codex，以保留项目自定义命令。hooks 是否执行继续采用 Codex 自己的哈希授信状态。
+
 默认状态目录为 `$DSH_HOME/harness-plugin`；未设置 `DSH_HOME` 时为 `~/.dsh/harness-plugin`。其中只保存 DSH 会话 ID、Harness、原生会话引用、模型和未确认请求标记，不保存密钥或额外的全文历史。
 
 ## 支持范围
@@ -59,12 +64,12 @@ Claude Code 可执行文件可用 `CODEXHOST_CLAUDE_COMMAND` 环境变量指定�
 
 ### 执行期间的反馈
 
-Codex 和 Claude Code 会收到统一的进展反馈要求：复杂任务先说明计划，出现重要发现、阻塞或方向变化时汇报结果与下一步，长任务尽量每 30–60 秒更新。反馈显示在普通回复正文中，实际频率由模型决定；不生成虚构的思考过程或进度。Claude Bash 的原生 `description` 保留到活动卡片，默认显示命令目的，展开仍可查看命令和输出。更新插件并重启 DSH 后，新建及恢复的会话生效，旧记录不会补写。
+Codex 和 Claude Code 会收到统一的进展反馈要求：复杂任务先说明计划，出现重要发现、阻塞或方向变化时汇报结果与下一步，长任务尽量每 30–60 秒更新。反馈只描述任务事实、阻塞和下一步，不讨论系统提示、技能、规则冲突或代理策略。反馈显示在普通回复正文中，实际频率由模型决定；不生成虚构的思考过程或进度。Claude Bash 的原生 `description` 保留到活动卡片，默认显示命令目的，展开仍可查看命令和输出。更新插件并重启 DSH 后，新建及恢复的会话生效，旧记录不会补写。
 
 ### 分支、回滚和恢复
 
 - 使用 DSH 原生分支入口创建同工作区独立会话，同时分支原生 Harness 历史。指定消息位置时，取其所在的已完成轮次；运行中或结果不明确时不能分支。
-- Harness 胶囊旁的 **··· → 回退最后一轮（保留文件）** 撤销最后一轮原生上下文，保留工作区文件和旧的界面记录。后续对话从回滚位置继续；原生旧会话保留，新引用指向回滚边界的分支。
+- Harness 胶囊旁的 **··· → 回退对话上下文** 撤销最后一轮原生上下文，保留工作区文件和旧的界面记录。后续对话从回滚位置继续；原生旧会话保留，新引用指向回滚边界的分支。
 - 打开暂停的会话时自动核对原生记录；能确认结束状态时保存恢复说明并解除暂停。不能确认时，可在 **··· → 核对原生记录 / 解除暂停，不重发** 操作。解除暂停保留原生上下文，由用户发送下一条指令，绝不自动重复原请求。
 
 ### 当前边界
@@ -95,7 +100,9 @@ npm install
 npm run dev:link
 npm run check
 node experiments/codex-native-probe.mjs
+node experiments/codex-capabilities-probe.mjs
 node experiments/claude-native-probe.mjs
+node experiments/claude-capabilities-probe.mjs
 node experiments/delegation-native-probe.mjs
 npm pack --ignore-scripts
 node experiments/dsh-web-probe.mjs
@@ -106,7 +113,7 @@ DSH_DELEGATION_PROBE=1 node experiments/dsh-web-probe.mjs
 
 ## 验证记录
 
-2026-09-16：新增附件、保密输入、原生插入/分支/上下文回滚、异常恢复、委派分页与自动唤醒、DSH 原生委派工具。验证明细见 [实现与验证记录](docs/implementation-status.md)。
+2026-09-16：新增附件、保密输入、原生插入/分支/上下文回滚、异常恢复、委派分页与自动唤醒、DSH 原生委派工具，并补齐 Codex 的 MCP 交互、原生目录型斜杠命令、hooks 与子代理活动投影。验证明细见 [实现与验证记录](docs/implementation-status.md)。
 
 2026-09-15：
 

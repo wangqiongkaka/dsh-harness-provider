@@ -12,8 +12,10 @@
     "dev:link": "node scripts/link-references.mjs",
     "check": "npm run typecheck && npm run build && npm test",
     "probe:codex": "node experiments/codex-native-probe.mjs",
+    "probe:codex-capabilities": "node experiments/codex-capabilities-probe.mjs",
     "probe:web": "node experiments/dsh-web-probe.mjs",
-    "probe:claude": "node experiments/claude-native-probe.mjs"
+    "probe:claude": "node experiments/claude-native-probe.mjs",
+    "probe:claude-capabilities": "node experiments/claude-capabilities-probe.mjs"
   },
   "files": [
     "dist/dsh.js",

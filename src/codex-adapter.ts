@@ -18,6 +18,7 @@ import { z } from 'zod';
 import pkg from '../package.json' with { type: 'json' };
 import { CodexRpc, type RpcId, type RpcMessage, type RpcOptions } from './codex-rpc.js';
 import { itemOf, snapshotItem, nativeTurn, object, turnSnapshot } from './codex-items.js';
+import { parseElicitationSchema, type ClaudeElicitationQuestion } from './claude-native.js';
 
 const id = harnessIdSchema.parse('codex');
 const capabilities = {
@@ -72,6 +73,48 @@ const thinkingOption = (effort: string) => ({ id: harnessThinkingOptionIdSchema.
 const resetIso = (value: number | null) => value === null ? {} : { resetsAt: new Date(value < 1e12 ? value * 1000 : value).toISOString() };
 const periodOf = (mins: number | null) => mins === 300 ? 'five_hour' as const : mins === 10080 ? 'seven_day' as const : mins === 43200 ? 'monthly' as const : 'unknown' as const;
 const windowLabel = (mins: number | null) => mins === 300 ? '5-hour window' : mins === 10080 ? '7-day window' : mins === null ? 'Rate limit' : `${mins}-minute window`;
+
+function elicitationContent(questions: ClaudeElicitationQuestion[], answers: Record<string, string[]>): Record<string, string | number | boolean | string[]> {
+  const content: Record<string, string | number | boolean | string[]> = {};
+  for (const question of questions) {
+    const values = answers[question.id];
+    if (question.valueType === 'stringArray') { if (values) content[question.id] = values; continue; }
+    const answer = values?.[0];
+    if (answer === undefined) continue;
+    if (question.valueType === 'number' || question.valueType === 'integer') {
+      const value = Number(answer);
+      if (!Number.isFinite(value) || (question.valueType === 'integer' && !Number.isInteger(value))) throw new Error(`${question.prompt} must be a valid ${question.valueType}`);
+      content[question.id] = value;
+    } else content[question.id] = question.valueType === 'boolean' ? answer === 'true' : answer;
+  }
+  return content;
+}
+
+function formatSlashResult(name: string, value: unknown): string {
+  const result = object.safeParse(value);
+  const data = result.success && Array.isArray(result.data.data) ? result.data.data : [];
+  if (name === '/skills' || name === '/hooks') {
+    const key = name === '/skills' ? 'skills' : 'hooks';
+    const rows = data.flatMap(entry => {
+      const parsed = object.safeParse(entry); return parsed.success && Array.isArray(parsed.data[key]) ? parsed.data[key] : [];
+    }).flatMap(entry => {
+      const parsed = object.safeParse(entry); if (!parsed.success) return [];
+      const label = name === '/skills' ? parsed.data.name : parsed.data.eventName;
+      const state = [parsed.data.enabled === false ? 'disabled' : null,
+        typeof parsed.data.trustStatus === 'string' ? parsed.data.trustStatus : null].filter(Boolean).join(', ');
+      return typeof label === 'string' ? [`${label}${state ? ` (${state})` : ''}`] : [];
+    });
+    return rows.length ? rows.join('\n') : `No ${key} found.`;
+  }
+  if (name === '/mcp') {
+    const rows = data.flatMap(entry => {
+      const parsed = object.safeParse(entry); return parsed.success && typeof parsed.data.name === 'string'
+        ? [`${parsed.data.name}: ${String(parsed.data.runtimeStatus ?? 'unknown')} (${String(parsed.data.authStatus ?? 'unknown')})`] : [];
+    });
+    return rows.length ? rows.join('\n') : 'No MCP servers configured.';
+  }
+  return JSON.stringify(value, null, 2);
+}
 
 /** Maps `account/rateLimits/read` onto the shared account snapshot: primary window as credits, the secondary as product usage. */
 export function accountSnapshot(raw: unknown): HarnessAccountSnapshot | null {
@@ -192,12 +235,14 @@ export class CodexAdapter implements HarnessAdapter {
 async function initialize(rpc: CodexRpc): Promise<void> {
   await rpc.request('initialize', {
     clientInfo: { name: pkg.name, version: pkg.version, title: 'DSH Harness Plugin' },
-    capabilities: { experimentalApi: true },
+    capabilities: { experimentalApi: true, mcpServerOpenaiFormElicitation: true,
+      extensions: { 'openai/standard-form-input': {}, 'openai/form': {} } },
   });
   rpc.send({ method: 'initialized', params: {} });
 }
 
 type ActiveTurn = { hostId: HostTurnId; nativeId?: string; started: boolean; done: ReturnType<typeof Promise.withResolvers<void>> };
+const LOCAL_SLASH_COMMANDS = new Set(['/help', '/status', '/model', '/permissions', '/skills', '/hooks', '/mcp', '/compact', '/review']);
 
 class CodexSession implements HarnessSession {
   readonly harnessId = id;
@@ -214,7 +259,7 @@ class CodexSession implements HarnessSession {
   private fault?: HarnessError;
   private closing?: Promise<void>;
   private start?: Promise<unknown>;
-  private readonly interactions = new Map<string, { rpcId: RpcId; interaction: HostInteraction }>();
+  private readonly interactions = new Map<string, { rpcId: RpcId; interaction: HostInteraction; response(command: InteractionRespondCommand): unknown }>();
 
   private constructor(private readonly options: CodexOptions, private readonly cwd: string) {
     this.rpc = new CodexRpc({ ...options, cwd, onMessage: message => this.receive(message), onFault: error => this.fail(error) });
@@ -301,6 +346,10 @@ class CodexSession implements HarnessSession {
           if (!command.input.length || !command.input.some(part => part.type === 'image' ? part.base64Data.length > 0 : part.text.trim())) {
             return { ok: false, error: { code: 'invalidRequest', message: 'A non-empty text prompt is required', retryable: false } };
           }
+          if (command.input.length === 1 && command.input[0]!.type === 'text') {
+            const [name, ...rest] = command.input[0].text.trim().split(/\s+/u);
+            if (name && LOCAL_SLASH_COMMANDS.has(name)) return this.#slash(command, name, rest.join(' '));
+          }
           const active: ActiveTurn = { hostId: command.turnId, started: false, done: Promise.withResolvers<void>() };
           this.active = active;
           const work = this.rpc.request('turn/start', {
@@ -331,10 +380,7 @@ class CodexSession implements HarnessSession {
           if (!pending) throw new Error('Codex interaction is no longer pending');
           const validation = validateHostInteractionResponse(pending.interaction, command.response);
           if (validation) throw new Error('Invalid Codex interaction response');
-          const response = command.response;
-          this.rpc.send({ id: pending.rpcId, result: response.type === 'approval'
-            ? { decision: response.actionId }
-            : { answers: Object.fromEntries(Object.entries(response.answers).map(([key, answers]) => [key, { answers }])) } });
+          this.rpc.send({ id: pending.rpcId, result: pending.response(command) });
           this.interactions.delete(command.interactionId);
           this.emit({ type: 'interaction.closed', interactionId: command.interactionId, turnId: pending.interaction.turnId, reason: 'responded' });
           return { ok: true, value: { accepted: true } };
@@ -358,6 +404,50 @@ class CodexSession implements HarnessSession {
         default: return { ok: false, error: { code: 'unsupported', message: 'Codex configuration operation is not implemented', retryable: false } };
       }
     } catch (error) { return errorResult(error); }
+  }
+
+  async #slash(command: TurnStartCommand, name: string, argument: string): Promise<HarnessResult<TurnStartAccepted>> {
+    const active: ActiveTurn = { hostId: command.turnId, started: true, done: Promise.withResolvers<void>() };
+    this.active = active;
+    this.emit({ type: 'turn.started', turnId: command.turnId });
+    if (name === '/review') {
+      const work = this.rpc.request('review/start', { threadId: this.threadId, delivery: 'inline',
+        target: argument ? { type: 'custom', instructions: argument } : { type: 'uncommittedChanges' } });
+      this.start = work;
+      try {
+        const response = z.object({ reviewThreadId: z.string(), turn: nativeTurn }).parse(await work);
+        if (response.reviewThreadId !== this.threadId) throw new Error('Codex review started in an unexpected thread');
+        this.identify(active, response.turn.id);
+        return { ok: true, value: { turnId: command.turnId } };
+      } catch (cause) {
+        this.finish(active, { status: 'failed', error: errorResult(cause).error });
+        return errorResult(cause);
+      } finally { if (this.start === work) this.start = undefined; }
+    }
+    const item = { type: 'agentMessage' as const, itemId: hostItemIdSchema.parse(`slash:${command.turnId}`), text: '', phase: 'commentary' as const };
+    this.emit({ type: 'item.started', turnId: command.turnId, item });
+    try {
+      let value: unknown;
+      if (name === '/compact') value = await this.rpc.request('thread/compact/start', { threadId: this.threadId });
+      else if (name === '/skills') value = await this.rpc.request('skills/list', { cwds: [this.cwd], forceReload: true });
+      else if (name === '/hooks') value = await this.rpc.request('hooks/list', { cwds: [this.cwd] });
+      else if (name === '/mcp') value = await this.rpc.request('mcpServerStatus/list', { threadId: this.threadId, cursor: null, limit: 100, detail: 'toolsAndAuthOnly' });
+      const text = name === '/help' ? 'Codex commands: /status, /model, /permissions, /skills, /hooks, /mcp, /compact, /review [instructions]'
+        : name === '/status' ? `Model: ${this.initialState.resolvedModelLabel ?? this.initialState.effectiveModel?.id ?? 'default'}\nReasoning: ${this.initialState.effectiveThinkingOptionId ?? 'default'}\nPermissions: ${this.initialState.effectivePermissionModeId ?? 'default'}\nWorking directory: ${this.cwd}`
+          : name === '/model' ? `Current model: ${this.initialState.resolvedModelLabel ?? this.initialState.effectiveModel?.id ?? 'default'}\nUse the DSH model control to change it.`
+            : name === '/permissions' ? `Current permissions: ${this.initialState.effectivePermissionModeId ?? 'default'}\nUse the DSH permission control to change them.`
+              : name === '/compact' ? 'Codex context compaction completed.' : formatSlashResult(name, value);
+      const completed = { ...item, text };
+      this.emit({ type: 'item.updated', turnId: command.turnId, itemId: item.itemId, update: { type: 'text.append', text } });
+      this.emit({ type: 'item.completed', turnId: command.turnId, snapshot: { item: completed, outcome: { status: 'succeeded' } } });
+      this.finish(active, { status: 'succeeded' });
+      return { ok: true, value: { turnId: command.turnId } };
+    } catch (cause) {
+      const failure = errorResult(cause).error;
+      this.emit({ type: 'item.completed', turnId: command.turnId, snapshot: { item, outcome: { status: 'failed', error: failure } } });
+      this.finish(active, { status: 'failed', error: failure });
+      return { ok: false, error: failure };
+    }
   }
 
   private identify(active: ActiveTurn, nativeId: string): void {
@@ -392,6 +482,32 @@ class CodexSession implements HarnessSession {
             : { status: 'failed', error: { code: 'nativeFailure', message: 'Codex turn failed', retryable: false } });
       return;
     }
+    if (message.method === 'item/commandExecution/outputDelta' || message.method === 'item/mcpToolCall/progress') {
+      if (typeof params.turnId !== 'string' || typeof params.itemId !== 'string') return;
+      this.identify(active, params.turnId);
+      const delta = message.method === 'item/commandExecution/outputDelta' ? params.delta : params.message;
+      if (typeof delta === 'string' && delta) this.emit({ type: 'item.updated', turnId: active.hostId,
+        itemId: hostItemIdSchema.parse(params.itemId), update: { type: 'output.append', text: delta } });
+      return;
+    }
+    if (message.method === 'hook/started' || message.method === 'hook/completed') {
+      const run = object.safeParse(params.run);
+      if (!run.success || typeof run.data.id !== 'string' || typeof run.data.eventName !== 'string') return;
+      const itemId = hostItemIdSchema.parse(`hook:${run.data.id}`);
+      const item = { type: 'toolExecution' as const, itemId, toolName: `hook:${run.data.eventName}`, arguments: JSON.parse(JSON.stringify(run.data)) };
+      if (message.method === 'hook/started') this.emit({ type: 'item.started', turnId: active.hostId, item });
+      else {
+        const entries = Array.isArray(run.data.entries) ? run.data.entries.flatMap(value => {
+          const entry = object.safeParse(value); return entry.success && typeof entry.data.text === 'string' ? [entry.data.text] : [];
+        }) : [];
+        this.emit({ type: 'item.completed', turnId: active.hostId, snapshot: { item: { ...item, output: { content: [{ type: 'text', text: entries.join('\n') }] },
+          ...(typeof run.data.durationMs === 'number' ? { durationMs: run.data.durationMs } : {}) },
+          outcome: run.data.status === 'failed' || run.data.status === 'blocked' || run.data.status === 'stopped'
+            ? { status: 'failed', error: { code: 'nativeFailure', message: entries.join('\n') || `Codex ${run.data.eventName} hook ${String(run.data.status)}`, retryable: false } }
+            : { status: 'succeeded' } } });
+      }
+      return;
+    }
     if (!['item/started', 'item/completed', 'item/agentMessage/delta', 'item/reasoning/summaryTextDelta'].includes(message.method ?? '')) return;
     if (typeof params.turnId !== 'string' || (active.nativeId && params.turnId !== active.nativeId)) return;
     this.identify(active, params.turnId);
@@ -409,20 +525,23 @@ class CodexSession implements HarnessSession {
 
   private ask(rpcId: RpcId, method: string, params: Record<string, unknown>): void {
     const active = this.active;
-    if (!active || params.threadId !== this.threadId || typeof params.turnId !== 'string') {
+    if (!active || params.threadId !== this.threadId || (params.turnId != null && typeof params.turnId !== 'string')) {
       this.rpc.send({ id: rpcId, error: { code: -32601, message: 'Request has no active DSH turn' } });
       return;
     }
-    this.identify(active, params.turnId);
+    if (typeof params.turnId === 'string') this.identify(active, params.turnId);
     const interactionId = hostInteractionIdSchema.parse(`codex:${typeof rpcId}:${rpcId}`);
     let interaction: HostInteraction;
+    let response: (command: InteractionRespondCommand) => unknown;
     if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
       interaction = {
         type: 'approval', interactionId, turnId: active.hostId, subject: { type: 'nativeAction' },
         title: typeof params.command === 'string' ? params.command : 'Codex 请求修改文件',
         ...(typeof params.reason === 'string' ? { description: params.reason } : {}),
-        actions: [{ id: 'accept', label: '允许一次', effect: 'allowOnce' }, { id: 'decline', label: '拒绝', effect: 'deny' }],
+        actions: [{ id: 'accept', label: '允许一次', effect: 'allowOnce' },
+          { id: 'acceptForSession', label: '本会话允许', effect: 'allowForSession' }, { id: 'decline', label: '拒绝', effect: 'deny' }],
       };
+      response = command => ({ decision: command.response.type === 'approval' ? command.response.actionId : 'decline' });
     } else if (method === 'item/tool/requestUserInput') {
       const questions = z.array(z.object({ id: z.string(), header: z.string(), question: z.string(),
         isOther: z.boolean().optional(), isSecret: z.boolean().optional(),
@@ -434,11 +553,52 @@ class CodexSession implements HarnessSession {
           options: question.options.map(option => ({ value: option.label, label: option.label, description: option.description })),
           multiple: false, allowOther: question.isOther === true, optional: false,
         } : { id: question.id, type: 'text', prompt: question.question, multiline: true, secret: question.isSecret === true, optional: false }) };
+      response = command => ({ answers: command.response.type === 'question'
+        ? Object.fromEntries(Object.entries(command.response.answers).map(([key, answers]) => [key, { answers }])) : {} });
+    } else if (method === 'mcpServer/elicitation/request') {
+      const message = typeof params.message === 'string' && params.message.trim() ? params.message.trim().slice(0, 200) : 'MCP request';
+      const meta = object.safeParse(params._meta);
+      if (meta.success && meta.data.codex_approval_kind === 'mcp_tool_call') {
+        const persist = Array.isArray(meta.data.persist) ? meta.data.persist : [meta.data.persist];
+        interaction = { type: 'approval', interactionId, turnId: active.hostId, title: message,
+          description: typeof meta.data.tool_description === 'string' ? meta.data.tool_description.slice(0, 500) : undefined,
+          subject: { type: 'nativeAction' }, actions: [
+            { id: 'accept', label: 'Allow once', effect: 'allowOnce' },
+            ...(persist.includes('session') ? [{ id: 'session', label: 'Allow for this conversation', effect: 'allowForSession' as const }] : []),
+            ...(persist.includes('always') ? [{ id: 'always', label: 'Always allow', effect: 'allowAlways' as const }] : []),
+            { id: 'decline', label: 'Deny', effect: 'deny' },
+          ] };
+        response = command => command.response.type === 'approval' && command.response.actionId !== 'decline'
+          ? { action: 'accept', content: null, ...(command.response.actionId === 'accept' ? {} : { _meta: { persist: command.response.actionId } }) }
+          : { action: 'decline', content: null };
+      } else if (params.mode === 'url' && typeof params.url === 'string' && params.url.length <= 2048
+        && (() => { try { return ['http:', 'https:'].includes(new URL(params.url as string).protocol); } catch { return false; } })()) {
+        interaction = { type: 'approval', interactionId, turnId: active.hostId, title: message,
+          description: `${String(params.serverName).slice(0, 100)}\n${params.url}`, subject: { type: 'nativeAction' },
+          actions: [{ id: 'accept', label: 'Continue after completing the browser step', effect: 'allowOnce' }, { id: 'decline', label: 'Cancel', effect: 'deny' }] };
+        response = command => ({ action: command.response.type === 'approval' && command.response.actionId === 'accept' ? 'accept' : 'decline' });
+      } else {
+        const questions = parseElicitationSchema(params.requestedSchema);
+        if (!questions) { this.rpc.send({ id: rpcId, result: { action: 'decline' } }); return; }
+        interaction = { type: 'question', interactionId, turnId: active.hostId, title: message, questions: questions.map(question => question.options ? {
+          id: question.id, type: 'choice', prompt: question.prompt, multiple: question.valueType === 'stringArray', allowOther: false, optional: question.optional,
+          options: question.options.map(option => ({ value: option.value, label: option.label })),
+        } : { id: question.id, type: 'text', prompt: question.prompt, multiline: false, secret: question.secret, optional: question.optional }) };
+        response = command => command.response.type === 'question' && !command.response.cancelled
+          ? { action: 'accept', content: elicitationContent(questions, command.response.answers) } : { action: 'cancel' };
+      }
+    } else if (method === 'item/permissions/requestApproval') {
+      const permissions = object.parse(params.permissions);
+      interaction = { type: 'approval', interactionId, turnId: active.hostId, title: 'Codex requests additional permissions',
+        description: [typeof params.reason === 'string' ? params.reason : '', JSON.stringify(permissions)].filter(Boolean).join('\n'), subject: { type: 'nativeAction' },
+        actions: [{ id: 'turn', label: 'Allow for this turn', effect: 'allowOnce' }, { id: 'session', label: 'Allow for this conversation', effect: 'allowForSession' }, { id: 'deny', label: 'Deny', effect: 'deny' }] };
+      response = command => command.response.type === 'approval' && command.response.actionId !== 'deny'
+        ? { permissions, scope: command.response.actionId } : { permissions: {}, scope: 'turn' };
     } else {
       this.rpc.send({ id: rpcId, error: { code: -32601, message: 'This Codex interaction is not supported by the DSH plugin' } });
       return;
     }
-    this.interactions.set(interactionId, { rpcId, interaction });
+    this.interactions.set(interactionId, { rpcId, interaction, response });
     this.channel.emit({ kind: 'interaction', interaction });
   }
 

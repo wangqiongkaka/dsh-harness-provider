@@ -6,11 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
-import { query, type CanUseTool, type PermissionResult, type PermissionUpdate, type Query, type SDKUserMessage, type SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
+import { query, type CanUseTool, type ElicitationRequest, type ElicitationResult, type PermissionResult, type PermissionUpdate, type Query, type SDKUserMessage, type SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import pkg from '../package.json' with { type: 'json' };
 import type { HarnessThinkingOptionId } from './contracts.js';
 import {
-  approvalRequest, isPermissionMode, parseQuestions, thinkingConfiguration, TurnAccumulator,
+  approvalRequest, isPermissionMode, parseElicitationSchema, parseQuestions, thinkingConfiguration, TurnAccumulator,
   type ClaudeInteractionRequest, type ClaudePermissionMode, type ClaudeTurnEvent, type ClaudeTurnResult,
 } from './claude-native.js';
 
@@ -208,7 +208,8 @@ export type TransportEvent = ClaudeTurnEvent
 export type ClaudeInteractionResponse =
   | { type: 'approval'; requestId: string; decision: 'allowOnce' | 'allowForSession' | 'allowAlways' | 'deny' }
   | { type: 'question'; requestId: string; answers: Record<string, string> }
-  | { type: 'question'; requestId: string; cancelled: true };
+  | { type: 'question'; requestId: string; cancelled: true }
+  | { type: 'elicitation'; requestId: string; result: ElicitationResult };
 
 export type QueryFactory = typeof query;
 export interface ClaudeTransportOptions {
@@ -230,10 +231,16 @@ export interface ClaudeTransportOptions {
   queryFactory?: QueryFactory;
 }
 
-interface PendingInteraction {
+interface PendingPermission {
+  kind: 'permission';
   request: ClaudeInteractionRequest; controlRequestId: string; toolUseId: string; input: Record<string, unknown>;
   suggestions?: PermissionUpdate[]; signal: AbortSignal; onAbort(): void; resolve(result: PermissionResult): void;
 }
+interface PendingElicitation {
+  kind: 'elicitation'; request: Extract<ClaudeInteractionRequest, { type: 'elicitation' }>;
+  signal: AbortSignal; onAbort(): void; resolve(result: ElicitationResult): void;
+}
+type PendingInteraction = PendingPermission | PendingElicitation;
 interface ActiveTurn {
   accumulator: TurnAccumulator; pendingInputs: number; interactions: Map<string, PendingInteraction>; controlRequestIds: Set<string>;
   onEvent(event: TransportEvent): void; resolve(result: ClaudeTurnResult): void; reject(error: unknown): void;
@@ -285,11 +292,12 @@ export class ClaudeTransport {
         thinking: thinking.enabled ? { type: 'adaptive', display: 'summarized' } : { type: 'disabled' },
         ...(thinking.effort ? { effort: thinking.effort } : {}),
         pathToClaudeCodeExecutable: resolveClaudeExecutable(options.environment, options.command),
-        settingSources: ['user'],
+        settingSources: ['user', 'project', 'local'],
         permissionMode: this.#permissionMode,
         ...(allowsBypass() ? { allowDangerouslySkipPermissions: true } : {}),
         // Paired with every mode, including bypass: questions and plan approval still need it after a live mode switch.
         canUseTool: (toolName, input, context) => this.#canUseTool(toolName, input, context),
+        onElicitation: (request, context) => this.#onElicitation(request, context.signal),
         persistSession: true,
         includePartialMessages: true,
         forwardSubagentText: true,
@@ -351,6 +359,11 @@ export class ClaudeTransport {
     const pending = active?.interactions.get(response.requestId);
     if (!active || !pending) throw new Error('Claude SDK Interaction is not pending');
     const { request } = pending;
+    if (pending.kind === 'elicitation') {
+      if (response.type !== 'elicitation') throw new Error('Claude SDK Interaction response type does not match');
+      return this.#settleElicitation(active, pending, response.result);
+    }
+    if (response.type === 'elicitation') throw new Error('Claude SDK Interaction response type does not match');
     if (response.type === 'question') {
       if (request.type !== 'question') throw new Error('Claude SDK Interaction response type does not match');
       if ('cancelled' in response) return this.#settle(active, pending, denied(pending.toolUseId, 'User cancelled the Question'));
@@ -405,8 +418,8 @@ export class ClaudeTransport {
     if (!request) return invalid();
     const known = request;
     return new Promise(resolve => {
-      const pending: PendingInteraction = {
-        request: known, controlRequestId: context.requestId, toolUseId: context.toolUseID, input, signal: context.signal, resolve,
+      const pending: PendingPermission = {
+        kind: 'permission', request: known, controlRequestId: context.requestId, toolUseId: context.toolUseID, input, signal: context.signal, resolve,
         ...(known.type === 'approval' && known.suggestedScope && context.suggestions ? { suggestions: context.suggestions } : {}),
         onAbort: () => this.#settle(active, pending, denied(pending.toolUseId, known.type === 'question' ? 'Claude Question was interrupted' : 'Claude Tool approval was interrupted')),
       };
@@ -418,6 +431,7 @@ export class ClaudeTransport {
   }
 
   #settle(active: ActiveTurn, pending: PendingInteraction, result: PermissionResult): void {
+    if (pending.kind !== 'permission') throw new Error('Claude SDK permission interaction is invalid');
     if (!active.interactions.delete(pending.request.requestId)) return;
     active.controlRequestIds.delete(pending.controlRequestId);
     pending.signal.removeEventListener('abort', pending.onAbort);
@@ -425,9 +439,37 @@ export class ClaudeTransport {
     pending.resolve(result);
   }
 
+  #onElicitation(input: ElicitationRequest, signal: AbortSignal): Promise<ElicitationResult> {
+    const active = this.#active;
+    if (!active || signal.aborted || !input.serverName.trim() || !input.message.trim()) return Promise.resolve({ action: 'decline' });
+    const requestId = `claude-elicitation-${++this.#ordinal}`;
+    const title = input.title?.trim() || input.message.trim();
+    const request: Extract<ClaudeInteractionRequest, { type: 'elicitation' }> | null = input.mode === 'url'
+      ? typeof input.url === 'string' && input.url.trim() ? { type: 'elicitation', requestId, serverName: input.serverName, title, mode: 'url', url: input.url } : null
+      : (() => { const questions = parseElicitationSchema(input.requestedSchema); return questions ? { type: 'elicitation', requestId, serverName: input.serverName, title, mode: 'form', questions } : null; })();
+    if (!request) return Promise.resolve({ action: 'decline' });
+    return new Promise(resolve => {
+      const pending: PendingElicitation = {
+        kind: 'elicitation', request, signal, resolve,
+        onAbort: () => this.#settleElicitation(active, pending, { action: 'cancel' }),
+      };
+      active.interactions.set(requestId, pending);
+      signal.addEventListener('abort', pending.onAbort, { once: true });
+      active.onEvent({ type: 'interaction.requested', request });
+    });
+  }
+
+  #settleElicitation(active: ActiveTurn, pending: PendingElicitation, result: ElicitationResult): void {
+    if (!active.interactions.delete(pending.request.requestId)) return;
+    pending.signal.removeEventListener('abort', pending.onAbort);
+    active.onEvent({ type: 'interaction.closed', requestId: pending.request.requestId });
+    pending.resolve(result);
+  }
+
   #closeInteractions(active: ActiveTurn): void {
     for (const pending of [...active.interactions.values()]) {
-      this.#settle(active, pending, denied(pending.toolUseId, pending.request.type === 'question' ? 'Claude Question is no longer pending' : 'Claude Tool approval is no longer pending'));
+      if (pending.kind === 'elicitation') this.#settleElicitation(active, pending, { action: 'cancel' });
+      else this.#settle(active, pending, denied(pending.toolUseId, pending.request.type === 'question' ? 'Claude Question is no longer pending' : 'Claude Tool approval is no longer pending'));
     }
   }
 

@@ -29,9 +29,11 @@
 
 ## 验证记录（2026-09-16）
 
-- `npm run check`：类型检查、构建及 28 项测试通过。覆盖附件校验和图片落盘、保密答复隔离及关闭、运行中插入去重、历史分支和回滚、未知结果不重发、委派分页及自动唤醒、原生 DSH 工具调用。
+- `npm run check`：类型检查、构建及 33 项测试通过。覆盖附件校验和图片落盘、保密答复隔离及关闭、运行中插入去重、历史分支和回滚、未知结果不重发、委派分页及自动唤醒、原生 DSH 工具调用，以及 Claude/Codex 的 MCP elicitation、权限请求、斜杠命令、hooks、子代理活动和增量工具输出投影。
 - `node experiments/codex-native-probe.mjs`：真实 Codex CLI 的多轮、历史读取、指定边界分支及跨进程续聊通过。
+- `node experiments/codex-capabilities-probe.mjs`：真实 Codex CLI 加载项目 skill 与 MCP；MCP 工具审批和表单问答经 DSH 往返；`/skills`、`/mcp` 不触发模型请求；Codex 哈希授信后的用户 hook 实际执行、反馈注入模型上下文并投影活动。模型端仅使用本地 fixture。
 - `node experiments/claude-native-probe.mjs`：真实 Claude Code CLI 的多轮、历史读取、指定边界分支、跨进程续聊及运行中插入通过。原始回复先结束时，仍等待插入消息对应的后续回复完成。
+- `node experiments/claude-capabilities-probe.mjs`：真实 Claude Code CLI 的项目 MCP 工具与表单提问、项目 hook 上下文与阻断反馈、原生 `/help` 斜杠命令通过；模型端仅使用本地 fixture。
 - `node experiments/secret-ui-probe.mjs`：实际密码组件的浏览器输入、提交及提交后清除通过。
 - `DSH_PLUGIN_TAR=.cache/dsh-harness-provider-0.1.2.tgz node experiments/dsh-web-probe.mjs`：临时 DSH Profile 安装、两种 Harness 原输入框续聊及重启恢复通过；回滚后下一请求不再包含被撤销轮；分支保留 Harness 绑定；未知结果核对保持暂停，手动解除没有增加模型请求。
 - 同一 Web 检查加 `DSH_DELEGATION_PROBE=1`：真实 Claude Code 工具创建的 Codex review 出现在侧栏，能查看回复；完成通知实际进入来源 Claude Code 的下一次模型请求，自动唤醒通过。
@@ -50,3 +52,15 @@
 - 更新前缺少轮次映射的历史可以整体分支，不能按旧消息猜测截断位置。
 - 回滚保留旧界面记录并新增说明；只改变后续原生上下文。无法确认的原生执行结果保持暂停，等待手动解除。
 - 插件保密答复通道不落盘；原生 Harness 自己的日志行为由其控制。
+
+## 嵌套委派修复
+
+修复委派子会话收到委派说明和凭据后，在完成通知触发的续轮中再次创建 review 会话的问题。宿主现在拒绝委派子会话再次委派，并且不再向它注入委派说明或环境凭据；来源主会话仍可在用户提出新任务时继续创建独立委派。回归测试先复现“子会话可再次委派”，修复后 `npm run check` 的类型检查、构建及 28 项测试通过。
+
+## Claude Code 原生配置范围
+
+Claude Code 主会话的 SDK `settingSources` 使用 `user`、`project`、`local`，与直接运行 CLI 的默认文件设置范围一致。项目 `CLAUDE.md`、项目与本地 settings，以及由这些设置启用的 skills、MCP、plugins 和 hooks 均由原生 Claude Code 加载。MCP 表单 elicitation 通过 DSH 问题卡交互，原生斜杠命令及 hooks 的 informational 消息投影为可见回复。短时模型与额度检查仍使用无工具查询，避免检查动作执行项目任务。
+
+## Codex 原生能力补齐
+
+Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工具调用审批会按原生元数据提供一次、本会话和永久授权；普通表单、多选表单、URL 流程和额外权限请求通过 DSH 交互返回。命令与 MCP 进度、hooks、子代理委派及新出现的原生活动都有安全投影，未知展示型 item 不再导致会话故障。原生 `skills/list`、`hooks/list`、`mcpServerStatus/list`、上下文压缩和 review API 接到对应斜杠命令；未识别命令保留给 Codex 处理。

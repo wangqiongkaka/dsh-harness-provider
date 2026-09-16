@@ -129,11 +129,45 @@ export function accountSnapshot(usage: { rate_limits_available?: boolean; rate_l
 // ── Interactions ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 export interface ClaudeQuestion { question: string; header: string; options: Array<{ label: string; description: string }>; multiSelect: boolean }
+export interface ClaudeElicitationQuestion {
+  id: string; prompt: string; optional: boolean; secret: boolean;
+  valueType: 'string' | 'number' | 'integer' | 'boolean' | 'stringArray'; options?: Array<{ value: string; label: string }>;
+}
 export type ClaudeInteractionRequest =
   | { type: 'approval'; requestId: string; title: string; description?: string; suggestedScope?: 'session' | 'always' }
   | { type: 'question'; requestId: string; questions: ClaudeQuestion[] }
+  | { type: 'elicitation'; requestId: string; serverName: string; title: string; mode: 'form'; questions: ClaudeElicitationQuestion[] }
+  | { type: 'elicitation'; requestId: string; serverName: string; title: string; mode: 'url'; url: string }
   /** `plan` is the SDK-provided plan text; null means there is nothing reviewable to approve. */
   | { type: 'planApproval'; requestId: string; plan: string | null };
+
+/** MCP form elicitation supports the primitive object fields the DSH question UI can represent. */
+export function parseElicitationSchema(schema: unknown): ClaudeElicitationQuestion[] | null {
+  if (!isRecord(schema) || schema.type !== 'object' || !isRecord(schema.properties)) return null;
+  const required = Array.isArray(schema.required) && schema.required.every(value => typeof value === 'string') ? new Set(schema.required) : new Set<string>();
+  const questions: ClaudeElicitationQuestion[] = [];
+  for (const [id, raw] of Object.entries(schema.properties)) {
+    if (!id || !isRecord(raw) || !['string', 'number', 'integer', 'boolean', 'array'].includes(String(raw.type))) return null;
+    const valueType: ClaudeElicitationQuestion['valueType'] = raw.type === 'array' ? 'stringArray' : raw.type as ClaudeElicitationQuestion['valueType'];
+    const prompt = displayText(raw.title, 200) ?? displayText(raw.description, 200) ?? id;
+    let options: ClaudeElicitationQuestion['options'];
+    if (valueType === 'stringArray') {
+      if (!isRecord(raw.items)) return null;
+      if (Array.isArray(raw.items.enum) && raw.items.enum.every(value => typeof value === 'string')) options = raw.items.enum.map(value => ({ value, label: value }));
+      else if (Array.isArray(raw.items.anyOf) && raw.items.anyOf.every(value => isRecord(value) && typeof value.const === 'string' && typeof value.title === 'string')) {
+        options = raw.items.anyOf.map(value => ({ value: (value as Record<string, unknown>).const as string, label: (value as Record<string, unknown>).title as string }));
+      } else return null;
+      if (!options.length) return null;
+    } else if (Array.isArray(raw.oneOf) && raw.oneOf.every(value => isRecord(value) && typeof value.const === 'string' && typeof value.title === 'string')) {
+      options = raw.oneOf.map(value => ({ value: (value as Record<string, unknown>).const as string, label: (value as Record<string, unknown>).title as string }));
+    } else if (Array.isArray(raw.enum)) {
+      if (!raw.enum.length || !raw.enum.every(value => typeof value === valueType || (valueType === 'integer' && typeof value === 'number' && Number.isInteger(value)))) return null;
+      options = raw.enum.map(value => ({ value: String(value), label: String(value) }));
+    } else if (valueType === 'boolean') options = [{ value: 'true', label: 'Yes' }, { value: 'false', label: 'No' }];
+    questions.push({ id, prompt, optional: !required.has(id), secret: raw.writeOnly === true || raw.format === 'password', valueType, ...(options ? { options } : {}) });
+  }
+  return questions.length ? questions : null;
+}
 
 /** AskUserQuestion input, accepted only in the documented shape (1–4 questions, 2–4 distinct options). */
 export function parseQuestions(input: Record<string, unknown>): ClaudeQuestion[] | null {
@@ -391,7 +425,7 @@ export class TurnAccumulator {
       events.push({ type: 'subagents.live', nativeSubagentIds: message.tasks.flatMap(task => isRecord(task) && bounded(task.task_id, DESCRIPTION_LIMIT) ? [bounded(task.task_id, DESCRIPTION_LIMIT)!] : []) });
       return;
     }
-    if (message.subtype === 'local_command_output') {
+    if (message.subtype === 'local_command_output' || message.subtype === 'informational') {
       if (nested || typeof message.content !== 'string' || !message.content) return;
       const messageId = typeof message.uuid === 'string' && message.uuid ? message.uuid : this.#nextId();
       const state = this.#state(messageId);

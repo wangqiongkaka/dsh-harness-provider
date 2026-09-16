@@ -32,6 +32,13 @@ for await (const line of createInterface({input:process.stdin})) {
   notice('thread/tokenUsage/updated',{turnId:turn.id,tokenUsage:{total:{totalTokens:1200,inputTokens:1000,cachedInputTokens:100,outputTokens:100,reasoningOutputTokens:0},last:{totalTokens:700,inputTokens:500,cachedInputTokens:100,outputTokens:100,reasoningOutputTokens:0},modelContextWindow:200000}});
   if(turn.id==='cancel') continue;
   if(turn.id==='approve') {send({id:90,method:'item/commandExecution/requestApproval',params:{threadId:p.threadId,turnId:turn.id,command:'echo hello'}});continue;}
+  if(turn.id==='mcp') {send({id:91,method:'mcpServer/elicitation/request',params:{threadId:p.threadId,turnId:turn.id,serverName:'probe',mode:'form',message:'Choose region',requestedSchema:{type:'object',required:['region'],properties:{region:{type:'string',title:'Region',enum:['us','eu']},features:{type:'array',title:'Features',items:{type:'string',enum:['logs','metrics']}}}}}});continue;}
+  if(turn.id==='mcp-approval') {send({id:93,method:'mcpServer/elicitation/request',params:{threadId:p.threadId,turnId:turn.id,serverName:'probe',mode:'form',message:'Allow ask?',_meta:{codex_approval_kind:'mcp_tool_call',persist:['session','always'],tool_description:'Ask through MCP'},requestedSchema:{type:'object',properties:{}}}});continue;}
+  if(turn.id==='permissions') {send({id:92,method:'item/permissions/requestApproval',params:{threadId:p.threadId,turnId:turn.id,itemId:'perm',cwd:process.cwd(),startedAtMs:Date.now(),reason:'Needs network',permissions:{network:{enabled:true}}}});continue;}
+  if(turn.id==='activity') {notice('item/started',{turnId:turn.id,item:{id:'sleep',type:'sleep',durationMs:10}});notice('item/completed',{turnId:turn.id,item:{id:'sleep',type:'sleep',durationMs:10}});notice('turn/completed',{turn:{...turn,status:'completed'}});continue;}
+  if(turn.id==='subagent') {const item={id:'collab',type:'collabAgentToolCall',tool:'spawnAgent',senderThreadId:'native-thread',receiverThreadIds:['child'],agentsStates:{child:{status:'completed',message:'done'}},status:'completed',prompt:'review',model:'gpt-test',reasoningEffort:'high'};notice('item/started',{turnId:turn.id,item});notice('item/completed',{turnId:turn.id,item});notice('turn/completed',{turn:{...turn,status:'completed'}});continue;}
+  if(turn.id==='hook') {const base={id:'h1',eventName:'userPromptSubmit',executionMode:'sync',handlerType:'command',scope:'turn',sourcePath:'/tmp/hook',startedAt:1,displayOrder:1};notice('hook/started',{turnId:turn.id,run:{...base,status:'running',entries:[]}});notice('hook/completed',{turnId:turn.id,run:{...base,status:'blocked',durationMs:2,entries:[{kind:'stop',text:'blocked by hook'}]}});notice('turn/completed',{turn:{...turn,status:'completed'}});continue;}
+  if(turn.id==='progress') {notice('item/started',{turnId:turn.id,item:{id:'cmd',type:'commandExecution',command:'echo hi',cwd:process.cwd(),status:'inProgress'}});notice('item/commandExecution/outputDelta',{turnId:turn.id,itemId:'cmd',delta:'hi\\n'});notice('item/completed',{turnId:turn.id,item:{id:'cmd',type:'commandExecution',command:'echo hi',cwd:process.cwd(),aggregatedOutput:'hi\\n',exitCode:0,status:'completed'}});notice('turn/completed',{turn:{...turn,status:'completed'}});continue;}
   notice('item/started',{turnId:turn.id,item:{id:'answer',type:'agentMessage',text:''}});
   notice('item/agentMessage/delta',{turnId:turn.id,itemId:'answer',delta:'reply:'+turn.id});
   notice('item/completed',{turnId:turn.id,item:{id:'answer',type:'agentMessage',text:'reply:'+turn.id}});
@@ -43,8 +50,22 @@ for await (const line of createInterface({input:process.stdin})) {
   if(p.turnId!==turn.id) process.exit(5);
   notice('turn/completed',{turn:{...turn,status:'interrupted'}});
   send({id:req.id,result:{}});
- } else if(req.id===90) {
+ } else if(req.method==='skills/list') send({id:req.id,result:{data:[{cwd:p.cwds[0],skills:[{name:'probe-skill',description:'probe',enabled:true,path:'/tmp/probe',scope:'repo'}],errors:[]}]}});
+ else if(req.method==='hooks/list') send({id:req.id,result:{data:[]}});
+ else if(req.method==='mcpServerStatus/list') send({id:req.id,result:{data:[],nextCursor:null}});
+ else if(req.method==='thread/compact/start') send({id:req.id,result:{}});
+ else if(req.method==='review/start') {turn={id:'review-native',status:'inProgress',items:[]};notice('turn/started',{turn});send({id:req.id,result:{reviewThreadId:'native-thread',turn}});notice('item/started',{turnId:turn.id,item:{id:'review-answer',type:'agentMessage',text:''}});notice('item/completed',{turnId:turn.id,item:{id:'review-answer',type:'agentMessage',text:'reviewed'}});notice('turn/completed',{turn:{...turn,status:'completed'}});}
+ else if(req.id===90) {
   if(req.result.decision!=='decline') process.exit(6);
+  notice('turn/completed',{turn:{...turn,status:'completed'}});
+ } else if(req.id===91) {
+  if(req.result.action!=='accept'||req.result.content.region!=='eu'||req.result.content.features.join(',')!=='logs,metrics') process.exit(11);
+  notice('turn/completed',{turn:{...turn,status:'completed'}});
+ } else if(req.id===92) {
+  if(req.result.scope!=='session'||req.result.permissions.network.enabled!==true) process.exit(12);
+  notice('turn/completed',{turn:{...turn,status:'completed'}});
+ } else if(req.id===93) {
+  if(req.result.action!=='accept'||req.result.content!==null||req.result._meta.persist!=='session') process.exit(13);
   notice('turn/completed',{turn:{...turn,status:'completed'}});
  } else if(req.method==='thread/read') send({id:req.id,result:{thread:{id:'native-thread',turns:[{id:'history',status:'completed',items:[{id:'u',type:'userMessage',content:[{type:'text',text:'first'}]},{id:'a',type:'agentMessage',text:'remembered'}]}]}}});
  else process.exit(7);
@@ -95,6 +116,65 @@ test('native identity survives multiple turns, cancellation, approval, and a new
   value(await session.execute({type:'turn.start',turnId:'host-third',input:[{type:'text',text:'third'}]}));
   assert.equal((await until(output,'turn.completed')).at(-1).event.outcome.status,'succeeded');
  } finally {await resumedAdapter.close();}
+});
+
+test('routes supported Codex slash commands without sending them to the model', {timeout:10000}, async()=>{
+ const adapter=new CodexAdapter(options);
+ try {
+  const session=value(await adapter.open({kind:'create',cwd:process.cwd()}));const output=session.outputs[Symbol.asyncIterator]();
+  value(await session.execute({type:'turn.start',turnId:'slash-help',input:[{type:'text',text:'/help'}]}));
+  let seen=await until(output,'turn.completed');
+  assert.match(seen.find(o=>o.event?.type==='item.completed').event.snapshot.item.text,/\/skills/);
+  value(await session.execute({type:'turn.start',turnId:'slash-skills',input:[{type:'text',text:'/skills'}]}));
+  seen=await until(output,'turn.completed');
+  assert.match(seen.find(o=>o.event?.type==='item.completed').event.snapshot.item.text,/probe-skill/);
+  value(await session.execute({type:'turn.start',turnId:'slash-review',input:[{type:'text',text:'/review check this'}]}));
+  seen=await until(output,'turn.completed');
+  assert.equal(seen.at(-1).event.outcome.status,'succeeded');
+ } finally {await adapter.close();}
+});
+
+test('bridges Codex MCP elicitation and additional-permission requests', {timeout:10000}, async()=>{
+ const adapter=new CodexAdapter(options);
+ try {
+  const session=value(await adapter.open({kind:'create',cwd:process.cwd()}));
+  const output=session.outputs[Symbol.asyncIterator]();
+  value(await session.execute({type:'turn.start',turnId:'host-mcp',input:[{type:'text',text:'mcp'}]}));
+  let next=await output.next(); while(next.value.kind!=='interaction') next=await output.next();
+  assert.equal(next.value.interaction.questions[0].id,'region');
+  assert.equal(next.value.interaction.questions[1].multiple,true);
+  value(await session.execute({type:'interaction.respond',interactionId:next.value.interaction.interactionId,response:{type:'question',answers:{region:['eu'],features:['logs','metrics']}}}));
+  await until(output,'turn.completed');
+  value(await session.execute({type:'turn.start',turnId:'host-permissions',input:[{type:'text',text:'permissions'}]}));
+  next=await output.next(); while(next.value.kind!=='interaction') next=await output.next();
+  assert.match(next.value.interaction.description,/network/iu);
+  value(await session.execute({type:'interaction.respond',interactionId:next.value.interaction.interactionId,response:{type:'approval',actionId:'session'}}));
+  await until(output,'turn.completed');
+  value(await session.execute({type:'turn.start',turnId:'host-mcp-approval',input:[{type:'text',text:'mcp-approval'}]}));
+  next=await output.next(); while(next.value.kind!=='interaction') next=await output.next();
+  assert.deepEqual(next.value.interaction.actions.map(action=>action.id),['accept','session','always','decline']);
+  value(await session.execute({type:'interaction.respond',interactionId:next.value.interaction.interactionId,response:{type:'approval',actionId:'session'}}));
+  await until(output,'turn.completed');
+ } finally {await adapter.close();}
+});
+
+test('unknown native activities degrade safely and command output streams', {timeout:10000}, async()=>{
+ const adapter=new CodexAdapter(options);
+ try {
+  const session=value(await adapter.open({kind:'create',cwd:process.cwd()}));const output=session.outputs[Symbol.asyncIterator]();
+  value(await session.execute({type:'turn.start',turnId:'host-activity',input:[{type:'text',text:'activity'}]}));
+  const activity=await until(output,'turn.completed');
+  assert.ok(activity.some(o=>o.event?.type==='item.completed'&&o.event.snapshot.item.type==='toolExecution'&&o.event.snapshot.item.toolName==='sleep'));
+  value(await session.execute({type:'turn.start',turnId:'host-progress',input:[{type:'text',text:'progress'}]}));
+  const progress=await until(output,'turn.completed');
+  assert.ok(progress.some(o=>o.event?.type==='item.updated'&&o.event.update.type==='output.append'&&o.event.update.text==='hi\n'));
+  value(await session.execute({type:'turn.start',turnId:'host-subagent',input:[{type:'text',text:'subagent'}]}));
+  const subagent=await until(output,'turn.completed');
+  assert.ok(subagent.some(o=>o.event?.type==='item.completed'&&o.event.snapshot.item.type==='subagentDelegation'&&o.event.snapshot.item.subagents[0].status==='completed'));
+  value(await session.execute({type:'turn.start',turnId:'host-hook',input:[{type:'text',text:'hook'}]}));
+  const hook=await until(output,'turn.completed');
+  assert.ok(hook.some(o=>o.event?.type==='item.completed'&&o.event.snapshot.item.type==='toolExecution'&&o.event.snapshot.item.output.content[0].text==='blocked by hook'));
+ } finally {await adapter.close();}
 });
 
 test('catalog exposes reasoning efforts, thinking.select rides turn/start, token usage and rate limits surface', {timeout:10000}, async()=>{

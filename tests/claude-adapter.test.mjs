@@ -74,6 +74,8 @@ test('streams text, projects Bash and Edit activity, and reports exact per-proce
   const q = await startTurn(sdk, session, 'turn-1');
   assert.equal(q.options.sessionId.length, 36);
   assert.match(q.options.systemPrompt?.append ?? '', /进展反馈/);
+  assert.match(q.options.systemPrompt?.append ?? '', /不要讨论或解释.*系统提示.*技能.*代理策略/);
+  assert.deepEqual(q.options.settingSources, ['user', 'project', 'local']);
   assert.equal(q.prompts[0].message.content, 'hello');
   q.push({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'message_start', message: { id: 'm1' } } });
   q.push({ type: 'stream_event', parent_tool_use_id: null, event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Look' } } });
@@ -96,6 +98,44 @@ test('streams text, projects Bash and Edit activity, and reports exact per-proce
   const state = out.seen.find(eventOf('session.state.changed')).event.state;
   assert.equal(state.nativeRef.nativeSessionId, q.options.sessionId);
   await adapter.close();
+});
+
+test('shows native slash-command and hook informational output as assistant text', async () => {
+  const sdk = fakeSdk();
+  const { adapter, session, out } = await openSession(sdk);
+  try {
+    const q = await startTurn(sdk, session, 'informational');
+    q.push({ type: 'system', subtype: 'informational', content: 'hook blocked this prompt', level: 'warning', prevent_continuation: true, uuid: 'info-1', session_id: q.options.sessionId });
+    q.push(result({}));
+    await out.until(eventOf('turn.completed'));
+    assert.ok(out.seen.filter(eventOf('item.completed')).some(output => output.event.snapshot.item.type === 'agentMessage'
+      && output.event.snapshot.item.text === 'hook blocked this prompt'));
+  } finally { await adapter.close(); }
+});
+
+test('bridges MCP form elicitation through a DSH question interaction', async () => {
+  const sdk = fakeSdk();
+  const { adapter, session, out } = await openSession(sdk);
+  try {
+    const q = await startTurn(sdk, session, 'elicitation');
+    const nativeResponse = q.options.onElicitation({
+      serverName: 'probe', message: 'Configure deployment', mode: 'form',
+      requestedSchema: { type: 'object', required: ['region'], properties: {
+        region: { type: 'string', title: 'Region', enum: ['us', 'eu'] },
+        note: { type: 'string', title: 'Note' },
+      } },
+    }, { signal: new AbortController().signal });
+    const pending = await out.until(output => output.kind === 'interaction');
+    assert.equal(pending.interaction.title, 'Configure deployment');
+    assert.deepEqual(pending.interaction.questions.map(question => [question.id, question.type, question.optional]), [
+      ['region', 'choice', false], ['note', 'text', true],
+    ]);
+    unwrap(await session.execute({ type: 'interaction.respond', interactionId: pending.interaction.interactionId,
+      response: { type: 'question', answers: { region: ['eu'], note: ['ship it'] } } }));
+    assert.deepEqual(await nativeResponse, { action: 'accept', content: { region: 'eu', note: 'ship it' } });
+    q.push(result({}));
+    await out.until(eventOf('turn.completed'));
+  } finally { await adapter.close(); }
 });
 
 test('answers AskUserQuestion, plan approval, and scoped tool approval through host interactions', async () => {

@@ -82,10 +82,11 @@ export class DshRunner {
     if (binding.pending) throw new Error('上次 Harness 请求的结果尚未确认；为避免重复执行，本会话暂停发送。');
     const input = await harnessInput(this.ctx, messages, signal);
     if (!input.length) throw new Error('Harness prompt is empty');
-    if (this.delegation) input.unshift({ type: 'text', text: delegationInstructions() });
+    const delegation = binding.delegation ? undefined : this.delegation;
+    if (delegation) input.unshift({ type: 'text', text: delegationInstructions() });
     let live = this.live.get(agent.id);
     if (!live) {
-      const hints = { ...(this.delegation ? { environment: { ...process.env, ...await this.delegation.environment(agent.id) } } : {}),
+      const hints = { ...(delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) } } : {}),
         ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
         ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(binding.usage ? { usage: binding.usage } : {}) };
       const session = unwrap(await this.adapters[binding.harness].open(binding.nativeRef

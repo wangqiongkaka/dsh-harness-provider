@@ -403,12 +403,31 @@ class ClaudeSession implements HarnessSession {
     let native: ClaudeInteractionResponse;
     if (response.type === 'approval') {
       const action = (pending.interaction as HostApprovalInteraction).actions.find(candidate => candidate.id === response.actionId)!;
-      native = { type: 'approval', requestId: request.requestId, decision: action.effect };
+      native = request.type === 'elicitation'
+        ? { type: 'elicitation', requestId: request.requestId, result: { action: action.effect === 'deny' ? 'decline' : 'accept' } }
+        : { type: 'approval', requestId: request.requestId, decision: action.effect };
     } else if (request.type === 'planApproval') {
       native = { type: 'approval', requestId: request.requestId, decision: !response.cancelled && request.plan && response.answers[PLAN_DECISION]?.[0] === 'approve' ? 'allowOnce' : 'deny' };
     } else if (request.type === 'question') {
       native = response.cancelled ? { type: 'question', requestId: request.requestId, cancelled: true }
         : { type: 'question', requestId: request.requestId, answers: Object.fromEntries(request.questions.map((question, index) => [question.question, response.answers[`question-${index + 1}`]?.join(', ') ?? ''])) };
+    } else if (request.type === 'elicitation' && request.mode === 'form') {
+      if (response.cancelled) native = { type: 'elicitation', requestId: request.requestId, result: { action: 'cancel' } };
+      else {
+        const content: Record<string, string | number | boolean | string[]> = {};
+        for (const question of request.questions) {
+          const answers = response.answers[question.id];
+          if (question.valueType === 'stringArray') { if (answers) content[question.id] = answers; continue; }
+          const answer = answers?.[0];
+          if (answer === undefined) continue;
+          if (question.valueType === 'number' || question.valueType === 'integer') {
+            const value = Number(answer);
+            if (!Number.isFinite(value) || (question.valueType === 'integer' && !Number.isInteger(value))) return failed('invalidRequest', `${question.prompt} must be a valid ${question.valueType}`);
+            content[question.id] = value;
+          } else content[question.id] = question.valueType === 'boolean' ? answer === 'true' : answer;
+        }
+        native = { type: 'elicitation', requestId: request.requestId, result: { action: 'accept', content } };
+      }
     } else return failed('invalidRequest', 'Claude Code Interaction response type does not match');
     try { transport.respondToInteraction(native); } catch { return failed('nativeFailure', 'Claude Code Interaction response failed'); }
     return { ok: true, value: { accepted: true } };
@@ -637,6 +656,12 @@ class ClaudeSession implements HarnessSession {
           { id: 'deny', label: 'Deny', effect: 'deny' },
         ],
       };
+    } else if (request.type === 'elicitation' && request.mode === 'url') {
+      interaction = {
+        type: 'approval', interactionId, turnId, title: request.title,
+        description: `${request.serverName}\n${request.url}`, subject: { type: 'nativeAction' },
+        actions: [{ id: 'allowOnce', label: 'Continue after completing the browser step', effect: 'allowOnce' }, { id: 'deny', label: 'Cancel', effect: 'deny' }],
+      };
     } else if (request.type === 'planApproval') {
       // Approving a plan changes the session's permission mode, so it is an explicit closed choice rather than a tool approval.
       const warning = 'Approving this plan will exit plan mode, restore the permission mode used before planning, and let Claude begin implementation under that mode. This is not a one-time tool approval.';
@@ -651,13 +676,23 @@ class ClaudeSession implements HarnessSession {
           ],
         }],
       };
-    } else {
+    } else if (request.type === 'question') {
       interaction = {
         type: 'question', interactionId, turnId, title: request.questions.length === 1 ? request.questions[0]!.header : 'Claude Code',
         questions: request.questions.map((question, index) => ({
           id: `question-${index + 1}`, type: 'choice' as const, prompt: question.question, multiple: question.multiSelect, allowOther: true, optional: false,
           options: question.options.map(option => ({ value: option.label, label: option.label, description: option.description })),
         })),
+      };
+    } else {
+      interaction = {
+        type: 'question', interactionId, turnId, title: request.title,
+        questions: request.questions.map(question => question.options ? {
+          id: question.id, type: 'choice' as const, prompt: question.prompt, multiple: question.valueType === 'stringArray', allowOther: false, optional: question.optional,
+          options: question.options.map(option => ({ value: option.value, label: option.label })),
+        } : {
+          id: question.id, type: 'text' as const, prompt: question.prompt, multiline: false, secret: question.secret, optional: question.optional,
+        }),
       };
     }
     active.interactions.set(interactionId, { interaction, request });
@@ -894,4 +929,3 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     }
   }
 }
-

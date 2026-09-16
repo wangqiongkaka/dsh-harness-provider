@@ -225,6 +225,7 @@ export class HarnessService extends TypertRemoteService {
   async delegate(source: string, raw: unknown) {
     const request = delegationRequest.parse(raw);
     const parent = await this.agent(source);
+    if ((await this.bindings.read(source))?.delegation) throw new Error('委派子会话不能再次委派；请返回来源会话继续处理');
     const cwd = parent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
     const hash = (value: string) => createHash('sha256').update(value).digest('hex');

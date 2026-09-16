@@ -41,9 +41,8 @@ test('session CLI creates a visible independent harness session, reads its resul
   async inspect() { return unavailable ? {status:'unavailable',error:{message:'fixture unavailable'}} : {status:'ready',catalog:{models:[],thinkingOptions:[]},
    permissionModes:{modes:[{id:'readOnly',label:'Read only'},{id:'default',label:'Default'}],defaultModeId:'readOnly'}}; },
   async open(input) {
-   if (harness === 'codex') opens.push({harness,input});
-   assert.ok(input.environment.DSH_DELEGATE_TOKEN);
-   assert.ok(input.environment.DSH_DELEGATE_ENDPOINT);
+   opens.push({harness,input});
+   if (harness === 'codex') assert.equal(input.environment,undefined);
    const channel=new HarnessOutputChannel();
    return {ok:true,value:{initialState:{},outputs:channel.outputs,async close(){channel.end();},async execute(command){
     if (harness === 'claude-code') {
@@ -51,8 +50,7 @@ test('session CLI creates a visible independent harness session, reads its resul
      return {ok:true,value:{turnId:command.turnId}};
     }
     turns.push(command);assert.equal(command.type,'turn.start');
-    assert.match(command.input[0].text,/delegate-cli.mjs/);
-    assert.equal(command.input.at(-1).text,'Review this diff without editing');
+    assert.deepEqual(command.input,[{type:'text',text:'Review this diff without editing'}]);
     channel.emit({kind:'event',event:{type:'item.completed',turnId:command.turnId,snapshot:{item:{type:'agentMessage',itemId:'answer',text:reply},outcome:{status:'succeeded'}}}});
     channel.emit({kind:'event',event:{type:'turn.completed',turnId:command.turnId,outcome:{status:'succeeded'}}});
     return {ok:true,value:{turnId:command.turnId}};
@@ -86,11 +84,13 @@ test('session CLI creates a visible independent harness session, reads its resul
   assert.deepEqual(await h.bindings.readDefaults(),{harness:'claude-code'});
   assert.equal((await h.bindings.read('parent')).harness,'claude-code');
   assert.equal((await h.state({sessionId:first.sessionId})).harness,'codex');
+  await assert.rejects(h.delegate(first.sessionId,{...request,requestId:'nested-review'}),/委派子会话不能再次委派/);
   const result=await cli('read',first.sessionId);
   assert.equal(result.status,'completed');assert.equal(result.text,'Review complete: no findings');
   assert.equal(child.session.snapshotEvents().filter(e=>e.type==='user/message').length,1);
   assert.equal(JSON.stringify(child.session.snapshotEvents()).includes(environment.DSH_DELEGATE_TOKEN),false);
   await cli('create',request);assert.equal(turns.length,1);
+  await h.notifyDelegation(first.sessionId);
   await ctx.agents.get('parent').whenIdle();
   const notifications=ctx.agents.get('parent').session.snapshotEvents().filter(e=>e.type==='user/message' && e.data.source.kind==='plugin');
   assert.equal(notifications.length,1);
