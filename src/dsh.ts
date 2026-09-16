@@ -20,11 +20,12 @@ import type {} from '@deepseek-ai/dsh-workspace';
 import type {} from '@deepseek-ai/dsh-attachment';
 import type {} from '@deepseek-ai/dsh-client-file-upload';
 import type {} from '@deepseek-ai/dsh-session-title';
+import type {} from '@deepseek-ai/dsh-agent-presets/types';
 import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, type HarnessAccountSnapshot } from './contracts.js';
 import { z } from 'zod';
 import { Bindings, type Binding } from './bindings.js';
-import { CodexAdapter } from './codex-adapter.js';
-import { ClaudeCodeAdapter } from './claude-adapter.js';
+import { AcpAdapter } from './acp-adapter.js';
+import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, secretAnswerRequest, recoveryRequest } from './remote.js';
@@ -39,11 +40,10 @@ declare module '@deepseek-ai/cordis' { interface Context { harness: HarnessServi
 /** Standalone DSH entry: no replacement of the original client/plugin row. */
 export async function apply(ctx: Context, rawConfig: unknown = {}): Promise<void> {
   const config = configSchema.parse(rawConfig);
-  const claude = new ClaudeCodeAdapter({ environment: { ...process.env } });
+  const environment = { ...process.env };
   const adapters = {
-    codex: new CodexAdapter({ command: config.codexCommand, environment: { ...process.env },
-      requestTimeoutMs: 30000, shutdownTimeoutMs: 2000, maxFrameBytes: 16 * 1024 * 1024 }),
-    'claude-code': claude,
+    codex: new AcpAdapter({ profile: codexProfile({ command: config.codexCommand, environment }), environment }),
+    'claude-code': new AcpAdapter({ profile: claudeProfile({ environment }), environment }),
   };
   new HarnessService(ctx, resolve(config.root ?? resolve(process.env.DSH_HOME ?? resolve(homedir(), '.dsh'), 'harness-plugin')), adapters);
 }
@@ -53,9 +53,12 @@ type Ready = Extract<HarnessInspection, { status: 'ready' }>;
 // DSH native sandbox mode -> the Harness permission mode it most closely matches, so switching Harness keeps the
 // permission the user already picked. Claude Code has no sandbox tiers below full access; those fall to its default.
 const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>> = {
-  codex: { 'read-only': 'readOnly', 'workspace-write': 'workspaceWrite', 'danger-full-access': 'dangerFullAccess' },
+  codex: { 'read-only': 'read-only', 'workspace-write': 'agent', 'danger-full-access': 'agent-full-access' },
   'claude-code': { 'danger-full-access': 'bypassPermissions' },
 };
+/** Full access on either side maps to full access on the other; anything else lands on the target's cautious default. */
+const FULL_ACCESS: Record<Binding['harness'], string> = { codex: 'agent-full-access', 'claude-code': 'bypassPermissions' };
+const CAUTIOUS: Record<Binding['harness'], string> = { codex: 'read-only', 'claude-code': 'default' };
 
 export class HarnessService extends TypertRemoteService {
   readonly bindings: Bindings;
@@ -110,6 +113,33 @@ export class HarnessService extends TypertRemoteService {
       }));
     });
     this.wrapCommands(ctx);
+    ctx.inject(['sessionSkillCatalog'], scope => {
+      const catalog = scope.sessionSkillCatalog;
+      const descriptor = Object.getOwnPropertyDescriptor(catalog, 'list');
+      const original = catalog.list.bind(catalog);
+      const list: typeof catalog.list = async (request, signal) => {
+        signal.throwIfAborted();
+        // Resolve remembered Harness selection before the composer's scope-birth prewarm.
+        await this.state(request);
+        return this.bindings.serial(request.sessionId, async () => {
+          signal.throwIfAborted();
+          const binding = await this.bindings.read(request.sessionId);
+          if (!binding) return original(request, signal);
+          // A live native session already holds the agent's current command list; otherwise a short probe reads it.
+          const live = this.runner.live.get(request.sessionId)?.session;
+          const skills = live?.listSkills ? await live.listSkills() : await this.adapters[binding.harness].listSkills({ cwd: binding.cwd });
+          signal.throwIfAborted();
+          return { skills };
+        });
+      };
+      scope.effect(() => {
+        catalog.list = list;
+        return () => {
+          if (Object.getOwnPropertyDescriptor(catalog, 'list')?.value !== list) return;
+          if (descriptor) Object.defineProperty(catalog, 'list', descriptor); else Reflect.deleteProperty(catalog, 'list');
+        };
+      }, 'harness: session skill catalog');
+    });
     void this.bindings.delegated().then(bindings => Promise.allSettled(bindings.map(binding => this.notifyDelegation(binding.sessionId)))).catch(() => {});
   }
 
@@ -250,8 +280,7 @@ export class HarnessService extends TypertRemoteService {
           const nativeSandbox = this.ctx.get('sessionProjections')?.stateOf(parent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
           const permission = !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox]
             : parentBinding?.harness === request.harness ? parentBinding.permission
-            : request.harness === 'codex' ? (parentBinding?.permission === 'bypassPermissions' ? 'dangerFullAccess' : 'readOnly')
-              : parentBinding?.permission === 'dangerFullAccess' ? 'bypassPermissions' : 'default';
+            : parentBinding && parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? FULL_ACCESS[request.harness] : CAUTIOUS[request.harness];
           if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
           const workspace = this.ctx.get('workspaceRegistry')?.list().find(workspace => workspace.sessionIds.includes(parent.id));
           // Hold the same lock as state/select/prompt so the UI cannot auto-bind the new session to its remembered Harness.
@@ -330,8 +359,14 @@ export class HarnessService extends TypertRemoteService {
       if (current?.locked || !this.fresh(agent)) throw new Error('开始对话后不能切换 Harness，请新建会话');
       const defaults = await this.bindings.readDefaults();
       await this.bindings.writeDefaults({ ...defaults, harness: request.harness });
-      if (request.harness === 'dsh') { await this.bindings.remove(request.sessionId); return this.view(); }
-      return this.view(await this.bind(agent, request.sessionId, request.harness));
+      let binding: Binding | undefined;
+      if (request.harness === 'dsh') await this.bindings.remove(request.sessionId);
+      else binding = await this.bind(agent, request.sessionId, request.harness);
+      // ponytail: DSH 0.1.6 only exposes preset-event invalidation; use a skill-specific event when available.
+      // Re-announce the unchanged preset; no preset selection or durable event is written.
+      const preset = this.ctx.get('sessionProjections')?.stateOf(agent.session, 'agentPreset') ?? agent.session.header.agentPreset;
+      this.ctx.emit('agent-preset/selected', SessionId(request.sessionId), preset ?? '');
+      return this.view(binding);
     });
   }
 

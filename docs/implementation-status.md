@@ -64,3 +64,56 @@ Claude Code 主会话的 SDK `settingSources` 使用 `user`、`project`、`local
 ## Codex 原生能力补齐
 
 Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工具调用审批会按原生元数据提供一次、本会话和永久授权；普通表单、多选表单、URL 流程和额外权限请求通过 DSH 交互返回。命令与 MCP 进度、hooks、子代理委派及新出现的原生活动都有安全投影，未知展示型 item 不再导致会话故障。原生 `skills/list`、`hooks/list`、`mcpServerStatus/list`、上下文压缩和 review API 接到对应斜杠命令；未识别命令保留给 Codex 处理。
+
+## ACP 重构（2026-09-16）
+
+### 决定
+
+- 两个 Harness 改为通过 Agent Client Protocol v1 连接官方适配器：`@agentclientprotocol/codex-acp` 1.12.0 与 `@agentclientprotocol/claude-agent-acp` 0.78.0，SDK 锁定 `@agentclientprotocol/sdk` 1.4.0（DSH 自带的 `dsh-acp` 也用这个版本）。两个适配器脚本随插件打包，运行用户安装的 `codex` / `claude`。
+- 统一契约 `HarnessAdapter/HarnessSession` 不变；`src/acp-adapter.ts` 是唯一实现，`src/acp-profiles.ts` 提供两个配置档。删除 `codex-adapter`、`codex-items`、`claude-adapter`、`claude-native`、`claude-history*`。
+- 只保留两处原生补充：账户额度窗口（Codex `account/rateLimits/read`；Claude Agent SDK 账户快照）和 Claude 可执行文件发现。
+- 客户端不向 Agent 声明文件系统与终端能力，工具继续由各 CLI 在自己的沙箱和权限策略下执行。声明表单/URL 征询、计划、压缩、布尔配置项，以及 `steering`、`sessionFailure`、`recommendedValue` 扩展。
+- 轮次键改为“提示文本哈希.出现序号”，由 ACP 回放重建；分支边界使用该轮最后一条 Agent 消息 ID（AIR fork 扩展），分支在独立短进程执行（Codex 会持有分支线程的写者）。
+- 新会话用首行提示 `/rename` 原生会话，避免两个适配器各自多发一次标题生成的模型请求。
+- Codex 技能菜单显示去掉 `$` 的名称，发送时改写为 `$技能名`（Codex 只对这种拼写注入技能正文）；Claude 保留 `/技能名`。
+- 旧标识映射：Codex 权限 `readOnly/workspaceWrite/dangerFullAccess` → `read-only/agent/agent-full-access`；Claude 推理 `auto/off` → `default`；Claude 旧模型引用 `claude-model-v1.*` 解码为 ACP 配置值。
+
+### 现有行为 → ACP 对应
+
+| 现有行为 | ACP / 扩展 / 原生补充 |
+| --- | --- |
+| 建会话、续聊、重启恢复 | `session/new`、`session/load`（回放历史）、原生会话 ID 即 ACP session ID |
+| 流式文本、推理摘要 | `agent_message_chunk`、`agent_thought_chunk` |
+| 命令/工具/文件改动活动 | `tool_call` / `tool_call_update`（`execute` 类映射为命令卡，diff 内容映射为文件改动卡） |
+| 审批（命令、文件、权限、MCP 工具） | `session/request_permission` + 权限展示扩展 `_meta.permission` |
+| MCP 表单、URL 流程、Codex requestUserInput（含保密）、Claude AskUserQuestion | `elicitation/create`（form/url），保密字段来自 `_meta.codex.isSecret`，自定义答案字段来自 `_askUserQuestionCustomAnswer` |
+| 模型 / 推理强度 / 权限切换 | `session/set_config_option`、`session/set_mode`、`config_option_update`、`current_mode_update` |
+| 上下文占用、累计 token | `usage_update`、`PromptResponse.usage` 累加 |
+| 账户额度 | 原生补充（见上） |
+| 插入当前轮 | `_session/steering` |
+| 取消 | `session/cancel` → `stopReason: cancelled` |
+| 技能菜单、斜杠命令 | `available_commands_update`；本地命令由适配器执行 |
+| 历史读取、恢复对账 | 回放重建的转录；有输出的轮次视为已执行 |
+| 分支、回滚 | `session/fork` + AIR fork 消息边界 |
+| 委派、保密问题、附件 | 宿主侧逻辑不变 |
+| 新增：计划/待办、压缩卡、重连与会话失败说明、推荐默认值 | `plan`、`compaction_update`、`session_info_update._meta`、`recommendedValue` |
+
+### 验证
+
+- `npm run check`：类型检查、构建及 23 项测试通过；`tests/acp-adapter.test.mjs` 用官方 SDK 写的假 Agent 覆盖目录读取、轮次流、提示前缀与会话命名、插入、取消、审批、表单（保密与自定义答案）、URL 征询、工具/文件改动/计划/压缩投影、会话失败扩展、跨进程回放与分支、Agent 崩溃。
+- `node experiments/acp-native-probe.mjs`：真实 Codex 0.154.0 与 Claude Code 2.1.273 经内置 ACP 适配器：目录与技能读取不发模型请求、两轮对话、历史快照、指定轮次分支、技能调用到达模型请求、跨进程恢复携带上下文、Claude 运行中插入；模型端为本地桩服务。
+- `node experiments/delegation-native-probe.mjs`：两个真实 CLI 的 shell 工具继承会话凭据并调用委派 CLI 通过。
+- `node experiments/dsh-web-probe.mjs`（默认模式）：临时 DSH Profile 安装、Codex 两轮、重启续聊、恢复入口、回滚后请求不含被撤销轮、分支保留绑定、Claude 两轮与重启续聊通过；`DSH_SKILLS_PROBE=1`、`DSH_IMAGE_PROBE=1`、`DSH_DELEGATION_PROBE=1` 三种模式也通过。
+- 修复过程中发现并处理：Claude Code 的 Bash 工具调用先以空 `rawInput` 宣告、参数随后在更新中到达，适配器在拿到输入或终态前不建活动卡；命令卡的用途描述取 `rawInput.description`，输出取终态的 `rawOutput`。
+
+## 历史验证记录（自 README 迁入，ACP 重构之前）
+
+**2026-09-16（0.1.3，直连时期）**：新增按 Harness 读取的 `/` 技能菜单（切换清除缓存、失败不回退 DSH 技能）、`sessionSkillCatalog.list` 包装与卸载恢复、DSH 0.1.6 的 preset 失效通知、恢复入口改为独立的 **恢复会话** 面板，并在 `tests/` 中补充技能菜单与用量环两项测试（当时共 12 个测试文件、37 项测试）。
+
+**2026-09-16（直连时期）**：
+
+- 新增附件、保密输入、原生插入/分支/上下文回滚、异常恢复、委派分页与自动唤醒、DSH 原生委派工具，并补齐 Codex 的 MCP 交互、原生目录型斜杠命令、hooks 与子代理活动投影。
+- 会话委派改动：类型检查、构建及 15 项自动化测试通过；两个真实 CLI 均通过 shell 调用委派入口验证；临时 Web Profile 中，Claude Code 创建的 Codex review 实时出现在侧栏。
+- 环境：DSH `0.1.6-alpha.1`（本地构建标识 `0.1.6-alpha.1-0d1f500`）；Codex CLI `0.144.6`；Claude Code CLI `2.1.272`。
+- 两个真实 CLI 均通过多轮、原生身份保存和跨进程恢复验证；Web 安装后 Codex、Claude Code 均通过原输入框两轮对话及重启后续聊。
+- 一次与原生 CLI 检查并行运行的 Web 复验中，Codex 模型目录查询进程退出；随后单独运行完整 Web 复验通过，该次退出原因未确认。

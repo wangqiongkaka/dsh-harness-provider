@@ -6,22 +6,31 @@ import { createHash } from 'node:crypto';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { delayedFixture } from './delayed-fixture.mjs';
 const reference=resolve(process.env.DSH_REFERENCE_ROOT ?? '../../deepseek-harness');
 const require=createRequire(import.meta.url);
 const {chromium,expect}=require('@playwright/test');
 const {startResponsesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-codex/tests/responses-fixture.ts')));
 const {startMessagesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-claude-code/tests/messages-fixture.ts')));
 const codex=await startResponsesFixture([{kind:'complete',text:'Codex native first'},{kind:'complete',text:'Codex native second'},{kind:'complete',text:'Codex native resumed'},{kind:'complete',text:'Codex after rollback'}]);
+const skillsProbe=process.env.DSH_SKILLS_PROBE === '1';
 const delegationProbe=process.env.DSH_DELEGATION_PROBE === '1';
 const quote=text=>"'"+text.replaceAll("'","'\\''")+"'";
 const delegateCommand=[process.execPath,resolve('dist/delegate-cli.mjs'),'create',JSON.stringify({requestId:'web-review',harness:'codex',prompt:'Review this workspace without editing'})].map(quote).join(' ');
 const claude=await startMessagesFixture(delegationProbe
  ? {kind:'tool-use',toolName:'Bash',input:{command:delegateCommand,description:'Create visible Codex review'},finalText:'Claude native reply'}
  : {kind:'complete',text:'Claude native reply'});
+// Both fixtures answer with one fixed message id; the proxies make ids unique so message-addressed forks (rollback) are exact.
+const codexProxy=await delayedFixture(codex.baseUrl),claudeProxy=await delayedFixture(claude.baseUrl);
 await mkdir('.cache',{recursive:true});
 const root=await mkdtemp(resolve('.cache/web-probe-'));
 const dshHome=join(root,'dsh'),codexHome=join(root,'codex'),claudeHome=join(root,'claude'),workspace=join(root,'workspace');
 await Promise.all([codexHome,claudeHome,workspace].map(path=>mkdir(path)));
+if(skillsProbe) execFileSync('git',['init',workspace],{stdio:'pipe'});
+if(skillsProbe) for(const [base,name] of [[join(codexHome,'skills'),'codex-menu-skill'],[join(workspace,'.claude/skills'),'claude-menu-skill'],[join(workspace,'.dsh/skills'),'dsh-menu-skill']]) {
+ await mkdir(join(base,name),{recursive:true});
+ await writeFile(join(base,name,'SKILL.md'),`---\nname: ${name}\ndescription: ${name} fixture\n---\nReply with the fixture response.\n`);
+}
 await writeFile(join(codexHome,'config.toml'),`model = "fixture-model"
 model_provider = "fixture"
 approval_policy = "on-request"
@@ -29,7 +38,7 @@ sandbox_mode = "read-only"
 check_for_update_on_startup = false
 [model_providers.fixture]
 name = "Fixture"
-base_url = "${codex.baseUrl}"
+base_url = "${codexProxy.baseUrl}"
 env_key = "OPENAI_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
@@ -39,7 +48,7 @@ enabled = false
 await writeFile(join(claudeHome,'settings.json'),JSON.stringify({model:'claude-sonnet-4-6',permissions:{defaultMode:'default'}}));
 const env={PATH:process.env.PATH,HOME:root,DSH_HOME:dshHome,DSH_TELEMETRY_DISABLED:'1',CODEX_HOME:codexHome,
  CODEXHOST_CLAUDE_COMMAND:process.env.CLAUDE_COMMAND ?? '/opt/homebrew/bin/claude',CLAUDE_CONFIG_DIR:claudeHome,
- OPENAI_API_KEY:'fixture-only',ANTHROPIC_API_KEY:'fixture-only',ANTHROPIC_BASE_URL:claude.baseUrl,
+ OPENAI_API_KEY:'fixture-only',ANTHROPIC_API_KEY:'fixture-only',ANTHROPIC_BASE_URL:claudeProxy.baseUrl,
  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:'1',
  DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',NO_PROXY:'127.0.0.1,localhost'};
 const pkg=JSON.parse(await readFile('package.json','utf8'));
@@ -96,7 +105,29 @@ try{
  page.on('pageerror',error=>{logs+='\nBrowser: '+error.message;});
  await page.goto(url);await dismiss();
  const created=await rpc('workspace/create',{path:workspace});
- if(process.env.DSH_IMAGE_PROBE === '1'){
+ if(skillsProbe){
+  await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:'skills-probe'});
+  await page.reload();await dismiss();
+  const editor=page.locator('[contenteditable="true"][role="textbox"]');
+  const selector=page.getByLabel('Select Harness',{exact:true});
+  for(const [label,expected,absent] of [['Native DSH','dsh-menu-skill',['codex-menu-skill','claude-menu-skill']],['Codex','codex-menu-skill',['dsh-menu-skill','claude-menu-skill']],['Claude Code','claude-menu-skill',['dsh-menu-skill','codex-menu-skill']],['Native DSH','dsh-menu-skill',['codex-menu-skill','claude-menu-skill']]]){
+   await selector.click();await page.getByRole('menuitemradio',{name:label,exact:true}).click();
+   await expect(selector).toHaveText(label);
+   await expect(selector).toBeEnabled();
+   await expect(page.getByRole('button',{name:'会话操作',exact:true})).toHaveCount(0);
+   await expect(page.getByRole('button',{name:'恢复会话',exact:true})).toHaveCount(0);
+   const catalog=await rpc('skills/list',{sessionId:'skills-probe'});
+   assert.ok(catalog.skills.some(skill=>skill.name===expected),JSON.stringify(catalog));
+   await editor.fill('/');
+   await expect(page.getByRole('option',{name:new RegExp(expected)})).toBeVisible({timeout:30000});
+   for(const name of absent) await expect(page.getByRole('option',{name:new RegExp(name)})).toHaveCount(0);
+   await page.getByRole('option',{name:new RegExp(expected)}).click();
+   await expect(editor).toHaveText('/'+expected+' ');
+   await editor.fill('');
+   console.log('PASS: '+label+' slash menu shows and selects only its native skill catalog');
+  }
+  assert.equal(codex.requests.length,0);assert.equal(claude.requests.length,0);
+ }else if(process.env.DSH_IMAGE_PROBE === '1'){
   const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC','base64');
   for(const [harness,label,reply] of [['codex','Codex','Codex native first'],['claude-code','Claude Code','Claude native reply']]){
    if(harness==='codex'){
@@ -157,10 +188,9 @@ try{
  await send('Continue after restart','Codex native resumed');
  assert.ok(JSON.stringify(codex.requests[2].body.input).includes('Remember first marker'));
  console.log('PASS: DSH restart preserves the session list, transcript, and native Codex context');
- await page.getByRole('button',{name:'会话操作',exact:true}).click();
- await page.getByRole('button',{name:'回退最后一轮（保留文件）',exact:true}).click();
- await page.getByText('已回退最后一轮对话上下文，文件未改动。',{exact:true}).waitFor({timeout:30000});
- await page.getByRole('button',{name:'会话操作',exact:true}).click();
+ await expect(page.getByRole('button',{name:'会话操作',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'恢复会话',exact:true})).toHaveCount(0);
+ await rpc('harness/rollback',{sessionId:'codex-web-probe'});
  await send('After rollback marker','Codex after rollback');
  const afterRollback=JSON.stringify(codex.requests.at(-1).body.input);
  assert.ok(afterRollback.includes('Remember first marker'));
@@ -169,18 +199,20 @@ try{
  const uncertain=JSON.parse(await readFile(bindingPath,'utf8'));uncertain.pending='probe-uncertain';uncertain.pendingNative='not-in-native-history';
  await writeFile(bindingPath,JSON.stringify(uncertain));
  await page.reload();await dismiss();
- await page.getByRole('button',{name:'会话操作',exact:true}).click();
+ await page.getByRole('button',{name:'恢复会话',exact:true}).click();
  await page.getByRole('button',{name:'核对原生记录',exact:true}).click();
  await page.getByText('无法确认原请求的执行结果；没有重发任何请求。',{exact:true}).waitFor();
+ const recovered=page.waitForResponse(response=>response.url().includes('/api/harness/recover'));
  await page.getByRole('button',{name:'解除暂停，不重发',exact:true}).click();
- await page.getByRole('button',{name:'回退最后一轮（保留文件）',exact:true}).waitFor();
+ const recoveryResult=await (await recovered).json();
+ assert.equal(recoveryResult.result?.value?.recoveryRequired,false,JSON.stringify(recoveryResult));
+ await expect(page.getByRole('button',{name:'恢复会话',exact:true})).toHaveCount(0);
  assert.equal((await rpc('harness/state',{sessionId:'codex-web-probe'})).recoveryRequired,false);
  assert.equal(codex.requests.length,4);
- await page.getByRole('button',{name:'会话操作',exact:true}).click();
  console.log('PASS: recovery UI keeps unknown results paused until explicit unlock, without model resubmission');
  const fork=await rpc('session/fork',{sessionId:'codex-web-probe'});
  assert.equal((await rpc('harness/state',{sessionId:fork.sessionId})).harness,'codex');
- console.log('PASS: rollback UI removes the last native turn from future context; session fork retains Harness binding');
+ console.log('PASS: rollback API removes the last native turn from future context; session fork retains Harness binding');
  await page.getByRole('button').filter({hasText:'New Session'}).first().click();
  await dismiss();
  await selector.waitFor();await choose('Claude Code');
@@ -202,6 +234,6 @@ try{
  if(page){console.error((await page.locator('body').innerText()).slice(-7000));await page.screenshot({path:resolve('.cache/web-failure.png')});}
  console.error(logs.replace(/token=[\w-]+/g,'token=[redacted]'));throw error;
 } finally {
- await browser?.close();await stop();await Promise.all([codex.close(),claude.close()]);
+ await browser?.close();await stop();await Promise.all([codexProxy.close(),claudeProxy.close(),codex.close(),claude.close()]);
  if(process.env.KEEP_DSH_PROBE)console.log('Retained test directory:',root);else await rm(root,{recursive:true,force:true});
 }

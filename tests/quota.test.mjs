@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parseZaiQuota, parseDeepSeekBalance, fetchNativeQuota } from '../dist/native-quota.js';
-import { accountSnapshot } from '../dist/codex-adapter.js';
+import { codexAccountSnapshot as accountSnapshot } from '../dist/acp-profiles.js';
 import { accountQuota } from '../dist/dsh.js';
 
 test('智谱 Coding Plan limits[] 映射为 5 小时与周窗口，忽略 MCP TIME_LIMIT', () => {

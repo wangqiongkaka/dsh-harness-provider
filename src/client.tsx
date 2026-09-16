@@ -18,7 +18,6 @@ type Quota = z.infer<typeof quotaSchema>;
 type SecretStatus = z.infer<typeof secretStatusSchema>;
 type Api = {
   recover(request: {sessionId: string; action: 'check' | 'unlock'}): Promise<RemoteResult<State & {detail: string}>>;
-  rollback(request: {sessionId: string}): Promise<RemoteResult<State>>;
   secretStatus(request: {sessionId: string}): Promise<RemoteResult<SecretStatus>>;
   answerSecret(request: {sessionId: string; id: string; answers: Record<string,string[]>; cancelled?: boolean}): Promise<RemoteResult<{accepted: boolean}>>;
   state(request: {sessionId: string}): Promise<RemoteResult<State>>;
@@ -36,9 +35,10 @@ const zh = {
   recovery: '上次请求结果未确认，已暂停发送以避免重复执行。', loading: '加载中',
   menuModel: '模型', menuEffort: '强度', effortDefault: '默认', emptyModels: '没有可用模型', emptyEfforts: '当前模型不支持调整强度',
   'effort.off': '关闭', 'effort.auto': '自动', 'effort.minimal': '极低', 'effort.low': '低', 'effort.medium': '中',
-  'effort.high': '高', 'effort.xhigh': '极高', 'effort.max': '最大', 'effort.ultra': '极限',
+  'effort.high': '高', 'effort.xhigh': '极高', 'effort.max': '最大', 'effort.ultra': '极限', 'effort.default': '默认',
   permissionAria: '权限模式', 'mode.plan': '计划模式', 'mode.default': '默认', 'mode.acceptEdits': '接受编辑', 'mode.auto': '自动',
   'mode.bypassPermissions': '完全权限', 'mode.dangerFullAccess': '完全权限', 'mode.workspaceWrite': '工作区可写', 'mode.readOnly': '只读',
+  'mode.agent-full-access': '完全权限', 'mode.agent': '自动审批', 'mode.read-only': '逐项审批',
   contextAria: '上下文', contextUsed: '上下文已用', contextWindow: '模型窗口', sessionTotal: '本会话累计',
   quotaAria: '额度', quotaUsed: '已用', quotaLeft: '剩余', quotaReset: '{time} 重置', balance: '余额', balanceTotal: '账户余额',
   balanceTopped: '充值余额', balanceGranted: '赠送余额', quotaSource: '额度由 {source} 提供 · 每 60 秒同步',
@@ -52,9 +52,10 @@ const en: Record<keyof typeof zh,string> = {
   recovery:'The previous request was not confirmed. Sending is paused to avoid duplicate execution.', loading:'Loading',
   menuModel:'Model', menuEffort:'Effort', effortDefault:'Default', emptyModels:'No models available', emptyEfforts:'This model has no effort levels',
   'effort.off':'Off', 'effort.auto':'Auto', 'effort.minimal':'Minimal', 'effort.low':'Low', 'effort.medium':'Medium',
-  'effort.high':'High', 'effort.xhigh':'Extra High', 'effort.max':'Max', 'effort.ultra':'Ultra',
+  'effort.high':'High', 'effort.xhigh':'Extra High', 'effort.max':'Max', 'effort.ultra':'Ultra', 'effort.default':'Default',
   permissionAria:'Permission mode', 'mode.plan':'Plan mode', 'mode.default':'Default', 'mode.acceptEdits':'Accept edits', 'mode.auto':'Auto mode',
   'mode.bypassPermissions':'Full access', 'mode.dangerFullAccess':'Full access', 'mode.workspaceWrite':'Workspace write', 'mode.readOnly':'Read-only',
+  'mode.agent-full-access':'Full access', 'mode.agent':'Approve for me', 'mode.read-only':'Ask for approval',
   contextAria:'Context', contextUsed:'Context used', contextWindow:'Model window', sessionTotal:'Session total',
   quotaAria:'Quota', quotaUsed:'Used', quotaLeft:'Left', quotaReset:'Resets {time}', balance:'Balance', balanceTotal:'Account balance',
   balanceTopped:'Topped up', balanceGranted:'Granted', quotaSource:'Quota from {source} · refreshed every 60s',
@@ -77,7 +78,6 @@ async function value<T>(promise: Promise<RemoteResult<T>>): Promise<T> {
 }
 interface Injected {
   recover(id: string, action: 'check' | 'unlock'): Promise<State & {detail: string}>;
-  rollback(id: string): Promise<State>;
   secretStatus(id: string): Promise<SecretStatus>;
   answerSecret(id: string, question: string, answers: Record<string,string[]>, cancelled?: boolean): Promise<{accepted: boolean}>;
   read(id: string): Promise<State>;
@@ -131,7 +131,7 @@ const Shield = ({ kind }: { kind: 'full' | 'check' | 'write' }) => <svg width="1
     <path d="M8.14852 14.1308L7.33925 15.4976C7.22458 15.6912 7.42245 15.9194 7.63037 15.8333L9.09785 15.2254L15.0399 10.0719L14.0905 8.97733L8.14852 14.1308Z" fill="currentColor"/>
   </>}
 </svg>;
-const shieldKind = (id: string, dangerous: boolean) => dangerous || id === 'dangerFullAccess' ? 'full' : id === 'plan' || id === 'readOnly' ? 'check' : 'write';
+const shieldKind = (id: string, dangerous: boolean) => dangerous || id === 'dangerFullAccess' || id === 'agent-full-access' ? 'full' : id === 'plan' || id === 'readOnly' || id === 'read-only' ? 'check' : 'write';
 const compact = (tokens: number) => tokens < 1000 ? String(tokens) : tokens < 1_000_000 ? `${Math.round(tokens / 100) / 10}K` : `${Math.round(tokens / 100_000) / 10}M`;
 const clock = (iso: string | null) => {
   if (!iso) return null;
@@ -180,7 +180,7 @@ function usePolled<V>(load: () => Promise<V>, everyMs: number, deps: unknown[]):
 const RADIUS = 5.5, CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
 // ---- quota chip: one 28px chip after the Harness chip, showing the tightest window (or the balance) ----
-/** Usage tier for color reminders: amber from 70%, red from 90%. */
+/** Classify consumed capacity: quota remaining <=30% / <=10%, context used >=70% / >=90%. */
 const tier = (percent: number) => percent >= 90 ? ' hp-danger' : percent >= 70 ? ' hp-warn' : '';
 function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
   const [open, setOpen] = useState(false);
@@ -207,9 +207,9 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
     trigger = <>
       {windowIcon(shown[0]!.id)}
       {shown.map((window, index) => <span key={window.id} className={index ? 'hp-chip-effort' : undefined}>{index ? '· ' : ''}{windowLabel(t, window.id, window.label)} {left(window.usedPercent)}%</span>)}
-      <svg className="hp-quota-ring" width="14" height="14" viewBox="0 0 14 14" aria-hidden>
+      <svg className={`hp-quota-ring${level}`} width="14" height="14" viewBox="0 0 14 14" aria-hidden>
         <circle className="hp-track" cx="7" cy="7" r={RADIUS} />
-        <circle className={`hp-fill${level}`} cx="7" cy="7" r={RADIUS} strokeDasharray={CIRCUMFERENCE}
+        <circle className="hp-fill" cx="7" cy="7" r={RADIUS} strokeDasharray={CIRCUMFERENCE}
           strokeDashoffset={CIRCUMFERENCE * tight.usedPercent / 100} transform="rotate(-90 7 7)" />
       </svg>
     </>;
@@ -242,7 +242,7 @@ function ContextRing({ usage, t }: { usage: Usage | undefined; t: T }) {
   useDismiss(open, close, root);
   if (!usage || usage.contextUsedTokens === null || !usage.contextWindowTokens) return null;
   const ratio = Math.min(1, usage.contextUsedTokens / usage.contextWindowTokens);
-  const percent = Math.round(ratio * 100), level = tier(percent);
+  const percent = Math.round(ratio * 100), level = tier(ratio * 100);
   return <span ref={root} className="hp-anchor">
     <button type="button" className={`hp-ring${level}`} aria-label={`${t('contextUsed')} ${percent}%`} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(v => !v)}>
       <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden>
@@ -262,29 +262,27 @@ function ContextRing({ usage, t }: { usage: Usage | undefined; t: T }) {
   </span>;
 }
 
-function SessionActions({ sessionId, recover, rollback, running, recoveryRequired, onChange }: {
-  sessionId: string; recover: Injected['recover']; rollback: Injected['rollback']; running: boolean; recoveryRequired: boolean; onChange: (state: State) => void;
+function SessionRecovery({ sessionId, recover, running, onChange }: {
+  sessionId: string; recover: Injected['recover']; running: boolean; onChange: (state: State) => void;
 }) {
   const [open, setOpen] = useState(false), [busy, setBusy] = useState(false), [detail, setDetail] = useState('');
   const root = useRef<HTMLSpanElement>(null);
   const close = useCallback(() => setOpen(false), []);
   useDismiss(open, close, root);
-  async function act(operation: 'rollback' | 'check' | 'unlock') {
+  async function act(operation: 'check' | 'unlock') {
     setBusy(true); setDetail('');
     try {
-      const state = operation === 'rollback' ? await rollback(sessionId) : await recover(sessionId, operation);
-      onChange(state); setDetail('detail' in state ? String(state.detail) : '已回退最后一轮对话上下文，文件未改动。');
+      const state = await recover(sessionId, operation);
+      onChange(state); setDetail(state.detail);
     } catch (error) { setDetail(error instanceof Error ? error.message : '操作失败'); }
     finally { setBusy(false); }
   }
   return <span className="hp-anchor" ref={root}>
-    <button type="button" className="hp-chip" aria-expanded={open} aria-label="会话操作" onClick={() => setOpen(!open)}>···</button>
-    {open && <div className="hp-panel hp-panel-left" role="dialog" aria-label="会话操作">
-      {recoveryRequired ? <>
-        <p>上次请求结果未确认。先核对原生记录；手动解除暂停会保留原生上下文，不重发原请求。</p>
-        <button disabled={busy || running} onClick={() => void act('check')}>核对原生记录</button>
-        <button disabled={busy || running} onClick={() => void act('unlock')}>解除暂停，不重发</button>
-      </> : <button disabled={busy || running} onClick={() => void act('rollback')}>回退对话上下文</button>}
+    <button type="button" className="hp-chip" aria-expanded={open} aria-label="恢复会话" onClick={() => setOpen(!open)}>恢复会话</button>
+    {open && <div className="hp-panel hp-panel-left" role="dialog" aria-label="恢复会话">
+      <p>上次请求结果未确认。先核对原生记录；手动解除暂停会保留原生上下文，不重发原请求。</p>
+      <button disabled={busy || running} onClick={() => void act('check')}>核对原生记录</button>
+      <button disabled={busy || running} onClick={() => void act('unlock')}>解除暂停，不重发</button>
       {detail && <p role="status" style={{whiteSpace:'pre-wrap',maxHeight:240,overflow:'auto'}}>{detail}</p>}
     </div>}
   </span>;
@@ -333,7 +331,7 @@ export function SecretPanel({ sessionId, read, answer }: { sessionId: string; re
 
 // ---- left slot: Harness chip + quota chip ----
 const names: Record<State['harness'], string> = { dsh: '', codex: 'Codex', 'claude-code': 'Claude Code' };
-export function HarnessSelect({ sessionId, useSessions, read, select, quota, changed, secretStatus, answerSecret, recover, rollback, t }: LeftProps) {
+export function HarnessSelect({ sessionId, useSessions, read, select, quota, changed, secretStatus, answerSecret, recover, t }: LeftProps) {
   const [state,setState] = useState<State>();
   const [error,setError] = useState<string>();
   const [busy,setBusy] = useState(false);
@@ -373,7 +371,7 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, cha
       </div>}
     </div>
     <QuotaChip quota={quotaView} t={t} />
-    {current !== 'dsh' && <SessionActions key={sessionId} sessionId={sessionId} recover={recover} rollback={rollback} running={!!summary?.running} recoveryRequired={!!state?.recoveryRequired} onChange={setState} />}
+    {current !== 'dsh' && state?.recoveryRequired && <SessionRecovery key={`recovery:${sessionId}`} sessionId={sessionId} recover={recover} running={!!summary?.running} onChange={setState} />}
     <SecretPanel key={sessionId} sessionId={sessionId} read={secretStatus} answer={answerSecret} />
     {error && <span role="alert" className="hp-alert">{error}</span>}
     {state?.recoveryRequired && !summary?.running && <span role="status" className="hp-alert">{t('recovery')}</span>}
@@ -563,8 +561,11 @@ const styles = `
 .hp-retry{flex:0 0 auto;padding:0;border:none;background:transparent;color:inherit;font:inherit;font-weight:600;cursor:pointer}
 .hp-ring{display:grid;place-items:center;flex:none;width:28px;height:28px;border:none;border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}
 .hp-ring:hover,.hp-ring[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover)}
-.hp-track{fill:none;stroke:var(--dsw-alias-border-l3);stroke-width:2}
-.hp-fill{fill:none;stroke:var(--dsw-alias-label-tertiary);stroke-width:2;stroke-linecap:round}.hp-fill.hp-warn,.hp-ring.hp-warn .hp-fill{stroke:var(--dsw-alias-state-warn-primary)}.hp-fill.hp-danger,.hp-ring.hp-danger .hp-fill{stroke:var(--dsw-alias-state-error-primary)}
+.hp-quota-ring,.hp-ring{--hp-usage-color:var(--dsw-alias-state-success-primary)}
+.hp-quota-ring.hp-warn,.hp-ring.hp-warn{--hp-usage-color:var(--dsw-alias-state-warn-primary)}
+.hp-quota-ring.hp-danger,.hp-ring.hp-danger{--hp-usage-color:var(--dsw-alias-state-error-primary)}
+.hp-track{fill:none;stroke:var(--hp-usage-color);stroke-opacity:.2;stroke-width:2}
+.hp-fill{fill:none;stroke:var(--hp-usage-color);stroke-width:2;stroke-linecap:round}
 .hp-panel{position:absolute;bottom:calc(100% + 8px);z-index:100;box-sizing:border-box;width:264px;padding:12px;border:0;border-radius:12px;background:var(--dsw-specific-menu);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);font-size:12px;line-height:20px;font-weight:400;color:var(--dsw-alias-label-secondary);text-align:left;white-space:normal;cursor:default}
 .hp-panel-head{display:flex;align-items:center;gap:6px}
 .hp-panel-icon{display:inline-flex;color:var(--dsw-alias-label-tertiary)}
@@ -599,7 +600,6 @@ export async function apply(ctx: Context): Promise<void> {
     const listeners = new Set<() => void>();
     const api: Injected = {
       recover:(sessionId,action)=>value(scope.remote.harness.recover({sessionId,action})),
-      rollback:sessionId=>value(scope.remote.harness.rollback({sessionId})),
       secretStatus:id=>value(scope.remote.harness.secretStatus({sessionId:id})),
       answerSecret:(sessionId,id,answers,cancelled)=>value(scope.remote.harness.answerSecret({sessionId,id,answers,cancelled})),
       read:id=>value(scope.remote.harness.state({sessionId:id})),

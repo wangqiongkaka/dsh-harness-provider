@@ -167,6 +167,8 @@ export interface HarnessSession {
   fork?(throughTurn?: string | null): Promise<HarnessResult<NativeSessionRef | undefined>>;
   steer?(input: HostInput[]): Promise<HarnessResult<{ accepted: true }>>;
   refreshUsage?(): Promise<void>;
+  /** The agent's current slash-menu entries when it publishes them per session. */
+  listSkills?(): Promise<HarnessSkill[]>;
   readSnapshot?(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>>;
   execute(command: TurnStartCommand): Promise<HarnessResult<TurnStartAccepted>>;
   execute(command: TurnCancelCommand): Promise<HarnessResult<TurnCancelAccepted>>;
@@ -176,9 +178,11 @@ export interface HarnessSession {
   execute(command: PermissionModeSelectCommand): Promise<HarnessResult<PermissionModeSelectCompleted>>;
   close(): Promise<void>;
 }
+export interface HarnessSkill { name: string; description: string; path?: string; modelInvocable: boolean }
 export interface HarnessAdapter {
   readonly harnessId: HarnessId;
   inspect(input?: { cwd?: string; refresh?: boolean }): Promise<HarnessInspection>;
+  listSkills(input: { cwd: string }): Promise<HarnessSkill[]>;
   /** Fresh, bounded quota read for the current native authentication; null when unavailable. */
   inspectAccount?(): Promise<HarnessAccountSnapshot | null>;
   open(input: OpenSessionInput): Promise<HarnessResult<HarnessSession>>;

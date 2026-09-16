@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DelegationBridge, delegationInstructions } from '../dist/delegation.js';
-import { CodexAdapter } from '../dist/codex-adapter.js';
-import { ClaudeCodeAdapter } from '../dist/claude-adapter.js';
+import { AcpAdapter } from '../dist/acp-adapter.js';
+import { claudeProfile, codexProfile } from '../dist/acp-profiles.js';
 const reference=resolve(process.env.DSH_REFERENCE_ROOT ?? '../../deepseek-harness');
 const {startResponsesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-codex/tests/responses-fixture.ts')));
 const {startMessagesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-claude-code/tests/messages-fixture.ts')));
@@ -42,11 +42,11 @@ const environment={PATH:process.env.PATH,HOME:root,CODEX_HOME:codexHome,CLAUDE_C
  CODEXHOST_CLAUDE_COMMAND:process.env.CLAUDE_COMMAND ?? '/opt/homebrew/bin/claude',
  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:'1',
  DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',NO_PROXY:'127.0.0.1,localhost'};
-const adapters=[new CodexAdapter({command:process.env.CODEX_COMMAND ?? '/opt/homebrew/bin/codex',environment,requestTimeoutMs:15000,shutdownTimeoutMs:1000,maxFrameBytes:16*1024*1024}),
- new ClaudeCodeAdapter({environment})];
+const adapters=[new AcpAdapter({profile:codexProfile({command:process.env.CODEX_COMMAND ?? '/opt/homebrew/bin/codex',environment}),environment}),
+ new AcpAdapter({profile:claudeProfile({environment}),environment})];
 try {
  for (const [index,harness] of ['codex','claude-code'].entries()) {
-  const result=await adapters[index].open({kind:'create',cwd:root,permissionModeId:index?'bypassPermissions':'dangerFullAccess',environment:{...environment,...await bridge.environment(harness)}});
+  const result=await adapters[index].open({kind:'create',cwd:root,permissionModeId:index?'bypassPermissions':'agent-full-access',environment:{...environment,...await bridge.environment(harness)}});
   assert.equal(result.ok,true,JSON.stringify(result));const session=result.value;
   const start=await session.execute({type:'turn.start',turnId:'probe',input:[{type:'text',text:delegationInstructions()},{type:'text',text:'Use Codex to review this workspace'}]});
   assert.equal(start.ok,true,JSON.stringify(start));

@@ -39,7 +39,7 @@ test('session CLI creates a visible independent harness session, reads its resul
  }
  const adapter = harness => ({
   async inspect() { return unavailable ? {status:'unavailable',error:{message:'fixture unavailable'}} : {status:'ready',catalog:{models:[],thinkingOptions:[]},
-   permissionModes:{modes:[{id:'readOnly',label:'Read only'},{id:'default',label:'Default'}],defaultModeId:'readOnly'}}; },
+   permissionModes:{modes:[{id:'read-only',label:'Read only'},{id:'default',label:'Default'}],defaultModeId:'read-only'}}; },
   async open(input) {
    opens.push({harness,input});
    if (harness === 'codex') assert.equal(input.environment,undefined);
@@ -78,7 +78,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   assert.equal(first.sessionId,retry.sessionId);assert.equal(created.length,1);
   const child=ctx.agents.get(first.sessionId);await child.whenIdle();
   assert.equal(opens.length,1);assert.equal(opens[0].harness,'codex');assert.equal(opens[0].input.kind,'create');
-  assert.equal(opens[0].input.cwd,root);assert.equal(opens[0].input.permissionModeId,'readOnly');
+  assert.equal(opens[0].input.cwd,root);assert.equal(opens[0].input.permissionModeId,'read-only');
   assert.equal(opens[0].input.nativeRef,undefined);
   assert.ok(workspace.sessionIds.includes(first.sessionId));
   assert.deepEqual(await h.bindings.readDefaults(),{harness:'claude-code'});

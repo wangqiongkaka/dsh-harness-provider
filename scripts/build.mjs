@@ -21,7 +21,7 @@ const quietBypassNotice = {
   },
 };
 await build({
-  entryPoints: ['src/claude-history-cli.ts', 'src/media.ts', 'src/secret-questions.ts', 'src/dsh-output.ts', 'src/contracts.ts', 'src/codex-rpc.ts', 'src/codex-adapter.ts', 'src/claude-adapter.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts'],
+  entryPoints: ['src/media.ts', 'src/secret-questions.ts', 'src/dsh-output.ts', 'src/contracts.ts', 'src/codex-rpc.ts', 'src/acp-adapter.ts', 'src/acp-profiles.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts'],
   external: ['@deepseek-ai/*'],
   outdir: 'dist',
   bundle: true,
@@ -32,6 +32,15 @@ await build({
   logLevel: 'warning',
   plugins: [quietBypassNotice],
 });
+
+// The two ACP agent programs ship inside the plugin and run on the user's Codex / Claude Code executables
+// (CODEX_PATH, CLAUDE_CODE_EXECUTABLE); the Codex npm binary package is therefore left out of the bundle.
+for (const [entry, outfile, external] of [
+  ['node_modules/@agentclientprotocol/codex-acp/dist/index.js', 'dist/codex-acp.mjs', ['@openai/codex']],
+  ['node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js', 'dist/claude-agent-acp.mjs', []],
+]) {
+  await build({ entryPoints: [entry], outfile, bundle: true, platform: 'node', format: 'esm', target: 'node22', external, logLevel: 'warning', plugins: [quietBypassNotice] });
+}
 
 await build({
   entryPoints: ['src/client.tsx'], outfile: 'dist/client.js', bundle: true,
@@ -46,5 +55,7 @@ for (const [source, target] of [
   ['node_modules/zod/LICENSE', 'zod.txt'],
   ['node_modules/@anthropic-ai/claude-agent-sdk/LICENSE.md', 'claude-agent-sdk.md'],
   ['node_modules/@anthropic-ai/claude-agent-sdk/README.md', 'claude-agent-sdk-README.md'],
+  ['node_modules/@agentclientprotocol/codex-acp/LICENSE', 'codex-acp.txt'],
+  ['node_modules/@agentclientprotocol/claude-agent-acp/LICENSE', 'claude-agent-acp.txt'],
   ['licenses/codexhost.txt', 'codexhost.txt'],
 ]) await copyFile(source, resolve('dist/licenses', target));
