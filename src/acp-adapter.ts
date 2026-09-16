@@ -39,6 +39,8 @@ export interface AcpProfile {
   skillInvocation?(command: acp.AvailableCommand): string;
   /** A local command that names a new session; it pre-empts the agent's own model-driven title generation. */
   titleCommand?(title: string): string;
+  /** Turn end states the agent program records natively, keyed by the user message id its history replays; ACP carries none. */
+  turnOutcomes?(nativeSessionId: string): Promise<Map<string, HostTurnSnapshot['outcome']>>;
   /** Native quota probe; ACP carries no account windows. */
   inspectAccount?(): Promise<HarnessAccountSnapshot | null>;
 }
@@ -252,7 +254,13 @@ async function waitFor<T>(work: () => T | undefined, timeoutMs: number): Promise
 
 // ── Transcript: replayed history plus live turns, the source of snapshots and fork points ───────────────────────────
 
-interface TranscriptTurn { hash: string; input: string; items: HostItemSnapshot[]; lastAgentMessageId?: string; hasOutput: boolean; userMessageId?: string }
+interface TranscriptTurn {
+  hash: string; input: string; items: HostItemSnapshot[]; lastAgentMessageId?: string; hasOutput: boolean; userMessageId?: string;
+  /** Replayed tool calls by id (their merged updates), and the ones history never shows finished. */
+  tools?: Map<string, { call: acp.ToolCallUpdate; snapshot: HostItemSnapshot }>; openTools?: Set<string>;
+  /** A failure the agent restored into history (Claude Code's usage-limit notice). */
+  failure?: string;
+}
 class Transcript {
   readonly turns: TranscriptTurn[] = [];
   private agentMessageId?: string;
@@ -284,18 +292,55 @@ class Transcript {
       this.agentMessageId = update.messageId ?? undefined;
       last.hasOutput = true;
       if (update.messageId) last.lastAgentMessageId = update.messageId;
-    } else if (update.sessionUpdate === 'tool_call') {
-      last.items.push({ item: toolItem(update), outcome: { status: 'succeeded' } });
+    } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+      const tools = last.tools ??= new Map(), open = last.openTools ??= new Set();
+      const entry = tools.get(update.toolCallId);
+      const call = { ...entry?.call, ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined && value !== null)) } as acp.ToolCallUpdate;
+      if (call.name === 'AskUserQuestion') return;
+      let item = toolItem(call);
+      const output = replayedOutput(call);
+      if (output) {
+        const truncated = output.length > TOOL_OUTPUT_LIMIT, text = truncated ? output.slice(0, TOOL_OUTPUT_LIMIT) : output;
+        item = item.type === 'commandExecution' ? { ...item, output: text, outputTruncated: truncated } : { ...item, output: { content: [{ type: 'text', text }], ...(truncated ? { truncated } : {}) } };
+      }
+      const outcome: HostItemOutcome = call.status === 'completed' ? { status: 'succeeded' } : call.status === 'failed' ? { status: 'failed', error: error('nativeFailure', 'Tool failed') }
+        : { status: 'cancelled', reason: '原生记录未显示该工具完成' };
+      if (call.status === 'completed' || call.status === 'failed') open.delete(update.toolCallId); else open.add(update.toolCallId);
+      if (entry) { entry.call = call; entry.snapshot.item = item; entry.snapshot.outcome = outcome; }
+      else { const snapshot = { item, outcome }; tools.set(update.toolCallId, { call, snapshot }); last.items.push(snapshot); }
       last.hasOutput = true;
+    } else if (update.sessionUpdate === 'session_info_update') {
+      const failure = sessionFailure(update._meta);
+      if (failure?.severity === 'error') last.failure = failure.title;
     }
   }
-  snapshot(harnessId: HarnessId, nativeSessionId: string): HostTurnSnapshot[] {
+  /** `native` holds turn outcomes the agent program recorded itself, by user message id; they beat inference from replayed content. */
+  snapshot(harnessId: HarnessId, nativeSessionId: string, native?: Map<string, HostTurnSnapshot['outcome']>): HostTurnSnapshot[] {
     return this.turns.map(turn => ({
       nativeTurnRef: { harnessId, nativeSessionId, nativeTurnKey: this.key(turn), formatVersion: 1 },
       input: [{ type: 'text', text: turn.input }], items: turn.items,
-      outcome: turn.hasOutput ? { status: 'succeeded' } : { status: 'unknown', reason: '原生记录没有该轮的回复' },
+      outcome: (turn.userMessageId ? native?.get(turn.userMessageId) : undefined) ?? inferredOutcome(turn),
     }));
   }
+}
+/**
+ * ACP history carries no turn end state, so it is inferred conservatively: only a turn that ends on the agent's own
+ * message after every tool finished counts as done. Anything else stays unknown for the user to judge.
+ */
+function inferredOutcome(turn: TranscriptTurn): HostTurnSnapshot['outcome'] {
+  if (turn.failure) return { status: 'failed', error: error('nativeFailure', turn.failure) };
+  if (!turn.hasOutput) return { status: 'unknown', reason: '原生记录没有该轮的回复' };
+  if (turn.openTools?.size) return { status: 'unknown', reason: '原生记录中该轮有未完成的工具调用' };
+  if (turn.items.at(-1)?.item.type !== 'agentMessage') return { status: 'unknown', reason: '原生记录中该轮停在工具调用，没有收尾回复' };
+  return { status: 'succeeded' };
+}
+/** Tool output as history replays it: Codex's formatted or aggregated text, Claude Code's result blocks, or text content. */
+function replayedOutput(call: acp.ToolCallUpdate): string {
+  const raw = call.rawOutput, fields = record(raw);
+  const direct = typeof raw === 'string' ? raw : [fields.formatted_output, fields.aggregatedOutput, fields.output].find(value => typeof value === 'string');
+  if (typeof direct === 'string') return direct;
+  if (Array.isArray(raw)) return raw.flatMap(part => record(part).type === 'text' && typeof record(part).text === 'string' ? [record(part).text as string] : []).join('\n');
+  return (call.content ?? []).flatMap(part => part.type === 'content' && part.content.type === 'text' ? [part.content.text] : []).join('');
 }
 const commandOf = (raw: unknown): string | undefined => {
   const value = record(raw).command;
@@ -463,7 +508,9 @@ class AcpSession implements HarnessSession {
 
   async readSnapshot(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>> {
     if (this.#fault) return { ok: false, error: this.#fault };
-    return { ok: true, value: { turns: this.#transcript.snapshot(this.harnessId, this.#sessionId), state: this.#state } };
+    // A native record that cannot be read leaves the inferred outcomes; it never makes a turn look settled.
+    const native = await this.#profile.turnOutcomes?.(this.#sessionId).catch(() => undefined);
+    return { ok: true, value: { turns: this.#transcript.snapshot(this.harnessId, this.#sessionId, native), state: this.#state } };
   }
 
   /**

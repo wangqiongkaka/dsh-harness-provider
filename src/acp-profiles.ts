@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
 import pkg from '../package.json' with { type: 'json' };
-import type { HarnessAccountSnapshot } from './contracts.js';
+import type { HarnessAccountSnapshot, HostTurnSnapshot } from './contracts.js';
 import { feedbackInstructions } from './feedback.js';
 import { CodexRpc } from './codex-rpc.js';
 import { ClaudeInspector, ClaudeNotInstalledError, resolveClaudeExecutable, withNodeOnPath, withUserShellEnvironment } from './claude-sdk.js';
@@ -40,14 +40,47 @@ export function codexAccountSnapshot(raw: unknown): HarnessAccountSnapshot | nul
     },
   };
 }
-/** Rolling ChatGPT rate-limit windows of the signed-in Codex account, read through a short-lived app-server. */
-async function codexAccount(command: string, environment: NodeJS.ProcessEnv): Promise<HarnessAccountSnapshot | null> {
+/** One request sequence against a short-lived, initialized Codex app-server. */
+async function withCodexServer<T>(command: string, environment: NodeJS.ProcessEnv, work: (rpc: CodexRpc) => Promise<T>): Promise<T> {
   const rpc = new CodexRpc({ command, cwd: process.cwd(), environment, requestTimeoutMs: 30_000, shutdownTimeoutMs: 2_000, maxFrameBytes: 16 * 1024 * 1024, onMessage: () => {}, onFault: () => {} });
   try {
     await rpc.request('initialize', { clientInfo: { name: pkg.name, version: pkg.version, title: 'DSH Harness Plugin' }, capabilities: {} });
     rpc.send({ method: 'initialized', params: {} });
-    return codexAccountSnapshot(await rpc.request('account/rateLimits/read', {}));
+    return await work(rpc);
   } finally { await rpc.close(); }
+}
+/** Rolling ChatGPT rate-limit windows of the signed-in Codex account. */
+const codexAccount = (command: string, environment: NodeJS.ProcessEnv): Promise<HarnessAccountSnapshot | null> =>
+  withCodexServer(command, environment, async rpc => codexAccountSnapshot(await rpc.request('account/rateLimits/read', {})));
+
+// Official app-server protocol (`codex app-server generate-ts`): v2/ThreadTurnsListResponse, Turn, TurnStatus, TurnError.
+const turnPage = z.object({
+  data: z.array(z.object({
+    status: z.enum(['completed', 'interrupted', 'failed', 'inProgress']), error: z.object({ message: z.string() }).passthrough().nullable().optional(),
+    items: z.array(z.object({ type: z.string(), id: z.string().optional() }).passthrough()),
+  }).passthrough()),
+  nextCursor: z.string().nullable(),
+}).passthrough();
+/** Codex's own record of how each turn ended, keyed by the user message id that session/load replays. */
+export async function codexTurnOutcomes(command: string, environment: NodeJS.ProcessEnv, threadId: string): Promise<Map<string, HostTurnSnapshot['outcome']>> {
+  return withCodexServer(command, environment, async rpc => {
+    const outcomes = new Map<string, HostTurnSnapshot['outcome']>();
+    const seen = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const page = turnPage.parse(await rpc.request('thread/turns/list', { threadId, cursor, limit: 100, itemsView: 'summary' }));
+      for (const turn of page.data) {
+        const outcome: HostTurnSnapshot['outcome'] = turn.status === 'completed' ? { status: 'succeeded' }
+          : turn.status === 'interrupted' ? { status: 'cancelled', reason: 'Codex 原生记录：该轮已中断' }
+          : turn.status === 'failed' ? { status: 'failed', error: { code: 'nativeFailure', message: turn.error?.message ?? 'Codex 原生记录：该轮失败', retryable: true } }
+          : { status: 'unknown', reason: 'Codex 原生记录显示该轮仍在执行' };
+        for (const item of turn.items) if (item.type === 'userMessage' && item.id) outcomes.set(item.id, outcome);
+      }
+      cursor = page.nextCursor;
+      if (cursor !== null) { if (seen.has(cursor)) throw new Error('Codex returned a repeated turn cursor'); seen.add(cursor); }
+    } while (cursor !== null);
+    return outcomes;
+  });
 }
 
 /**
@@ -66,6 +99,7 @@ export function codexProfile(options: { command: string; environment: NodeJS.Pro
     skillInvocation: (command: AvailableCommand) => command.name.startsWith('$') ? command.name : `/${command.name}`,
     titleCommand: title => `/rename ${title}`,
     inspectAccount: () => codexAccount(options.command, options.environment),
+    turnOutcomes: threadId => codexTurnOutcomes(options.command, options.environment, threadId),
   };
 }
 

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AcpAdapter, modelRef } from '../dist/acp-adapter.js';
+import { codexTurnOutcomes } from '../dist/acp-profiles.js';
 
 // A stateful ACP agent written with the official SDK: its history survives across processes through a JSON file so
 // session/load can replay it, and every host answer it receives is checked before the turn ends.
@@ -36,6 +37,7 @@ const app = agent({ name: 'peer' })
     if (params.sessionId !== sessionId) process.exit(22);
     for (const entry of load()) {
       await update({ sessionUpdate: 'user_message_chunk', messageId: entry.userId, content: { type: 'text', text: entry.input } });
+      for (const replayed of entry.updates ?? []) await update(replayed);
       if (entry.reply) await update({ sessionUpdate: 'agent_message_chunk', messageId: entry.replyId, content: { type: 'text', text: entry.reply } });
     }
     setTimeout(commands, 10);
@@ -312,4 +314,73 @@ test('an agent that exits mid-turn faults the session without leaking the turn',
     assert.equal((await session.execute({ type: 'turn.start', turnId: 'host-y', input: [{ type: 'text', text: 'again' }] })).ok, false);
     await session.close();
   } finally { await adapter.close(); await f.close(); }
+});
+
+test('replayed history keeps tool states and output, and only a turn that ends on the agent\'s message after its tools counts as done', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  const bash = (id, status, extra = {}) => ({ sessionUpdate: 'tool_call', toolCallId: id, title: 'npm test', name: 'Bash', kind: 'execute', status, rawInput: { command: 'npm test', description: 'Run tests' }, ...extra });
+  await writeFile(join(f.root, 'history.json'), JSON.stringify([
+    { input: 'done', userId: 'h1', replyId: 'r1', reply: 'all green', updates: [bash('t1', 'pending'), { sessionUpdate: 'tool_call_update', toolCallId: 't1', status: 'completed', rawOutput: [{ type: 'text', text: 'ok 12' }] }] },
+    { input: 'half', userId: 'h2', updates: [{ sessionUpdate: 'agent_message_chunk', messageId: 'r2', content: { type: 'text', text: 'running tests' } }, bash('t2', 'in_progress')] },
+    { input: 'tail', userId: 'h3', updates: [bash('t3', 'completed', { rawOutput: { formatted_output: 'exit 1', exitCode: 1 } })] },
+    { input: 'failed tool', userId: 'h4', replyId: 'r4', reply: 'the command failed', updates: [bash('t4', 'failed')] },
+    { input: 'limit', userId: 'h5', replyId: 'r5', reply: 'partial', updates: [{ sessionUpdate: 'session_info_update', _meta: { jetbrains: { air: { version: 1, sessionFailure: { id: 'l', revision: 1, category: 'limit', severity: 'error', title: 'Usage limit reached', actions: [] } } } } }] },
+    { input: 'silent', userId: 'h6' },
+  ]));
+  const ref = { harnessId: 'codex', nativeSessionId: 'native-session', formatVersion: 1 };
+  const snapshotWith = async turnOutcomes => {
+    const adapter = new AcpAdapter({ profile: { ...f.profile, ...(turnOutcomes ? { turnOutcomes } : {}) }, environment: {} });
+    try { const session = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref })); try { return value(await session.readSnapshot()).turns; } finally { await session.close(); } }
+    finally { await adapter.close(); }
+  };
+  try {
+    const turns = await snapshotWith();
+    assert.deepEqual(turns.map(turn => [turn.input[0].text, turn.outcome.status, turn.outcome.reason ?? turn.outcome.error?.message ?? null]), [
+      ['done', 'succeeded', null],
+      ['half', 'unknown', '原生记录中该轮有未完成的工具调用'],
+      ['tail', 'unknown', '原生记录中该轮停在工具调用，没有收尾回复'],
+      ['failed tool', 'succeeded', null],
+      ['limit', 'failed', 'Usage limit reached'],
+      ['silent', 'unknown', '原生记录没有该轮的回复'],
+    ]);
+    assert.deepEqual(turns[0].items[0], { item: { type: 'commandExecution', itemId: 't1', command: 'npm test', description: 'Run tests', output: 'ok 12', outputTruncated: false }, outcome: { status: 'succeeded' } });
+    assert.equal(turns[2].items[0].item.output, 'exit 1');
+    assert.equal(turns[3].items[0].outcome.status, 'failed');
+    // The agent program's own record decides; a record that cannot be read changes nothing.
+    const native = await snapshotWith(async id => { assert.equal(id, 'native-session'); return new Map([['h2', { status: 'cancelled', reason: 'interrupted' }], ['h3', { status: 'succeeded' }]]); });
+    assert.deepEqual(native.slice(1, 3).map(turn => turn.outcome), [{ status: 'cancelled', reason: 'interrupted' }, { status: 'succeeded' }]);
+    assert.equal(native[5].outcome.status, 'unknown');
+    assert.equal((await snapshotWith(async () => { throw new Error('app-server unavailable'); }))[1].outcome.status, 'unknown');
+  } finally { await f.close(); }
+});
+
+test('Codex turn outcomes page through app-server thread/turns/list and key each status by its user message', { timeout: 10000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-turns-'));
+  const command = join(root, 'codex');
+  await writeFile(command, `#!${process.execPath}
+import { createInterface } from 'node:readline';
+const turn = (status, id, error = null) => ({ id: 'turn-' + id, status, error, items: [{ type: 'userMessage', id }, { type: 'agentMessage', id: 'a' + id }], itemsView: 'summary' });
+for await (const line of createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.id === undefined) continue;
+  let result = {};
+  if (request.method === 'thread/turns/list') {
+    if (process.argv[2] !== 'app-server' || request.params.threadId !== 'thread-1' || request.params.itemsView !== 'summary') process.exit(3);
+    result = request.params.cursor === null
+      ? { data: [turn('completed', 'u1'), turn('interrupted', 'u2')], nextCursor: 'page-2', backwardsCursor: null }
+      : { data: [turn('failed', 'u3', { message: 'model error' }), turn('inProgress', 'u4')], nextCursor: null, backwardsCursor: null };
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, result }) + '\\n');
+}
+`);
+  await chmod(command, 0o755);
+  try {
+    const outcomes = await codexTurnOutcomes(command, { PATH: process.env.PATH }, 'thread-1');
+    assert.deepEqual([...outcomes], [
+      ['u1', { status: 'succeeded' }],
+      ['u2', { status: 'cancelled', reason: 'Codex 原生记录：该轮已中断' }],
+      ['u3', { status: 'failed', error: { code: 'nativeFailure', message: 'model error', retryable: true } }],
+      ['u4', { status: 'unknown', reason: 'Codex 原生记录显示该轮仍在执行' }],
+    ]);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

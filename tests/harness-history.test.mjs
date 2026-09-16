@@ -45,6 +45,8 @@ test('recovery checks terminal evidence, never resends uncertain work, and requi
     assert.equal((await h.state({sessionId:'session'})).recoveryRequired,true);
     assert.equal(f.events.length,0);
     await assert.rejects(h.rollback({sessionId:'session'}),/未确认/);
+    const checked=await h.recover({sessionId:'session',action:'check'});
+    assert.equal(checked.recoveryRequired,true);assert.match(checked.detail,/（missing terminal）；没有重发任何请求/);
     const result=await h.recover({sessionId:'session',action:'unlock'});
     assert.equal(result.recoveryRequired,false);assert.equal(f.events.length,1);
     assert.equal((await h.bindings.read('session')).nativeRef.nativeSessionId,'native');

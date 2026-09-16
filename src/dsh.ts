@@ -172,7 +172,9 @@ export class HarnessService extends TypertRemoteService {
           const index = snapshot.turns.findIndex(turn => turn.nativeTurnRef.nativeTurnKey === binding.pendingNative);
           const tail = index < 0 ? [] : snapshot.turns.slice(index);
           const turn = tail.at(-1);
-          if (turn && tail.every(turn => turn.outcome.status !== 'unknown')) {
+          const unsettled = tail.find(turn => turn.outcome.status === 'unknown')?.outcome;
+          if (unsettled?.status === 'unknown') detail = `无法确认原请求的执行结果（${unsettled.reason}）；没有重发任何请求。`;
+          if (turn && !unsettled) {
             confirmed = true;
             const text = tail.flatMap(turn => turn.items.flatMap(entry => entry.item.type === 'agentMessage' ? [entry.item.text] : [])).join('\n');
             detail = `已核对原生记录：${turn.outcome.status}。${text ? `\n原生回复：\n${text}` : ''}`;
