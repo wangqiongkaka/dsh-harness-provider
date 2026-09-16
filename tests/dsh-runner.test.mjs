@@ -184,13 +184,13 @@ test('Harness questions and edits land on DSH native ask_user_question and edit 
  assert.deepEqual(results[2].data.meta.diffs,[{path:'/a.txt',oldText:'old',newText:'new'}]);
 });
 
-test('delegation instructions follow the user input so a leading /skill and the native title stay the user\'s',{timeout:10000},async()=>{
+test('delegation instructions go to the adapter, not the user input, so a leading /skill and the native title stay the user\'s',{timeout:10000},async()=>{
  const root=await mkdtemp(join(tmpdir(),'dsh-harness-delegation-order-')),ctx=new Context(),native={turns:0};
  const bindings=new Bindings(join(root,'bindings')),id=SessionId('delegation-order');
  try{
   for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
   await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
-  const adapter=fakeAdapter([],native);
+  const opened=[],adapter=fakeAdapter(opened,native);
   const runner=new DshRunner(ctx,bindings,{codex:adapter},{environment:async()=>({DSH_DELEGATE_TOKEN:'fixture'})});
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
   await ctx.plugin(Loop,{agents:[]});
@@ -198,8 +198,9 @@ test('delegation instructions follow the user input so a leading /skill and the 
   const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
   agent.followup(createUserMessage({content:[{type:'text',text:'/review now'}],source:{kind:'user'}}));await agent.whenIdle();
   const [input]=native.inputs;
-  assert.equal(input[0].text,'/review now');
-  assert.match(input.at(-1).text,/^\[DSH 会话能力，由宿主提供\]/);
+  assert.deepEqual(input,[{type:'text',text:'/review now'}]); // the user's words reach the adapter untouched
+  // The adapter places the instructions (system prompt or prompt end); a leading blank line keeps them apart from the user's last line.
+  assert.match(opened[0].instructions,/^\n\n\[DSH 会话能力，由宿主提供\]/);
   await adapter.close();
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });

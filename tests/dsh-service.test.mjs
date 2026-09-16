@@ -91,3 +91,27 @@ test('thinking selection validates against the catalog, persists, and quota read
   assert.equal(await h.usage({sessionId:'bound'}),null);
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });
+
+test('catalog probes are shared while running and a failed probe is not repeated on every read',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-catalog-'));
+ const ctx=new Context();
+ const agent={id:'bound',status:'idle',inbox:{nextTurn:[],nextStep:[]},session:{header:{cwd:root},snapshotEvents:()=>[]}};
+ class NativeCommands extends Service {
+  constructor(ctx){super(ctx,'sessionController');}
+  async resolveAgent(){return {agent};}
+  async prompt(){return {accepted:true};} async fork(){return {};} async selectModel(){return {};} updateQueue(){return {};}
+ }
+ let inspections=0;
+ const adapter={async inspect(){inspections++;await new Promise(resolve=>setTimeout(resolve,20));return {status:'notInstalled',error:{code:'notInstalled',message:'Codex is not installed'}};},async close(){}};
+ try{
+  await ctx.plugin(Typert);await ctx.plugin(NativeCommands);
+  ctx.provide('agents',{get:()=>agent});ctx.provide('sessions',{});ctx.provide('userQuestions',{});ctx.provide('attachments',{});ctx.provide('fileUploads',{});
+  await ctx.plugin({inject,apply(scope){new HarnessService(scope,root,{codex:adapter,'claude-code':adapter});}});
+  const h=ctx.harness;
+  await h.bindings.write({version:1,sessionId:'bound',harness:'codex',cwd:root,locked:false});
+  const lists=await Promise.all([h.models({sessionId:'bound'}),h.models({sessionId:'bound'})]);
+  assert.ok(lists.every(list=>list.error==='Codex is not installed'));
+  assert.equal((await h.models({sessionId:'bound'})).error,'Codex is not installed');
+  assert.equal(inspections,1);
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});

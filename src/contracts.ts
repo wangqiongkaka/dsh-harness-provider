@@ -80,6 +80,8 @@ interface SessionHints {
   configValues?: Record<string, HarnessConfigValue>;
   /** The last usage the Host persisted for this session; each adapter decides what of it still holds after reopening. */
   usage?: HostUsage;
+  /** Host capability text for the model: the agent's own instruction channel when it has one, otherwise the end of every prompt. */
+  instructions?: string;
 }
 export type OpenSessionInput = (SessionHints & { kind: 'create' }) | (SessionHints & { kind: 'resume'; nativeRef: NativeSessionRef });
 

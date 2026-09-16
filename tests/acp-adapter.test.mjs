@@ -32,7 +32,7 @@ const commands = () => update({ sessionUpdate: 'available_commands_update', avai
 let counter = 0;
 const app = agent({ name: 'peer' })
   .onRequest('initialize', ({ params, client }) => { ctx = client; note({ initialize: params.clientCapabilities }); return { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true }, sessionCapabilities: { fork: {}, resume: {}, close: {} } }, authMethods: [], _meta: { steering: { supported: true } } }; })
-  .onRequest('session/new', async ({ params, client }) => { ctx = client; note({ new: params }); if (params._meta?.systemPrompt?.append !== 'PREFIX') process.exit(21); setTimeout(commands, 10); return { sessionId, ...opened() }; })
+  .onRequest('session/new', async ({ params, client }) => { ctx = client; note({ new: params }); setTimeout(commands, 10); return { sessionId, ...opened() }; })
   .onRequest('session/load', async ({ params, client }) => {
     ctx = client;
     if (params.sessionId !== sessionId) process.exit(22);
@@ -54,7 +54,7 @@ const app = agent({ name: 'peer' })
     ctx = client; cancelled = false;
     const raw = params.prompt.filter(b => b.type === 'text').map(b => b.text).join('');
     note({ prompt: raw });
-    const text = raw.startsWith('PREFIX ') ? raw.slice(7) : raw;
+    const text = (raw.startsWith('PREFIX ') ? raw.slice(7) : raw).replace('[HOST]', '');
     const image = params.prompt.find(b => b.type === 'image');
     if (text.startsWith('/rename ')) return { stopReason: 'end_turn' };
     const turn = ++counter, userId = 'u' + turn, replyId = 'm' + turn;
@@ -119,7 +119,7 @@ async function fixture() {
   const profile = {
     harnessId: 'codex',
     spawn: environment => ({ command: process.execPath, args: ['--input-type=module', '-e', peer], env: { ...env, ...environment } }),
-    sessionMeta: () => ({ systemPrompt: { append: 'PREFIX' } }),
+    sessionMeta: (_kind, instructions) => ({ systemPrompt: { append: 'PREFIX' + (instructions ?? '') } }),
     firstPromptPrefix: 'PREFIX ',
     titleCommand: title => `/rename ${title}`,
     skillInvocation: command => command.name.startsWith('$') ? command.name : `/${command.name}`,
@@ -145,6 +145,7 @@ test('inspection reads catalogs, modes and skills from a throwaway session; quot
   try {
     const inspection = await adapter.inspect({ cwd: f.root });
     assert.equal(inspection.status, 'ready');
+    assert.equal((await f.notes()).find(note => note.new).new._meta.systemPrompt.append, 'PREFIX');
     assert.deepEqual(inspection.catalog.models.map(model => model.ref.id), ['gpt-5.5', 'gpt-5.5-mini', 'b64.b3B1c1sxbV0']);
     assert.deepEqual(inspection.catalog.models[0].supportedThinkingOptionIds, ['low', 'high']);
     assert.deepEqual(inspection.catalog.models[1].supportedThinkingOptionIds, ['low']);
@@ -176,10 +177,10 @@ test('turns stream text, apply hints, steer, cancel, and carry cumulative usage 
     assert.deepEqual(session.initialState.configValues, { collaboration_mode: 'plan', 'fast-mode': true });
     assert.deepEqual(await session.listSkills(), [{ name: 'probe-skill', description: 'probe', modelInvocable: true }, { name: 'status', description: 'Show status <none>', modelInvocable: true }]);
     const output = session.outputs[Symbol.asyncIterator]();
-    value(await session.execute({ type: 'turn.start', turnId: 'host-1', input: [{ type: 'text', text: 'first' }] }));
+    value(await session.execute({ type: 'turn.start', turnId: 'host-1', input: [{ type: 'text', text: 'first' }, { type: 'text', text: '[HOST]' }] }));
     let seen = await until(output, 'turn.completed');
     assert.equal(events(seen, 'item.updated')[0].update.text, 'reply:first');
-    assert.deepEqual((await f.notes()).filter(note => note.prompt).map(note => note.prompt), ['/rename first', 'PREFIX first']); // the session is named, then the prefix rides on the first prompt
+    assert.deepEqual((await f.notes()).filter(note => note.prompt).map(note => note.prompt), ['/rename first', 'PREFIX first[HOST]']); // the session is named from the user's own block only, then the prefix rides on the first prompt
     const started = events(seen, 'turn.started')[0];
     assert.match(started.nativeTurnRef.nativeTurnKey, /^[0-9a-f]{16}\.1$/);
     assert.equal(events(seen, 'turn.completed')[0].nativeTurnRef.nativeTurnKey, started.nativeTurnRef.nativeTurnKey);
@@ -213,18 +214,20 @@ test('turns stream text, apply hints, steer, cancel, and carry cumulative usage 
     }
     assert.equal(state.resolvedModelLabel, 'Mini');
     const snapshot = value(await session.readSnapshot());
-    assert.deepEqual(snapshot.turns.map(turn => [turn.input[0].text, turn.outcome.status]), [['PREFIX first', 'succeeded'], ['second', 'succeeded'], ['$probe-skill go\nmore', 'succeeded'], ['/status now', 'succeeded'], ['', 'succeeded'], ['wait', 'succeeded'], ['cancel', 'unknown']]);
+    assert.deepEqual(snapshot.turns.map(turn => [turn.input[0].text, turn.outcome.status]), [['PREFIX first[HOST]', 'succeeded'], ['second', 'succeeded'], ['$probe-skill go\nmore', 'succeeded'], ['/status now', 'succeeded'], ['', 'succeeded'], ['wait', 'succeeded'], ['cancel', 'unknown']]);
     await session.close();
   } finally { await adapter.close(); await f.close(); }
 });
 
 test('permissions, forms (secret + custom answers), URL steps, failures and tool activity project onto the host contract', { timeout: 20000 }, async () => {
   const f = await fixture();
-  const adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  // An agent without an instruction channel (Codex) gets the Host instructions after the user's input on every prompt.
+  const adapter = new AcpAdapter({ profile: { ...f.profile, sessionMeta: undefined }, environment: {} });
   try {
-    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root, instructions: '[HOST]' }));
     const output = session.outputs[Symbol.asyncIterator]();
     value(await session.execute({ type: 'turn.start', turnId: 'host-a', input: [{ type: 'text', text: 'approve' }] }));
+    assert.equal((await f.notes()).find(note => note.new).new._meta, undefined);
     let pending = await interaction(output);
     assert.equal(pending.type, 'approval'); assert.equal(pending.title, 'Run command?'); assert.equal(pending.description, 'Reason: tests\nnpm test');
     assert.deepEqual(pending.actions.map(action => [action.id, action.effect]), [['allow-once', 'allowOnce'], ['allow-session', 'allowAlways'], ['reject', 'deny']]);
@@ -233,6 +236,7 @@ test('permissions, forms (secret + custom answers), URL steps, failures and tool
     let seen = await until(output, 'turn.completed');
     assert.equal(events(seen, 'interaction.closed')[0].reason, 'responded');
     assert.equal(events(seen, 'item.completed')[0].snapshot.item.text, 'approved:allow-session');
+    assert.deepEqual((await f.notes()).filter(note => note.prompt).map(note => note.prompt), ['/rename approve', 'PREFIX approve[HOST]']);
     value(await session.execute({ type: 'turn.start', turnId: 'host-b', input: [{ type: 'text', text: 'form' }] }));
     pending = await interaction(output);
     assert.equal(pending.type, 'question'); assert.equal(pending.title, 'Choose region');
@@ -278,7 +282,8 @@ test('a new process resumes through session/load, rebuilds the same turn keys, a
   let adapter = new AcpAdapter({ profile: f.profile, environment: {} });
   let ref, keys;
   try {
-    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    // An agent with an instruction channel (Claude Code's system prompt) keeps the Host instructions out of every prompt.
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root, instructions: '[HOST]' }));
     ref = session.initialState.nativeRef;
     const output = session.outputs[Symbol.asyncIterator]();
     keys = [];
@@ -287,6 +292,9 @@ test('a new process resumes through session/load, rebuilds the same turn keys, a
       keys.push(events(await until(output, 'turn.completed'), 'turn.completed')[0].nativeTurnRef.nativeTurnKey);
     }
     assert.notEqual(keys[0], keys[1]);
+    const notes = await f.notes();
+    assert.equal(notes.find(note => note.new).new._meta.systemPrompt.append, 'PREFIX[HOST]');
+    assert.ok(notes.filter(note => note.prompt).every(note => !note.prompt.includes('[HOST]')));
     await session.close();
   } finally { await adapter.close(); }
   adapter = new AcpAdapter({ profile: f.profile, environment: {} });
@@ -305,6 +313,45 @@ test('a new process resumes through session/load, rebuilds the same turn keys, a
     const seen = await until(output, 'turn.completed');
     assert.equal(events(seen, 'item.completed')[0].snapshot.item.text, 'reply:third');
     assert.equal(value(await session.readSnapshot()).turns.length, 4);
+    await session.close();
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('without an instruction channel, turn keys stay the same across processes with the prefix and Host instructions in every prompt', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  // Codex: the feedback prefix rides on the first prompt and the Host instructions on every prompt; history replays both verbatim.
+  const profile = { ...f.profile, sessionMeta: undefined };
+  const live = async (session, output, text, turnId) => {
+    value(await session.execute({ type: 'turn.start', turnId, input: [{ type: 'text', text }] }));
+    return events(await until(output, 'turn.completed'), 'turn.completed')[0].nativeTurnRef.nativeTurnKey;
+  };
+  let adapter = new AcpAdapter({ profile, environment: {} });
+  let ref;
+  const keys = [];
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root, instructions: '[HOST]' }));
+    ref = session.initialState.nativeRef;
+    const output = session.outputs[Symbol.asyncIterator]();
+    for (const text of ['first', 'first', 'second']) keys.push(await live(session, output, text, 'host-' + keys.length));
+    assert.notEqual(keys[0], keys[1]);
+    await session.close();
+  } finally { await adapter.close(); }
+  adapter = new AcpAdapter({ profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref, instructions: '[HOST]' }));
+    const snapshot = value(await session.readSnapshot());
+    assert.deepEqual(snapshot.turns.map(turn => turn.input[0].text), ['PREFIX first[HOST]', 'first[HOST]', 'second[HOST]']);
+    assert.deepEqual(snapshot.turns.map(turn => turn.nativeTurnRef.nativeTurnKey), keys);
+    // A resumed session appends the instructions again but never the first-prompt prefix, and its new key replays the same.
+    keys.push(await live(session, session.outputs[Symbol.asyncIterator](), 'first', 'host-3'));
+    await session.close();
+  } finally { await adapter.close(); }
+  adapter = new AcpAdapter({ profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref }));
+    const turns = value(await session.readSnapshot()).turns;
+    assert.equal(turns.at(-1).input[0].text, 'first[HOST]');
+    assert.deepEqual(turns.map(turn => turn.nativeTurnRef.nativeTurnKey), keys);
     await session.close();
   } finally { await adapter.close(); await f.close(); }
 });

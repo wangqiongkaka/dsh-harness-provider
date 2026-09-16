@@ -26,8 +26,11 @@ export interface AcpProfile {
   harnessId: string;
   /** The agent program; throws a HarnessError-like `{ code, message }` when its executable is missing. */
   spawn(environment: NodeJS.ProcessEnv): { command: string; args: string[]; env: NodeJS.ProcessEnv };
-  /** `_meta` for session/new and session/load: the agent's own options channel (system prompt, SDK options). */
-  sessionMeta?(kind: 'create' | 'resume'): Record<string, unknown> | undefined;
+  /**
+   * `_meta` for session/new and session/load: the agent's own options channel (system prompt, SDK options). A profile
+   * that defines it carries the Host's session instructions there; without it they are appended to every prompt.
+   */
+  sessionMeta?(kind: 'create' | 'resume', instructions?: string): Record<string, unknown> | undefined;
   /** Text sent ahead of the first prompt of a created session, for agents without an instruction channel. */
   firstPromptPrefix?: string;
   /** Ids persisted by the previous, non-ACP adapters mapped onto the agent's ids. */
@@ -51,6 +54,7 @@ const CLIENT_CAPABILITIES: acp.ClientCapabilities = {
 };
 const REQUEST_TIMEOUT_MS = 60_000;
 const CLOSE_TIMEOUT_MS = 5_000;
+const TITLE_TIMEOUT_MS = 30_000;
 const TOOL_OUTPUT_LIMIT = 64_000;
 const record = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown, max = 500): string | undefined => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
@@ -439,6 +443,7 @@ class AcpSession implements HarnessSession {
   #fault: HarnessError | null = null;
   #closing: Promise<void> | null = null;
   #prefixPending: boolean;
+  readonly #instructions: string | undefined;
 
   private constructor(options: SessionOptions, process_: AcpProcess, sessionId: string, opened: Opened, catalogs: Catalogs, commands: HarnessSkill[]) {
     this.#profile = options.profile; this.#environment = options.environment; this.#process = process_; this.#sessionId = sessionId; this.#cwd = options.input.cwd; this.#onClosed = options.onClosed;
@@ -448,6 +453,7 @@ class AcpSession implements HarnessSession {
     this.capabilities = capabilitiesOf(process_.initialized.agentCapabilities, catalogs);
     this.#prefixPending = options.input.kind === 'create' && !!options.profile.firstPromptPrefix;
     this.#titlePending = options.input.kind === 'create' && !!options.profile.titleCommand;
+    this.#instructions = options.profile.sessionMeta ? undefined : options.input.instructions;
     this.#state = {
       nativeRef: nativeSessionRefSchema.parse({ harnessId: this.harnessId, nativeSessionId: sessionId, formatVersion: 1 }),
       ...(catalogs.currentModel ? { effectiveModel: modelRef(catalogs.currentModel), resolvedModelLabel: selectOptions(opened.configOptions!.find(option => option.id === catalogs.modelConfigId)!).find(option => option.value === catalogs.currentModel)?.name ?? catalogs.currentModel } : {}),
@@ -478,7 +484,7 @@ class AcpSession implements HarnessSession {
       fault: cause => { if (session) session.#faulted(toError(cause, 'ACP agent exited')); },
     });
     try {
-      const meta = profile.sessionMeta?.(input.kind);
+      const meta = profile.sessionMeta?.(input.kind, input.instructions);
       let opened: Opened;
       if (input.kind === 'create') {
         const created = await request<acp.NewSessionResponse>(process_.agent, 'session/new', { cwd: input.cwd, mcpServers: [], ...(meta ? { _meta: meta } : {}) });
@@ -641,10 +647,14 @@ class AcpSession implements HarnessSession {
     }
     if (this.#titlePending) {
       this.#titlePending = false;
-      const title = text(promptText(blocks).split('\n').find(line => line.trim()), 60);
-      if (title) await this.#process.agent.request('session/prompt', { sessionId: this.#sessionId, prompt: [{ type: 'text', text: this.#profile.titleCommand!(title) }] }).catch(() => {});
+      // Only the user's own leading text names the session; host blocks appended after it (delegation instructions) never do.
+      const lead = blocks.find(block => block.type === 'text');
+      const title = text(lead?.type === 'text' ? lead.text.split('\n').find(line => line.trim()) : undefined, 60);
+      // A local command that hangs must not hold the turn; the timeout cancels the request on the agent.
+      if (title) await request(this.#process.agent, 'session/prompt', { sessionId: this.#sessionId, prompt: [{ type: 'text', text: this.#profile.titleCommand!(title) }] }, TITLE_TIMEOUT_MS).catch(() => {});
     }
     if (this.#prefixPending) { blocks.unshift({ type: 'text', text: this.#profile.firstPromptPrefix! }); this.#prefixPending = false; }
+    if (this.#instructions) blocks.push({ type: 'text', text: this.#instructions });
     const transcript = this.#transcript.begin(promptText(blocks));
     const active: ActiveTurn = { hostId: command.turnId, transcript, cancelled: false, tools: new Map(), announced: new Map(), compaction: new Map(), interactions: new Map(), done: Promise.withResolvers() };
     this.#active = active;

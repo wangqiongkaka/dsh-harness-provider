@@ -80,7 +80,8 @@ export class DelegationBridge {
 const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
 export function delegationInstructions(): string {
   const command = `${quote(process.execPath)} ${quote(fileURLToPath(new URL('./delegate-cli.mjs', import.meta.url)))}`;
-  return `[DSH 会话能力，由宿主提供]
+  // Leading blank line: the agent joins prompt blocks verbatim, so this stays apart from the user's last line.
+  return `\n\n[DSH 会话能力，由宿主提供]
 用户明确要求把工作交给指定 harness 或新会话处理时（例如实现、修复、调研、审查、测试），使用以下入口创建同工作区的全新 DSH 会话，左侧会话区会显示进度。
 ${command} create '{"requestId":"唯一请求标识","harness":"codex","title":"简短任务标题","prompt":"完整任务：目标、背景、范围、约束（如是否允许修改文件）和验收要求"}'
 harness 支持 codex、claude-code；title 可省略。新会话没有本会话历史，必须写全任务。requestId 每个新任务使用唯一值；失败重试必须使用相同 requestId 和参数。

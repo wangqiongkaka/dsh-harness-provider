@@ -66,8 +66,10 @@ export class HarnessService extends TypertRemoteService {
   readonly runner: DshRunner;
   readonly delegation: DelegationBridge;
   private stopped = false;
-  // ponytail: per-cwd catalog cache; each inspect spawns a native process.
-  private readonly catalogs = new Map<string, { until: number; inspection: Ready }>();
+  // ponytail: per-cwd catalog cache; each inspect spawns a native process. In-flight probes are shared, failures kept 10s.
+  private readonly catalogs = new Map<string, { until: number; work: Promise<Ready | { error: string }> }>();
+  // ponytail: per-session automatic recovery check; each check loads native history in a new agent process.
+  private readonly checks = new Map<string, { until: number; work: Promise<void> }>();
   // ponytail: per-source quota cache; account probes are rate-limited upstream and identical across sessions.
   private readonly quotas = new Map<string, { until: number; work: Promise<Quota> }>();
   constructor(ctx: Context, root: string, private readonly adapters: Record<Binding['harness'], HarnessAdapter>) {
@@ -245,14 +247,27 @@ export class HarnessService extends TypertRemoteService {
     const agent = await this.agent(sessionId); // Same authorization/ownership rules as native Session commands.
     const binding = await this.bindings.read(sessionId);
     if (binding?.pending && agent.status !== 'running' && !agent.inbox.nextTurn.length && !agent.inbox.nextStep.length) {
-      await this.recover({ sessionId, action: 'check' });
+      await this.autoCheck(sessionId);
       return this.view(await this.bindings.read(sessionId));
     }
+    this.checks.delete(sessionId);
     if (binding || !this.fresh(agent)) return this.view(binding);
     // A fresh session starts on the Harness picked last time; failures fall back to native silently.
     const remembered = (await this.bindings.readDefaults()).harness;
     if (!remembered || remembered === 'dsh' || !agent.session.header.cwd) return this.view();
     return this.bindings.serial(sessionId, async () => this.view(await this.bindings.read(sessionId) ?? await this.bind(agent, sessionId, remembered).catch(() => undefined)));
+  }
+
+  /**
+   * State reads from several UI parts share one recovery check, and a finished check is not repeated for 30 seconds;
+   * the user's own check / unlock always runs. A failed automatic check leaves the session paused for the user to act.
+   */
+  private autoCheck(sessionId: string): Promise<void> {
+    const cached = this.checks.get(sessionId);
+    if (cached && cached.until > Date.now()) return cached.work;
+    const entry = { until: Infinity, work: this.recover({ sessionId, action: 'check' }).then(() => {}, () => {}).finally(() => { entry.until = Date.now() + 30_000; }) };
+    this.checks.set(sessionId, entry);
+    return entry.work;
   }
 
   /** Creates an ordinary DSH session, with a stable identity for admission retries. */
@@ -427,14 +442,16 @@ export class HarnessService extends TypertRemoteService {
     };
   }
 
-  private async inspection(binding: Binding): Promise<Ready | { error: string }> {
+  private inspection(binding: Binding): Promise<Ready | { error: string }> {
     const key = `${binding.harness}\0${binding.cwd}`;
     const cached = this.catalogs.get(key);
-    if (cached && cached.until > Date.now()) return cached.inspection;
-    const result = await this.adapters[binding.harness].inspect({ cwd: binding.cwd });
-    if (result.status !== 'ready') return { error: result.error.message };
-    this.catalogs.set(key, { until: Date.now() + 60_000, inspection: result });
-    return result;
+    if (cached && cached.until > Date.now()) return cached.work;
+    const entry = { until: Infinity, work: this.adapters[binding.harness].inspect({ cwd: binding.cwd }).then(result => {
+      entry.until = Date.now() + (result.status === 'ready' ? 60_000 : 10_000);
+      return result.status === 'ready' ? result : { error: result.error.message };
+    }, error => { if (this.catalogs.get(key) === entry) this.catalogs.delete(key); throw error; }) };
+    this.catalogs.set(key, entry);
+    return entry.work;
   }
   private async catalog(binding: Binding) {
     const inspection = await this.inspection(binding);

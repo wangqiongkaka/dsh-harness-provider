@@ -92,7 +92,7 @@ export function codexProfile(options: { command: string; environment: NodeJS.Pro
     harnessId: 'codex',
     spawn: environment => ({ command: process.execPath, args: [bundled('codex-acp.mjs')], env: { ...environment, CODEX_PATH: options.command } }),
     // codex-acp exposes no developer-instruction channel; the first prompt of a new thread carries the feedback contract.
-    firstPromptPrefix: feedbackInstructions,
+    firstPromptPrefix: `${feedbackInstructions}\n\n`,
     legacyPermissionModes: { readOnly: 'read-only', workspaceWrite: 'agent', dangerFullAccess: 'agent-full-access' },
     skillName: (command: AvailableCommand) => command.name.startsWith('$') ? command.name.slice(1) : command.name,
     // Codex injects a skill only for its own `$skill` mention; the local `/name` spelling of other commands stays as is.
@@ -148,8 +148,9 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
       const env = withUserShellEnvironment({ ...raw });
       return { command: process.execPath, args: [bundled('claude-agent-acp.mjs')], env: withNodeOnPath({ ...env, CLAUDE_CODE_EXECUTABLE: executable(env), CLAUDE_AGENT_SDK_CLIENT_APP: `${pkg.name}/${pkg.version}` }) };
     },
-    // The same system-prompt append the SDK adapter used; ACP forwards it through the agent's own options channel.
-    sessionMeta: () => ({ systemPrompt: { append: feedbackInstructions } }),
+    // The same system-prompt append the SDK adapter used; ACP forwards it through the agent's own options channel. Host
+    // instructions (delegation) ride along, so they stay out of the user's messages and survive context compaction.
+    sessionMeta: (_kind, instructions) => ({ systemPrompt: { append: feedbackInstructions + (instructions ?? '') } }),
     legacyThinkingOptions: { auto: 'default', off: 'default' },
     titleCommand: title => `/rename ${title}`,
     inspectAccount: async () => {

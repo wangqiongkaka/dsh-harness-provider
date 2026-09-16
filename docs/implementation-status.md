@@ -1,5 +1,7 @@
 # Harness 能力补齐
 
+> 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
+
 ## 已确认决定
 
 - 六项边界全部纳入本次实现：附件/图片工具结果、插入当前轮/分支/回滚、保密问题、异常对账与恢复界面、委派自动唤醒与完整结果、DSH 原生委派入口。
@@ -29,11 +31,12 @@
 
 ## 验证记录（2026-09-16）
 
-- `npm run check`：类型检查、构建及 33 项测试通过。覆盖附件校验和图片落盘、保密答复隔离及关闭、运行中插入去重、历史分支和回滚、未知结果不重发、委派分页及自动唤醒、原生 DSH 工具调用，以及 Claude/Codex 的 MCP elicitation、权限请求、斜杠命令、hooks、子代理活动和增量工具输出投影。
+- `npm run check`：类型检查、构建及 33 项测试通过（提交 e213d70 时）。覆盖附件校验和图片落盘、保密答复隔离及关闭、运行中插入去重、历史分支和回滚、未知结果不重发、委派分页及自动唤醒、原生 DSH 工具调用，以及 Claude/Codex 的 MCP elicitation、权限请求、斜杠命令、hooks、子代理活动和增量工具输出投影。
 - `node experiments/codex-native-probe.mjs`：真实 Codex CLI 的多轮、历史读取、指定边界分支及跨进程续聊通过。
 - `node experiments/codex-capabilities-probe.mjs`：真实 Codex CLI 加载项目 skill 与 MCP；MCP 工具审批和表单问答经 DSH 往返；`/skills`、`/mcp` 不触发模型请求；Codex 哈希授信后的用户 hook 实际执行、反馈注入模型上下文并投影活动。模型端仅使用本地 fixture。
 - `node experiments/claude-native-probe.mjs`：真实 Claude Code CLI 的多轮、历史读取、指定边界分支、跨进程续聊及运行中插入通过。原始回复先结束时，仍等待插入消息对应的后续回复完成。
 - `node experiments/claude-capabilities-probe.mjs`：真实 Claude Code CLI 的项目 MCP 工具与表单提问、项目 hook 上下文与阻断反馈、原生 `/help` 斜杠命令通过；模型端仅使用本地 fixture。
+- 以上四个 `codex-*-probe` / `claude-*-probe` 脚本驱动 ACP 重构前的直连适配器，已随提交 9eeb592 删除，可用 `git show e213d70:experiments/<脚本名>` 查看。ACP 下的多轮、历史、分支、跨进程续聊和运行中插入由 `npm run probe:acp`（`experiments/acp-native-probe.mjs`）覆盖；真实 CLI 的 MCP 审批与表单、hooks 检查目前没有对应脚本。
 - `node experiments/secret-ui-probe.mjs`：实际密码组件的浏览器输入、提交及提交后清除通过。
 - `DSH_PLUGIN_TAR=.cache/dsh-harness-provider-0.1.2.tgz node experiments/dsh-web-probe.mjs`：临时 DSH Profile 安装、两种 Harness 原输入框续聊及重启恢复通过；回滚后下一请求不再包含被撤销轮；分支保留 Harness 绑定；未知结果核对保持暂停，手动解除没有增加模型请求。
 - 同一 Web 检查加 `DSH_DELEGATION_PROBE=1`：真实 Claude Code 工具创建的 Codex review 出现在侧栏，能查看回复；完成通知实际进入来源 Claude Code 的下一次模型请求，自动唤醒通过。
@@ -44,7 +47,7 @@
 
 修复 `cannot get property "attachments" without inject (gateway/internal)`：插件入口漏声明 `attachments` 和 `fileUploads`，导致真实 Cordis 插件作用域拒绝访问。直接在根 Context 上验证附件转换无法发现这一问题。
 
-回归检查改为通过声明依赖的插件作用域发送图片，并验证文件上传票据隔离。`npm run check` 的类型检查、构建和 28 项测试通过。`DSH_IMAGE_PROBE=1 DSH_PLUGIN_TAR=.cache/dsh-harness-provider-0.1.2.tgz node experiments/dsh-web-probe.mjs` 使用真实输入框上传 PNG，并检查实际原生模型请求包含图片；模型服务仍使用本地模拟端点。
+回归检查改为通过声明依赖的插件作用域发送图片，并验证文件上传票据隔离。`npm run check` 的类型检查、构建和 28 项测试通过（提交 fe3e1cb 时）。`DSH_IMAGE_PROBE=1 DSH_PLUGIN_TAR=.cache/dsh-harness-provider-0.1.2.tgz node experiments/dsh-web-probe.mjs` 使用真实输入框上传 PNG，并检查实际原生模型请求包含图片；模型服务仍使用本地模拟端点。
 
 ## 保留的边界
 
@@ -55,7 +58,7 @@
 
 ## 嵌套委派修复
 
-修复委派子会话收到委派说明和凭据后，在完成通知触发的续轮中再次创建 review 会话的问题。宿主现在拒绝委派子会话再次委派，并且不再向它注入委派说明或环境凭据；来源主会话仍可在用户提出新任务时继续创建独立委派。回归测试先复现“子会话可再次委派”，修复后 `npm run check` 的类型检查、构建及 28 项测试通过。
+修复委派子会话收到委派说明和凭据后，在完成通知触发的续轮中再次创建 review 会话的问题。宿主现在拒绝委派子会话再次委派，并且不再向它注入委派说明或环境凭据；来源主会话仍可在用户提出新任务时继续创建独立委派。回归测试先复现“子会话可再次委派”，修复后 `npm run check` 的类型检查、构建及 28 项测试通过（修复完成时；随提交 e213d70 入库，该提交包含后续新增测试，共 33 项）。
 
 ## Claude Code 原生配置范围
 
@@ -100,7 +103,7 @@ Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工
 
 ### 验证
 
-- `npm run check`：类型检查、构建及 23 项测试通过；`tests/acp-adapter.test.mjs` 用官方 SDK 写的假 Agent 覆盖目录读取、轮次流、提示前缀与会话命名、插入、取消、审批、表单（保密与自定义答案）、URL 征询、工具/文件改动/计划/压缩投影、会话失败扩展、跨进程回放与分支、Agent 崩溃。
+- `npm run check`：类型检查、构建及 23 项测试通过（提交 9eeb592 时，ACP 重构删除了直连适配器的测试）；`tests/acp-adapter.test.mjs` 用官方 SDK 写的假 Agent 覆盖目录读取、轮次流、提示前缀与会话命名、插入、取消、审批、表单（保密与自定义答案）、URL 征询、工具/文件改动/计划/压缩投影、会话失败扩展、跨进程回放与分支、Agent 崩溃。
 - `node experiments/acp-native-probe.mjs`：真实 Codex 0.154.0 与 Claude Code 2.1.273 经内置 ACP 适配器：目录与技能读取不发模型请求、两轮对话、历史快照、指定轮次分支、技能调用到达模型请求、跨进程恢复携带上下文、Claude 运行中插入；模型端为本地桩服务。
 - `node experiments/delegation-native-probe.mjs`：两个真实 CLI 的 shell 工具继承会话凭据并调用委派 CLI 通过。
 - `node experiments/dsh-web-probe.mjs`（默认模式）：临时 DSH Profile 安装、Codex 两轮、重启续聊、恢复入口、回滚后请求不含被撤销轮、分支保留绑定、Claude 两轮与重启续聊通过；`DSH_SKILLS_PROBE=1`、`DSH_IMAGE_PROBE=1`、`DSH_DELEGATION_PROBE=1` 三种模式也通过。
@@ -108,7 +111,7 @@ Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工
 
 ## 历史验证记录（自 README 迁入，ACP 重构之前）
 
-**2026-09-16（0.1.3，直连时期）**：新增按 Harness 读取的 `/` 技能菜单（切换清除缓存、失败不回退 DSH 技能）、`sessionSkillCatalog.list` 包装与卸载恢复、DSH 0.1.6 的 preset 失效通知、恢复入口改为独立的 **恢复会话** 面板，并在 `tests/` 中补充技能菜单与用量环两项测试（当时共 12 个测试文件、37 项测试）。
+**2026-09-16（0.1.3，直连时期）**：新增按 Harness 读取的 `/` 技能菜单（切换清除缓存、失败不回退 DSH 技能）、`sessionSkillCatalog.list` 包装与卸载恢复、DSH 0.1.6 的 preset 失效通知、恢复入口改为独立的 **恢复会话** 面板，并在 `tests/` 中补充技能菜单与用量环两项测试（当时共 12 个测试文件、37 项测试；本仓库提交历史中没有对应版本，无法核对）。
 
 **2026-09-16（直连时期）**：
 
@@ -117,3 +120,35 @@ Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工
 - 环境：DSH `0.1.6-alpha.1`（本地构建标识 `0.1.6-alpha.1-0d1f500`）；Codex CLI `0.144.6`；Claude Code CLI `2.1.272`。
 - 两个真实 CLI 均通过多轮、原生身份保存和跨进程恢复验证；Web 安装后 Codex、Claude Code 均通过原输入框两轮对话及重启后续聊。
 - 一次与原生 CLI 检查并行运行的 Web 复验中，Codex 模型目录查询进程退出；随后单独运行完整 Web 复验通过，该次退出原因未确认。
+
+## 标题、委派说明与恢复开销修复（2026-09-16）
+
+### 问题
+
+- 宿主把委派说明作为独立文本块追加在用户输入后，而标题取所有文本块直接拼接后的首行，原生会话标题变成“用户原话[DSH 会话能力，由宿主提供]”。说明每轮都进入用户消息，Claude Code 的对话记录里每条都带着这段文字。
+- 会话处于待恢复状态时，界面多处读取状态各触发一次原生核对，每次都启动 Agent 进程加载历史（Codex 另启动 app-server）。
+- 模型目录探测不合并同时发起的请求，也不缓存失败结果；CLI 未安装或未登录时，每次读取都会启动探测进程。
+- 新会话的 `/rename` 请求没有超时，原生端卡住时首轮无法开始。
+
+### 决定
+
+- 标题只取用户输入第一个文本块的首个非空行。
+- 委派说明由宿主在打开会话时通过 `OpenSessionInput.instructions` 交给适配器：配置档定义了 `sessionMeta` 的（Claude Code）放进系统提示；没有的（Codex）追加在每轮提示末尾。说明以空行开头，Codex 进展反馈前缀以空行结尾。委派子会话仍不附加。依据：`codex-acp` 与 `claude-agent-acp` 逐段原样保存并回放用户文本块，加入空行不改变已有轮次键；`claude-agent-acp` 的 `newSession` 与 `loadSession` 都经 `getOrCreateSession` 读取 `_meta.systemPrompt`。
+- 自动恢复核对按会话共用进行中的一次，结束后 30 秒内不重复，失败时保持暂停；用户手动核对或解除暂停不受限制。
+- 模型目录按 Harness 与工作目录共用进行中的探测，成功结果缓存 60 秒、失败 10 秒，探测抛异常时删除缓存。
+- `/rename` 请求 30 秒超时，超时后通过 ACP 取消信号结束请求，本轮继续。
+- 新增 `AGENTS.md` 项目规则（`CLAUDE.md` 引用同一份），并同步 README。
+
+### 验证
+
+- `npm run check`：类型检查、构建及 30 项测试通过（未提交的工作区，基于 5a842ea）。新增或调整的测试覆盖：标题不含宿主追加的文本块；委派说明作为打开参数传给适配器、不混入用户输入；有系统提示通道时说明进入 `_meta.systemPrompt.append` 且不出现在提示中；无通道时说明追加在每轮提示末尾，关闭后在新进程恢复，轮次键与实时记录一致，恢复后的新一轮也一致；并发状态读取只触发一次自动核对，手动核对仍执行；探测失败时并发与随后的读取只启动一次探测。
+- 通过临时改坏实现确认回归辨识力：把委派说明挪到记录轮次文本之后，Codex 冷恢复轮次键测试失败；源码还原后完整检查通过。
+- Codex 委派会话只读审查未发现高或中严重度的功能缺陷，指出的测试缺口中“Codex 冷恢复轮次键”已补测试。
+
+未执行：真实 Codex / Claude Code CLI 与 DSH Web 探针（`npm run probe:acp`、`npm run probe:web`），未确认 Claude Code 模型实际收到的系统提示内容；未安装到用户 Profile。
+
+### 保留的问题
+
+- `/rename` 超时、缓存 60 / 10 / 30 秒到期后重新执行、探测抛异常删除缓存均无自动化测试。
+- 目录与核对缓存不主动清理过期条目；影响有限，未处理。
+- 插件启动时同步读取登录 shell 环境（最多 3 秒），Codex 未做同样的环境补全；打开会话时最多等待 3 秒的命令列表；`updateQueue` 透传包装、`refreshUsage` 调用等死代码；构建不清理 `dist/` 旧产物。

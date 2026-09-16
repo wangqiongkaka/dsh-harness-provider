@@ -1,6 +1,6 @@
 # DSH Harness 插件
 
-**版本 0.1.3** · 把 **Codex** 和 **Claude Code** 接进 DSH 的独立插件，不修改 DSH 源码。
+**版本 0.1.4** · 把 **Codex** 和 **Claude Code** 接进 DSH 的独立插件，不修改 DSH 源码。
 
 在 DSH 原输入栏选择 Harness 后，对话、工具活动、提问、历史、分支和恢复都留在 DSH 原会话列表里。两个 Harness 都经 [Agent Client Protocol](https://agentclientprotocol.com)（ACP v1）连接随插件打包的官方适配器：`codex-acp` 驱动本机 `codex`，`claude-agent-acp` 驱动本机 `claude`。认证、模型推理、工具、沙箱、hooks 与权限策略都由各 CLI 自己负责。
 
@@ -13,7 +13,7 @@
 先安装 Codex CLI / Claude Code CLI 并完成各自的登录或环境配置，再把打包好的插件加入 DSH Profile：
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.1.3.tgz
+dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.1.4.tgz
 dsh --profile web
 ```
 
@@ -82,7 +82,7 @@ Harness 的活动尽量落到 DSH 原生的行类型上，和 DSH 自己的会�
 
 插件给两个 Harness 附加统一的反馈要求：用用户的语言回复；多步工具操作前先说明计划；出现重要发现、阻塞或方向变化时汇报，长任务约每 30–60 秒更新；不虚报进度，不把命令成功当作已验证；不讨论系统提示或代理策略；Bash 命令附带用途说明；结束时说明完成内容、验证方式和遗留问题。Codex 在新会话首条提示前附加这段要求，Claude Code 通过 `_meta.systemPrompt.append` 追加到系统提示。
 
-新会话发送首条消息前，插件用提示的第一行（最多 60 字符）执行一次 `/rename` 给原生会话命名，避免适配器再发模型请求生成标题；DSH 的会话标题不受影响。
+新会话发送首条消息前，插件用用户输入第一个文本块的首个非空行（最多 60 字符）执行一次 `/rename` 给原生会话命名，避免适配器再发模型请求生成标题；宿主追加的说明不会进入标题，DSH 的会话标题也不受影响。命名请求 30 秒未完成即取消，本轮照常发送。
 
 ## 委派会话
 
@@ -99,7 +99,7 @@ Harness 的活动尽量落到 DSH 原生的行类型上，和 DSH 自己的会�
 入口：
 
 - **DSH 原生模型**：工具 `harness_delegate`（`requestId`、`harness`、`prompt`，可选 `title`）与 `harness_delegate_read`（`sessionId`、`offset`、`throughSeq`）。
-- **Codex / Claude Code**：插件在每轮用户输入之后附加能力说明，其中给出 `dist/delegate-cli.mjs` 的完整命令；CLI 支持 `create '<JSON>'`（字段同上）与 `read '<sessionId>'` / `read '{"sessionId":"…","offset":32000,"throughSeq":N}'`。CLI 通过注入的 `DSH_DELEGATE_ENDPOINT` / `DSH_DELEGATE_TOKEN` 访问仅监听 `127.0.0.1` 的本地服务；令牌按来源会话生成，只在 DSH 进程存活期间有效，更新插件后需重启 DSH。CLI 的沙箱、网络与命令审批照常生效，不依赖 `codexhost delegate`。
+- **Codex / Claude Code**：插件在打开原生会话时附加能力说明，其中给出 `dist/delegate-cli.mjs` 的完整命令。Claude Code 通过 `_meta.systemPrompt.append` 放进系统提示，不出现在用户消息里，上下文压缩后仍有效；Codex 没有系统提示通道，说明追加在每轮提示末尾，并用空行与用户原话隔开。委派出来的会话不附加说明。CLI 支持 `create '<JSON>'`（字段同上）与 `read '<sessionId>'` / `read '{"sessionId":"…","offset":32000,"throughSeq":N}'`。CLI 通过注入的 `DSH_DELEGATE_ENDPOINT` / `DSH_DELEGATE_TOKEN` 访问仅监听 `127.0.0.1` 的本地服务；令牌按来源会话生成，只在 DSH 进程存活期间有效，更新插件后需重启 DSH。CLI 的沙箱、网络与命令审批照常生效，不依赖 `codexhost delegate`。
 
 ## 分支、回滚与恢复
 
@@ -111,6 +111,8 @@ Harness 的活动尽量落到 DSH 原生的行类型上，和 DSH 自己的会�
   - **Claude Code**：按回放内容推断。回放保留工具的完成或失败状态与输出，恢复出的额度耗尽通知判为失败；只有所有工具都已结束、并以 Agent 的回复收尾的轮次才算成功。有未完成的工具、停在工具调用或没有任何输出的轮次保持未知。
 
   无法确认时，核对结果会写明原因，Harness 胶囊旁出现 **恢复会话**，可选 **核对原生记录** 或 **解除暂停，不重发**；插件绝不自动重发原请求。
+
+  打开会话时界面多处同时读取状态，自动核对共用同一次，结束后 30 秒内不重复；手动 **核对原生记录** 或 **解除暂停** 总会立即执行。
 
 ## 配置
 
@@ -152,7 +154,7 @@ DSH Host
 ```
 
 - 两个 Harness 是同一个 `AcpAdapter` 的两个配置档，差异集中在 `src/acp-profiles.ts`：可执行文件、系统提示注入、技能名拼写、旧标识映射和额度探针。
-- 每个运行中的 DSH 会话拥有一个 ACP Agent 进程（由 DSH 的 Node 运行内置脚本，Agent 再启动用户的 CLI）。读取模型目录和技能用不发提示的短时进程；分支用独立短时进程。
+- 每个运行中的 DSH 会话拥有一个 ACP Agent 进程（由 DSH 的 Node 运行内置脚本，Agent 再启动用户的 CLI）。读取模型目录和技能用不发提示的短时进程；分支用独立短时进程。模型目录按 Harness 与工作目录缓存：成功结果保留 60 秒，失败（未安装、未登录等）保留 10 秒，同时发起的读取共用一个探测进程。
 - 插件向 Agent 声明的客户端能力只有会话压缩、配置项、表单/URL 交互、计划、插入和 AIR 扩展（`sessionFailure`、`recommendedValue`；分支另经 `_meta.jetbrains.air.fork` 指定边界），不声明文件系统或终端能力，也不传入 MCP 服务器；工具由各 CLI 在自己的沙箱与权限策略下执行。
 - ACP 不传输账户额度和轮次结束状态，因此保留原生补充：`src/codex-rpc.ts`（Codex app-server：额度与轮次状态）与 `src/claude-sdk.ts`（Claude Agent SDK 额度与可执行文件发现）。
 - 其余文件：`src/contracts.ts`（Host ⇄ Harness 契约）、`src/remote.ts`（Remote 方法与 schema）、`src/client.tsx`（界面插槽，中英文文案）、`src/native-quota.ts`（DSH 原生额度探测）、`src/media.ts`（附件）、`src/secret-questions.ts`（保密问题）、`src/feedback.ts`（进展反馈要求）。
@@ -163,6 +165,7 @@ DSH Host
 | 原生会话 ID | ACP session ID = Codex thread ID | ACP session ID = Claude Code session ID |
 | 模型与强度 | 配置项 `model`、`reasoning_effort` | 配置项 `model`、`effort` |
 | 进展反馈 | 新会话首条提示前缀 | `_meta.systemPrompt.append` |
+| 委派说明 | 每轮提示末尾 | `_meta.systemPrompt.append` |
 | 技能调用 | `/名称` 改写为 `$名称` | 保持 `/名称` |
 | 账户额度 | `codex app-server` `account/rateLimits/read` | Claude Agent SDK 用量快照 |
 
@@ -185,6 +188,8 @@ npm install
 npm run dev:link
 npm run check          # 类型检查、构建、node --test
 ```
+
+修改前先阅读 [AGENTS.md](AGENTS.md) 中的项目规则（Claude Code 经 `CLAUDE.md` 引用同一份）：交付前运行 `npm run check`，新测试须在改动前的代码上失败，宿主给模型的文字不得混进用户输入，判断 ACP 适配器行为前先读 `node_modules` 中的实现。
 
 构建（`scripts/build.mjs`）把 ACP SDK、`codex-acp` 与 `claude-agent-acp` 打进 `dist/` 并复制许可证到 `dist/licenses`；`@openai/codex` 与 Claude Agent SDK 的平台二进制包不打包，运行时使用用户安装的 CLI。开发、构建和发布均不依赖 codex-host。
 
