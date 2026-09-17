@@ -24,6 +24,8 @@ import {
 
 export interface AcpProfile {
   harnessId: string;
+  /** Whether ACP thought chunks should be exposed as DSH reasoning rows. */
+  showThoughts?: boolean;
   /**
    * The agent program; throws a HarnessError-like `{ code, message }` when its executable is missing. A session's process
    * gets the Host's session instructions for agents that only take them at launch (Codex's developer instructions).
@@ -716,6 +718,7 @@ class AcpSession implements HarnessSession {
         return;
       }
       case 'agent_thought_chunk': {
+        if (this.#profile.showThoughts === false) return;
         if (update.content.type !== 'text') return;
         this.#completeMessage(active, { status: 'succeeded' });
         if (active.thought && update.messageId && active.thoughtId && update.messageId !== active.thoughtId) this.#completeThought(active, { status: 'succeeded' });

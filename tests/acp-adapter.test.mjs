@@ -255,6 +255,21 @@ test('Codex message phases split messages without leaking internal labels to the
   } finally { await adapter.close(); await f.close(); }
 });
 
+test('Codex reasoning summaries are hidden without hiding tools or the final reply', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  const adapter = new AcpAdapter({ profile: { ...f.profile, showThoughts: false }, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-no-thoughts', input: [{ type: 'text', text: 'tool' }] }));
+    const completed = events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item);
+    assert.equal(completed.some(item => item.type === 'reasoning'), false);
+    assert.equal(completed.some(item => item.type === 'commandExecution'), true);
+    assert.equal(completed.at(-1).text, 'tools done');
+    await session.close();
+  } finally { await adapter.close(); await f.close(); }
+});
+
 test('Codex command does not duplicate the preceding progress message as its description', { timeout: 20000 }, async () => {
   const f = await fixture();
   const adapter = new AcpAdapter({ profile: f.profile, environment: {} });

@@ -103,14 +103,14 @@ export class HarnessService extends TypertRemoteService {
     ctx.on('agent/created', async ({ agent }) => { void agent.whenIdle().then(() => this.notifyDelegation(agent.id)).catch(() => {}); });
     ctx.inject(['tools'], scope => {
       scope.tools.register(defineTool({
-        name: 'harness_delegate', description: '用户明确要求把工作（实现、修复、调研、审查等）委派给 Codex 或 Claude Code 时，创建同工作区的可见独立会话。新会话没有本会话历史，prompt 须写全目标、范围、约束和验收要求。完成后自动唤醒来源会话；重试保持 requestId 和所有参数不变。',
-        parameters: { requestId: { type: 'string', required: true }, harness: { type: 'string', enum: ['codex', 'claude-code'], required: true }, prompt: { type: 'string', required: true },
+        name: 'harness_delegate', description: '用户明确要求把工作（实现、修复、调研、审查等）委派给 DSH 原生、Codex 或 Claude Code 时，创建同工作区的可见独立会话。新会话没有本会话历史，prompt 须写全目标、范围、约束和验收要求。创建成功后立即结束当前轮次并等待宿主的完成通知，不要主动轮询；收到通知后再读取结果。重试保持 requestId 和所有参数不变。',
+        parameters: { requestId: { type: 'string', required: true }, harness: { type: 'string', enum: ['dsh', 'codex', 'claude-code'], required: true }, prompt: { type: 'string', required: true },
           title: { type: 'string', description: '可选的简短任务标题，显示在会话列表' } },
         output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
         execute: async (args, exec) => { if (!exec.agent) throw new Error('委派需要来源会话'); return JSON.stringify(await this.delegate(exec.agent.id, args)); },
       }));
       scope.tools.register(defineTool({
-        name: 'harness_delegate_read', description: '分页读取本会话创建的委派结果。首次省略 offset/throughSeq；按 nextOffset 和 throughSeq 读到末尾。',
+        name: 'harness_delegate_read', description: '收到完成通知后，分页读取本会话创建的委派结果；运行中不要定时读取。首次省略 offset/throughSeq；按 nextOffset 和 throughSeq 读到末尾。状态为 not-started 时用相同参数重试创建；interrupted 时进入目标会话处理，不要自动重发。',
         parameters: { sessionId: { type: 'string', required: true }, offset: { type: 'integer' }, throughSeq: { type: 'integer' } },
         output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
         execute: async (args, exec) => { if (!exec.agent) throw new Error('查询需要来源会话'); return JSON.stringify(await this.readDelegation(exec.agent.id, args)); },
@@ -251,7 +251,8 @@ export class HarnessService extends TypertRemoteService {
       return this.view(await this.bindings.read(sessionId));
     }
     this.checks.delete(sessionId);
-    if (binding || !this.fresh(agent)) return this.view(binding);
+    const nativeDelegation = binding ? undefined : await this.bindings.readDelegated(sessionId);
+    if (binding || nativeDelegation || !this.fresh(agent)) return this.view(binding, nativeDelegation?.locked);
     // A fresh session starts on the Harness picked last time; failures fall back to native silently.
     const remembered = (await this.bindings.readDefaults()).harness;
     if (!remembered || remembered === 'dsh' || !agent.session.header.cwd) return this.view();
@@ -274,7 +275,7 @@ export class HarnessService extends TypertRemoteService {
   async delegate(source: string, raw: unknown) {
     const request = delegationRequest.parse(raw);
     const parent = await this.agent(source);
-    if ((await this.bindings.read(source))?.delegation) throw new Error('委派子会话不能再次委派；请返回来源会话继续处理');
+    if (await this.bindings.readDelegated(source)) throw new Error('委派子会话不能再次委派；请返回来源会话继续处理');
     const cwd = parent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
     const hash = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -282,38 +283,69 @@ export class HarnessService extends TypertRemoteService {
     const requestHash = hash(JSON.stringify(request));
     return this.bindings.serial(`delegate:${sessionId}`, async () => {
       try {
-        const existing = await this.bindings.read(sessionId);
-        if (existing && (existing.delegation?.parentSessionId !== source || existing.delegation.requestHash !== requestHash)) {
+        const existing = await this.bindings.readDelegated(sessionId);
+        if (existing && (existing.delegation.parentSessionId !== source || existing.delegation.requestHash !== requestHash)) {
           throw new Error('requestId 已用于不同任务，请为新任务提供新标识');
         }
         // Admission locks before followup; while the runner opens its native session, the inbox is already empty
         // but user/message is not persisted yet. Never resend through that gap (or after uncertain cold admission).
-        if (existing?.locked) {
-          if (this.fresh(await this.agent(sessionId))) throw new Error('上次提交结果未确认，请在目标会话检查，禁止自动重发');
+        // A native agent writes turn/start before claiming its inbox, so a fresh native child never ran the prompt and resending is safe.
+        if (existing?.harness === 'dsh' && !existing.locked && !this.fresh(await this.agent(sessionId))) {
+          existing.locked = true;
+          await this.bindings.writeDelegated(existing);
           return { sessionId, harness: request.harness, accepted: true };
         }
+        if (existing?.locked) {
+          if (!this.fresh(await this.agent(sessionId))) return { sessionId, harness: request.harness, accepted: true };
+          if (existing.harness !== 'dsh') throw new Error('上次提交结果未确认，请在目标会话检查，禁止自动重发');
+        }
         if (!existing) {
-          const inspection = await this.inspection({ version: 1, sessionId, harness: request.harness, cwd, locked: false });
-          if ('error' in inspection) throw new Error(inspection.error);
-          const parentBinding = await this.bindings.read(source);
-          const nativeSandbox = this.ctx.get('sessionProjections')?.stateOf(parent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
-          const permission = !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox]
-            : parentBinding?.harness === request.harness ? parentBinding.permission
-            : parentBinding && parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? FULL_ACCESS[request.harness] : DELEGATED[request.harness];
-          if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
+          let external: { inspection: Ready; permission?: string } | undefined;
+          let preset: string | undefined;
+          const presets = this.ctx.get('permissionPresets');
+          if (request.harness === 'dsh') {
+            if (!presets) throw new Error('DSH 原生权限预设服务不可用');
+            // The native child takes the preset matching the source's permission, never a wider host default.
+            const parentBinding = await this.bindings.read(source);
+            const current = parentBinding ? undefined : presets.current(parent.session);
+            const sandbox = parentBinding ? (parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? 'danger-full-access'
+              : parentBinding.permission === 'read-only' || parentBinding.permission === 'plan' ? 'read-only' : 'workspace-write')
+              : this.ctx.get('sessionProjections')?.stateOf(parent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
+            preset = current && presets.names.includes(current) ? current : presets.names.find(name => presets.resolve(name).sandbox === sandbox);
+            if (!preset) throw new Error('DSH 原生不支持来源会话的权限模式');
+          }
+          if (request.harness !== 'dsh') {
+            const inspection = await this.inspection({ version: 1, sessionId, harness: request.harness, cwd, locked: false });
+            if ('error' in inspection) throw new Error(inspection.error);
+            const parentBinding = await this.bindings.read(source);
+            const nativeSandbox = this.ctx.get('sessionProjections')?.stateOf(parent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
+            const permission = !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox]
+              : parentBinding?.harness === request.harness ? parentBinding.permission
+              : parentBinding && parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? FULL_ACCESS[request.harness] : DELEGATED[request.harness];
+            if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
+            external = { inspection, ...(permission ? { permission } : {}) };
+          }
           const workspace = this.ctx.get('workspaceRegistry')?.list().find(workspace => workspace.sessionIds.includes(parent.id));
           // Hold the same lock as state/select/prompt so the UI cannot auto-bind the new session to its remembered Harness.
           await this.bindings.serial(sessionId, async () => {
             await this.ctx.sessionController.create({ sessionId, ...(workspace ? { workspaceId: workspace.id } : { cwd }) });
             const child = await this.agent(sessionId);
             if (!this.fresh(child)) throw new Error('目标会话已有内容，拒绝重复创建');
-            await this.bind(child, sessionId, request.harness, {
-              permission: permission ? harnessPermissionModeIdSchema.parse(permission) : inspection.permissionModes?.defaultModeId,
+            if (preset) presets!.set(child.session, preset);
+            if (request.harness === 'dsh') await this.bindings.writeDelegated({ version: 1, sessionId, harness: 'dsh', cwd, locked: false, delegation: { parentSessionId: source, requestHash } });
+            else await this.bind(child, sessionId, request.harness, {
+              permission: external?.permission ? harnessPermissionModeIdSchema.parse(external.permission) : external?.inspection.permissionModes?.defaultModeId,
               delegation: { parentSessionId: source, requestHash },
             });
             if (this.ctx.get('sessionTitle')) await this.ctx.sessionController.rename({ sessionId,
-              title: request.title ?? `${request.harness === 'codex' ? 'Codex' : 'Claude Code'} · ${request.prompt.split('\n').find(line => line.trim())!.trim().slice(0, 40)}` });
+              title: request.title ?? `${request.harness === 'dsh' ? 'DSH 原生' : request.harness === 'codex' ? 'Codex' : 'Claude Code'} · ${request.prompt.split('\n').find(line => line.trim())!.trim().slice(0, 40)}` });
           });
+        }
+        if (request.harness === 'dsh') {
+          const native = await this.bindings.readDelegated(sessionId);
+          if (native?.harness !== 'dsh') throw new Error('DSH 原生委派状态缺失');
+          native.locked = true;
+          await this.bindings.writeDelegated(native);
         }
         await this.ctx.sessionController.prompt({ sessionId, requestId: brandString<SessionRequestId>(request.requestId), mode: 'queue',
           content: [{ type: 'text', text: request.prompt }] }, new AbortController().signal);
@@ -327,8 +359,8 @@ export class HarnessService extends TypertRemoteService {
   async readDelegation(source: string, raw: unknown) {
     await this.agent(source);
     const { sessionId, offset, limit, throughSeq } = delegationReadRequest.parse(raw);
-    const binding = await this.bindings.read(sessionId);
-    if (binding?.delegation?.parentSessionId !== source) throw new Error('只能读取由本会话创建的委派会话');
+    const binding = await this.bindings.readDelegated(sessionId);
+    if (binding?.delegation.parentSessionId !== source) throw new Error('只能读取由本会话创建的委派会话');
     const agent = await this.agent(sessionId);
     const all = agent.session.snapshotEvents();
     const boundary = throughSeq ?? all.at(-1)?.seq ?? 0;
@@ -336,8 +368,11 @@ export class HarnessService extends TypertRemoteService {
     const end = events.findLast(event => event.type === 'turn/end');
     const queued = agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0;
     const text = events.flatMap(event => event.type === 'assistant/message' ? event.data.message.content.flatMap(part => part.type === 'text' ? [part.text] : []) : []).join('\n\n');
+    // Native children have no recovery flow: an unstarted prompt is resent by retrying create; an interrupted turn needs the user.
+    const unsettled = binding.harness === 'dsh' ? (binding.locked && !end ? (this.fresh(agent) ? 'not-started' : 'interrupted') : undefined)
+      : binding.pending || (binding.locked && !end) ? 'recovery-required' : undefined;
     return { sessionId, harness: binding.harness, status: agent.status === 'running' ? 'running' : queued ? 'queued'
-      : binding.pending || (binding.locked && !end) ? 'recovery-required' : end?.type === 'turn/end' ? end.data.reason.kind : 'idle',
+      : unsettled ?? (end?.type === 'turn/end' ? end.data.reason.kind : 'idle'),
       outcome: end?.type === 'turn/end' ? end.data.reason : null,
       text: text.slice(offset, offset + limit), truncated: offset + limit < text.length, totalChars: text.length, throughSeq: boundary,
       nextOffset: offset + limit < text.length ? offset + limit : null,
@@ -346,11 +381,11 @@ export class HarnessService extends TypertRemoteService {
 
   private async notifyDelegation(id: string): Promise<void> {
     await this.bindings.serial(`notify:${id}`, async () => {
-      if (!(await this.bindings.read(id))?.delegation) return;
+      if (!(await this.bindings.readDelegated(id))) return;
       const child = await this.agent(id);
       await child.whenIdle();
-      const binding = await this.bindings.read(id);
-      if (!binding?.delegation) return;
+      const binding = await this.bindings.readDelegated(id);
+      if (!binding) return;
       const end = child.session.snapshotEvents().findLast(event => event.type === 'turn/end');
       if (!end || (binding.delegation.notifiedSeq ?? -1) >= end.seq) return;
       const parentId = binding.delegation.parentSessionId;
@@ -366,7 +401,7 @@ export class HarnessService extends TypertRemoteService {
         await this.ctx.sessions.flush(parent.session);
       }
       binding.delegation.notifiedSeq = end.seq;
-      await this.bindings.write(binding);
+      await this.bindings.writeDelegated(binding);
     });
   }
 
@@ -375,7 +410,7 @@ export class HarnessService extends TypertRemoteService {
     return this.bindings.serial(request.sessionId, async () => {
       const agent = await this.agent(request.sessionId);
       const current = await this.bindings.read(request.sessionId);
-      if (current?.locked || !this.fresh(agent)) throw new Error('开始对话后不能切换 Harness，请新建会话');
+      if (await this.bindings.readDelegated(request.sessionId) || current?.locked || !this.fresh(agent)) throw new Error('开始对话后不能切换 Harness，请新建会话');
       const defaults = await this.bindings.readDefaults();
       await this.bindings.writeDefaults({ ...defaults, harness: request.harness });
       let binding: Binding | undefined;
@@ -608,8 +643,8 @@ export class HarnessService extends TypertRemoteService {
     return apiKey ? { baseURL, apiKey, source: provider } : null;
   }
 
-  private view(binding?: Binding) {
-    return { harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? false,
+  private view(binding?: Binding, nativeLocked = false) {
+    return { harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? nativeLocked,
       model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null,
       configs: binding?.configs ?? {}, recoveryRequired: !!binding?.pending };
   }

@@ -5,6 +5,8 @@ import { z } from 'zod';
 import { nativeSessionRefSchema, harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema } from './contracts.js';
 
 export const harnessChoice = z.enum(['codex', 'claude-code']);
+const delegationSchema = z.object({ parentSessionId: z.string(), requestHash: z.string(), notifiedSeq: z.number().int().optional() }).strict();
+type Delegation = z.infer<typeof delegationSchema>;
 const bindingSchema = z.object({
   version: z.literal(1), sessionId: z.string().min(1), harness: harnessChoice,
   cwd: z.string().min(1), locked: z.boolean(),
@@ -17,9 +19,15 @@ const bindingSchema = z.object({
   pending: z.string().optional(),
   pendingNative: z.string().optional(),
   turns: z.array(z.object({ turn: z.number().int(), key: z.string() })).optional(),
-  delegation: z.object({ parentSessionId: z.string(), requestHash: z.string(), notifiedSeq: z.number().int().optional() }).strict().optional(),
+  delegation: delegationSchema.optional(),
 }).strict().refine(value => !value.nativeRef || value.nativeRef.harnessId === value.harness, 'Harness identity mismatch');
 export type Binding = z.infer<typeof bindingSchema>;
+const nativeDelegationSchema = z.object({
+  version: z.literal(1), sessionId: z.string().min(1), harness: z.literal('dsh'), cwd: z.string().min(1), locked: z.boolean(), delegation: delegationSchema,
+}).strict();
+const storedBindingSchema = z.union([bindingSchema, nativeDelegationSchema]);
+type StoredBinding = z.infer<typeof storedBindingSchema>;
+export type DelegatedBinding = (Omit<Binding, 'delegation'> & { delegation: Delegation }) | z.infer<typeof nativeDelegationSchema>;
 
 /** Last model / thinking picked per Harness; seeds the next session that binds to that Harness. */
 const defaultsSchema = z.object({
@@ -35,25 +43,41 @@ export class Bindings {
   private readonly locks = new Map<string, Promise<unknown>>();
   constructor(private readonly root: string) {}
   private path(id: string): string { return join(this.root, `${createHash('sha256').update(id).digest('hex')}.json`); }
-  async read(id: string): Promise<Binding | undefined> {
+  private async stored(id: string): Promise<StoredBinding | undefined> {
     let text: string;
     try { text = await readFile(this.path(id), 'utf8'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
-    const binding = bindingSchema.parse(JSON.parse(text));
+    const binding = storedBindingSchema.parse(JSON.parse(text));
     if (binding.sessionId !== id) throw new Error('Stored DSH session identity mismatch');
     return binding;
   }
+  async read(id: string): Promise<Binding | undefined> {
+    const binding = await this.stored(id);
+    return binding?.harness === 'dsh' ? undefined : binding;
+  }
+  async readDelegated(id: string): Promise<DelegatedBinding | undefined> {
+    const binding = await this.stored(id);
+    return binding?.delegation ? binding as DelegatedBinding : undefined;
+  }
+  /** Callers that can race with native delegation creation must hold serial(sessionId). */
   async write(binding: Binding): Promise<void> {
     const data = bindingSchema.parse(binding);
+    // read() hides native delegation records, so a racing remembered-Harness bind must not replace one.
+    if ((await this.stored(data.sessionId))?.harness === 'dsh') throw new Error('DSH 原生委派会话不能绑定外部 Harness');
     await this.save(this.path(data.sessionId), data);
   }
-  async delegated(): Promise<Binding[]> {
+  async writeDelegated(binding: DelegatedBinding): Promise<void> {
+    const data = storedBindingSchema.parse(binding);
+    if (!data.delegation) throw new Error('Missing delegation metadata');
+    await this.save(this.path(data.sessionId), data);
+  }
+  async delegated(): Promise<DelegatedBinding[]> {
     let names: string[];
     try { names = await readdir(this.root); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []; throw error; }
-    const result: Binding[] = [];
+    const result: DelegatedBinding[] = [];
     for (const name of names) if (/^[a-f0-9]{64}\.json$/.test(name)) {
-      const binding = bindingSchema.parse(JSON.parse(await readFile(join(this.root, name), 'utf8')));
-      if (binding.delegation) result.push(binding);
+      const binding = storedBindingSchema.parse(JSON.parse(await readFile(join(this.root, name), 'utf8')));
+      if (binding.delegation) result.push(binding as DelegatedBinding);
     }
     return result;
   }
