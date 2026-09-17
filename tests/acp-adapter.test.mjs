@@ -86,6 +86,13 @@ const app = agent({ name: 'peer' })
       await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: 'done' }, _meta: { codex: { phase: 'final_answer' } } });
       return end();
     }
+    if (text === 'codex-command') {
+      await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId + '-commentary', content: { type: 'text', text: '先检查当前改动。' }, _meta: { codex: { phase: 'commentary' } } });
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'codex-cmd', title: 'git status --short', kind: 'execute', status: 'in_progress', rawInput: { command: 'git status --short', cwd: '/tmp' } });
+      await update({ sessionUpdate: 'tool_call_update', toolCallId: 'codex-cmd', status: 'completed', rawOutput: { output: '', exitCode: 0 } });
+      await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: '检查完成。' }, _meta: { codex: { phase: 'final_answer' } } });
+      return end();
+    }
     if (text === 'skill-warning') {
       await update({ sessionUpdate: 'session_info_update', _meta: { jetbrains: { air: { version: 1, sessionFailure: {
         id: sessionId + ':notice:1', revision: 1, category: 'unknown', severity: 'warning',
@@ -244,6 +251,20 @@ test('Codex message phases split messages without leaking internal labels to the
       { type: 'agentMessage', text: 'working', phase: undefined },
       { type: 'agentMessage', text: 'done', phase: undefined },
     ]);
+    await session.close();
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('Codex command uses the preceding progress message when ACP provides no description', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  const adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-codex-command', input: [{ type: 'text', text: 'codex-command' }] }));
+    const completed = events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item);
+    assert.deepEqual(completed.map(item => item.type), ['agentMessage', 'commandExecution', 'agentMessage']);
+    assert.equal(completed[1].description, '先检查当前改动。');
     await session.close();
   } finally { await adapter.close(); await f.close(); }
 });
