@@ -7,7 +7,7 @@
 
 ## 宿主给模型的文字
 
-- 宿主给模型的说明（委派能力、进展反馈等）不得混进用户输入。打开会话时通过 `OpenSessionInput.instructions` 交给适配器：配置档有说明通道（`sessionMeta`，例如 Claude Code 的系统提示）就放进去；没有（Codex）才追加在每轮提示末尾，并用空行和用户原话隔开。
+- 宿主给模型的说明（委派能力、进展反馈等）不得混进用户输入。打开会话时通过 `OpenSessionInput.instructions` 交给适配器：Claude Code 放进 `sessionMeta`（系统提示）；Codex 由配置档的 `spawn` 写入 `CODEX_CONFIG.developer_instructions`（codex-acp 在创建和恢复线程时合并该配置）。
 - 这些文字不得影响原生会话标题（只取用户第一个文本块）。轮次标识由各文本块直接拼接后计算，实时轮次与历史回放必须一致；改动发送内容或顺序时，补充或运行“关掉再恢复会话后轮次标识一致”的测试。
 
 ## 第三方适配器

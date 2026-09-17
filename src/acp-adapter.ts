@@ -24,15 +24,16 @@ import {
 
 export interface AcpProfile {
   harnessId: string;
-  /** The agent program; throws a HarnessError-like `{ code, message }` when its executable is missing. */
-  spawn(environment: NodeJS.ProcessEnv): { command: string; args: string[]; env: NodeJS.ProcessEnv };
+  /**
+   * The agent program; throws a HarnessError-like `{ code, message }` when its executable is missing. A session's process
+   * gets the Host's session instructions for agents that only take them at launch (Codex's developer instructions).
+   */
+  spawn(environment: NodeJS.ProcessEnv, instructions?: string): { command: string; args: string[]; env: NodeJS.ProcessEnv };
   /**
    * `_meta` for session/new and session/load: the agent's own options channel (system prompt, SDK options). A profile
-   * that defines it carries the Host's session instructions there; without it they are appended to every prompt.
+   * that defines it carries the Host's session instructions there. Instructions never enter the user's prompt.
    */
   sessionMeta?(kind: 'create' | 'resume', instructions?: string): Record<string, unknown> | undefined;
-  /** Text sent ahead of the first prompt of a created session, for agents without an instruction channel. */
-  firstPromptPrefix?: string;
   /** Ids persisted by the previous, non-ACP adapters mapped onto the agent's ids. */
   legacyPermissionModes?: Record<string, string>;
   legacyThinkingOptions?: Record<string, string>;
@@ -215,8 +216,8 @@ class AcpProcess {
   private constructor(private readonly child: ChildProcess, private readonly connection: ClientConnection, private readonly exited: Promise<void>) {
     this.agent = connection.agent;
   }
-  static async connect(profile: AcpProfile, environment: NodeJS.ProcessEnv, cwd: string, handlers: Handlers): Promise<AcpProcess> {
-    const { command, args, env } = profile.spawn(environment);
+  static async connect(profile: AcpProfile, environment: NodeJS.ProcessEnv, cwd: string, handlers: Handlers, instructions?: string): Promise<AcpProcess> {
+    const { command, args, env } = profile.spawn(environment, instructions);
     // stderr is not a protocol channel and may carry prompt text or credentials; it is discarded unless debugging asks for it.
     const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', process.env.DSH_HARNESS_ACP_STDERR === '1' ? 'inherit' : 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
     child.stderr?.resume();
@@ -443,8 +444,6 @@ class AcpSession implements HarnessSession {
   #active: ActiveTurn | null = null;
   #fault: HarnessError | null = null;
   #closing: Promise<void> | null = null;
-  #prefixPending: boolean;
-  readonly #instructions: string | undefined;
 
   private constructor(options: SessionOptions, process_: AcpProcess, sessionId: string, opened: Opened, catalogs: Catalogs, commands: HarnessSkill[]) {
     this.#profile = options.profile; this.#environment = options.environment; this.#process = process_; this.#sessionId = sessionId; this.#cwd = options.input.cwd; this.#onClosed = options.onClosed;
@@ -452,9 +451,7 @@ class AcpSession implements HarnessSession {
     this.#catalogs = catalogs;
     this.#commands = commands;
     this.capabilities = capabilitiesOf(process_.initialized.agentCapabilities, catalogs);
-    this.#prefixPending = options.input.kind === 'create' && !!options.profile.firstPromptPrefix;
     this.#titlePending = options.input.kind === 'create' && !!options.profile.titleCommand;
-    this.#instructions = options.profile.sessionMeta ? undefined : options.input.instructions;
     this.#state = {
       nativeRef: nativeSessionRefSchema.parse({ harnessId: this.harnessId, nativeSessionId: sessionId, formatVersion: 1 }),
       ...(catalogs.currentModel ? { effectiveModel: modelRef(catalogs.currentModel), resolvedModelLabel: selectOptions(opened.configOptions!.find(option => option.id === catalogs.modelConfigId)!).find(option => option.value === catalogs.currentModel)?.name ?? catalogs.currentModel } : {}),
@@ -483,7 +480,7 @@ class AcpSession implements HarnessSession {
       elicitation: (params, signal) => session ? session.#elicitation(params, signal) : Promise.resolve({ action: 'cancel' }),
       elicitationComplete: params => { if (session) session.#elicitationComplete(params); },
       fault: cause => { if (session) session.#faulted(toError(cause, 'ACP agent exited')); },
-    });
+    }, input.instructions);
     try {
       const meta = profile.sessionMeta?.(input.kind, input.instructions);
       let opened: Opened;
@@ -648,14 +645,12 @@ class AcpSession implements HarnessSession {
     }
     if (this.#titlePending) {
       this.#titlePending = false;
-      // Only the user's own leading text names the session; host blocks appended after it (delegation instructions) never do.
+      // Only the user's own leading text names the session.
       const lead = blocks.find(block => block.type === 'text');
       const title = text(lead?.type === 'text' ? lead.text.split('\n').find(line => line.trim()) : undefined, 60);
       // A local command that hangs must not hold the turn; the timeout cancels the request on the agent.
       if (title) await request(this.#process.agent, 'session/prompt', { sessionId: this.#sessionId, prompt: [{ type: 'text', text: this.#profile.titleCommand!(title) }] }, TITLE_TIMEOUT_MS).catch(() => {});
     }
-    if (this.#prefixPending) { blocks.unshift({ type: 'text', text: this.#profile.firstPromptPrefix! }); this.#prefixPending = false; }
-    if (this.#instructions) blocks.push({ type: 'text', text: this.#instructions });
     const transcript = this.#transcript.begin(promptText(blocks));
     const active: ActiveTurn = { hostId: command.turnId, transcript, cancelled: false, tools: new Map(), announced: new Map(), compaction: new Map(), interactions: new Map(), done: Promise.withResolvers() };
     this.#active = active;

@@ -83,6 +83,12 @@ export async function codexTurnOutcomes(command: string, environment: NodeJS.Pro
   });
 }
 
+/** A CODEX_CONFIG the user already set keeps its settings; its own developer instructions come first. */
+function withDeveloperInstructions(raw: string | undefined, instructions: string): string {
+  const config = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+  const own = typeof config.developer_instructions === 'string' && config.developer_instructions ? `${config.developer_instructions}\n\n` : '';
+  return JSON.stringify({ ...config, developer_instructions: own + instructions });
+}
 /**
  * Both agents would otherwise spend a model request on naming every new session; DSH keeps its own titles, so the
  * native thread is named after the first prompt line instead.
@@ -90,9 +96,10 @@ export async function codexTurnOutcomes(command: string, environment: NodeJS.Pro
 export function codexProfile(options: { command: string; environment: NodeJS.ProcessEnv }): AcpProfile {
   return {
     harnessId: 'codex',
-    spawn: environment => ({ command: process.execPath, args: [bundled('codex-acp.mjs')], env: { ...environment, CODEX_PATH: options.command } }),
-    // codex-acp exposes no developer-instruction channel; the first prompt of a new thread carries the feedback contract.
-    firstPromptPrefix: `${feedbackInstructions}\n\n`,
+    // codex-acp reads no instructions from session/new, but merges CODEX_CONFIG into every thread/start and thread/resume; as
+    // developer instructions the feedback contract and Host instructions stay out of the user's messages and survive compaction.
+    spawn: (environment, instructions) => ({ command: process.execPath, args: [bundled('codex-acp.mjs')],
+      env: { ...environment, CODEX_PATH: options.command, CODEX_CONFIG: withDeveloperInstructions(environment.CODEX_CONFIG, feedbackInstructions + (instructions ?? '')) } }),
     legacyPermissionModes: { readOnly: 'read-only', workspaceWrite: 'agent', dangerFullAccess: 'agent-full-access' },
     skillName: (command: AvailableCommand) => command.name.startsWith('$') ? command.name.slice(1) : command.name,
     // Codex injects a skill only for its own `$skill` mention; the local `/name` spelling of other commands stays as is.

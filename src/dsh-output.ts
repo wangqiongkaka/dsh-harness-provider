@@ -14,22 +14,31 @@ import type { HostItem, HostItemSnapshot, HostItemUpdate } from './contracts.js'
 /** Projects external activities into DSH's existing message/tool/stream contracts. */
 export class DshOutput {
   private readonly active = new Map<string, {
-    item: HostItem; stream: AssistantStreamAccumulator; attemptId: ReturnType<typeof LlmAttemptId>; index: number;
+    item: HostItem; stream: AssistantStreamAccumulator; attemptId: ReturnType<typeof LlmAttemptId>; index: number; position: { turn: number; step: number };
   }>();
   /** The last agent message waits for the turn's usage so the native stats fold sees tokens on the message that produced them. */
   private deferred?: { data: SessionEventMap['assistant/message']; attemptId: ReturnType<typeof LlmAttemptId>; index: number };
+  /** Whether the open step already holds an assistant message, whether one of them is prose, and its calls still awaiting results. */
+  private stepMessages = false;
+  private stepProse = false;
+  private openCalls = 0;
   constructor(private readonly ctx: Context, private readonly agent: Agent,
-    private readonly position: { turn: number; step: number },
+    private position: { turn: number; step: number },
     private readonly revision: () => number,
     private readonly source: () => { provider: string; model: string }) {}
+
+  /** The step the next message lands in; the caller closes this one when the turn ends. */
+  get step(): number { return this.position.step; }
 
   start(item: HostItem): void {
     if (this.active.has(item.itemId)) throw new Error('Duplicate Harness item');
     this.flush();
+    const prose = item.type === 'agentMessage' || item.type === 'reasoning';
+    if (prose || (item.type !== 'contextCompaction' && item.type !== 'subagentDelegation')) this.enter(prose);
     const entry = { item: structuredClone(item), stream: new AssistantStreamAccumulator(),
-      attemptId: LlmAttemptId(`harness:${randomUUID()}`), index: 0 };
+      attemptId: LlmAttemptId(`harness:${randomUUID()}`), index: 0, position: this.position };
     this.active.set(item.itemId, entry);
-    if (item.type === 'agentMessage' || item.type === 'reasoning') {
+    if (prose) {
       this.emit({ type: 'start', attemptId: entry.attemptId, revision: this.revision(), ...this.position });
       this.push(item.itemId, { type: 'block-start', index: 0, blockType: item.type === 'reasoning' ? 'reasoning' : 'text' });
       if (item.text) this.push(item.itemId, { type: item.type === 'reasoning' ? 'reasoning-delta' : 'text-delta', index: 0, text: item.text });
@@ -39,6 +48,7 @@ export class DshOutput {
         message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [],
       }, { surfaceOp: 'append' });
       this.agent.session.append('tool/call', { ...this.position, callId: call.id, name: call.name, arguments: call.arguments });
+      this.openCalls++;
     }
   }
 
@@ -67,7 +77,7 @@ export class DshOutput {
       this.push(item.itemId, { type: 'finish', reason: interrupted ? { kind: 'aborted', failure: { code: 'UNKNOWN', message: 'Harness item interrupted' } } : { kind: 'stop' } });
       this.flush();
       this.deferred = { attemptId: entry.attemptId, index: entry.index, data: {
-        ...this.position, message: createAssistantMessage({ source: this.source(), content: [block] }),
+        ...entry.position, message: createAssistantMessage({ source: this.source(), content: [block] }),
         stream: [...entry.stream.snapshot()], ...(interrupted ? { interrupted: true as const } : {}),
       } };
       if (item.type === 'reasoning') this.flush();
@@ -80,6 +90,7 @@ export class DshOutput {
       }), { surfaceOp: 'append' });
     } else {
       this.flush();
+      this.openCalls--;
       this.agent.session.append('tool/result', { ...this.position,
         message: createToolResultMessage({ callId: ToolCallId(item.itemId),
           content: await toolOutput(this.ctx, item), isError: snapshot.outcome.status !== 'succeeded' }),
@@ -93,11 +104,14 @@ export class DshOutput {
   /** A Harness question as DSH's native `ask_user_question` row: waiting while the user answers, then the answers or the verdict. */
   async question<T extends { answers: readonly unknown[] }>(id: string, questions: readonly unknown[], ask: () => Promise<T>): Promise<T> {
     this.flush();
+    this.enter(false);
     const call = { type: 'tool-call' as const, id: ToolCallId(`question:${id}`), name: 'ask_user_question', arguments: JSON.stringify({ questions }) };
     this.agent.session.append('assistant/message', { ...this.position, message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [] }, { surfaceOp: 'append' });
     this.agent.session.append('tool/call', { ...this.position, callId: call.id, name: call.name, arguments: call.arguments });
-    const result = (text: string, error?: { name: string; code: string }) => this.agent.session.append('tool/result', { ...this.position,
-      message: createToolResultMessage({ callId: call.id, content: [{ type: 'text', text }], isError: !!error }), ...(error ? { error } : {}) }, { surfaceOp: 'append' });
+    this.openCalls++;
+    const position = this.position;
+    const result = (text: string, error?: { name: string; code: string }) => (this.openCalls--, this.agent.session.append('tool/result', { ...position,
+      message: createToolResultMessage({ callId: call.id, content: [{ type: 'text', text }], isError: !!error }), ...(error ? { error } : {}) }, { surfaceOp: 'append' }));
     try {
       const answer = await ask();
       result(JSON.stringify({ answers: answer.answers }));
@@ -129,6 +143,20 @@ export class DshOutput {
     const event = this.agent.session.append('assistant/message', { ...pending.data, ...(usage ? { usage } : {}) }, { surfaceOp: 'append' });
     this.emit({ type: 'end', attemptId: pending.attemptId, revision: this.revision(), index: pending.index,
       outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } });
+  }
+  /**
+   * DSH shows a step's latest assistant message only, so prose and whatever follows prose each open a new step once every
+   * call of the current step has its result (a step closes with no call pending); consecutive calls share one step.
+   */
+  private enter(prose: boolean): void {
+    if (this.stepMessages && (prose || this.stepProse) && this.openCalls === 0) {
+      this.agent.session.append('step/end', this.position);
+      this.position = { ...this.position, step: this.position.step + 1 };
+      this.agent.session.append('step/start', this.position);
+      this.stepMessages = this.stepProse = false;
+    }
+    this.stepMessages = true;
+    this.stepProse ||= prose;
   }
   private push(id: string, chunk: StreamChunk): void {
     const entry = this.active.get(id)!;

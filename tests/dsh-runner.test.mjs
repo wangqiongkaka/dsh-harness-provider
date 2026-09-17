@@ -102,6 +102,10 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   const answers=agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='text');
   assert.deepEqual(answers.map(e=>e.data.usage),[undefined,{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0},undefined,{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0}]);
   assert.equal(frames.filter(f=>f.type==='end').length,6);
+  // DSH's step row shows only a step's latest assistant message, so prose is never followed by another message in its step.
+  const messages=agent.session.snapshotEvents().filter(e=>e.type==='assistant/message');
+  assert.deepEqual(messages.filter((e,i)=>e.data.message.content[0].type!=='tool-call' && messages.slice(i+1).some(later=>later.data.turn===e.data.turn && later.data.step===e.data.step)).map(e=>e.data.message.content[0].text),[]);
+  assert.deepEqual(messages.filter(e=>e.data.turn===1).map(e=>[e.data.step,e.data.message.content[0].type]),[[1,'reasoning'],[2,'text'],[3,'tool-call'],[4,'text']]);
   assert.deepEqual(frames.filter(f=>f.type==='chunk' && f.chunk.type==='reasoning-delta').map(f=>f.chunk.text),['Checking the workspace','Checking the workspace']);
   assert.deepEqual(agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='reasoning').map(e=>e.data.message.content[0].text),['Checking the workspace','Checking the workspace']);
   assert.equal((await bindings.read(id)).pending,undefined);
@@ -199,7 +203,7 @@ test('delegation instructions go to the adapter, not the user input, so a leadin
   agent.followup(createUserMessage({content:[{type:'text',text:'/review now'}],source:{kind:'user'}}));await agent.whenIdle();
   const [input]=native.inputs;
   assert.deepEqual(input,[{type:'text',text:'/review now'}]); // the user's words reach the adapter untouched
-  // The adapter places the instructions (system prompt or prompt end); a leading blank line keeps them apart from the user's last line.
+  // The adapter places the instructions (system prompt or developer instructions); a leading blank line keeps them apart from the feedback contract.
   assert.match(opened[0].instructions,/^\n\n\[DSH 会话能力，由宿主提供\]/);
   await adapter.close();
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}

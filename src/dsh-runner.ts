@@ -85,7 +85,7 @@ export class DshRunner {
     const delegation = binding.delegation ? undefined : this.delegation;
     let live = this.live.get(agent.id);
     if (!live) {
-      // The adapter places the instructions: an agent instruction channel when it has one, else after the user's input each turn.
+      // The adapter places the instructions: the agent's system prompt, or Codex's developer instructions at launch.
       const hints = { ...(delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) }, instructions: delegationInstructions() } : {}),
         ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
         ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(binding.configs ? { configValues: binding.configs } : {}),
@@ -204,7 +204,7 @@ export class DshRunner {
       turnAbort.abort();
       await Promise.allSettled(questions);
       await cancelWork;
-      try { await output.finish(); } finally { agent.session.append('step/end', { turn, step }); }
+      try { await output.finish(); } finally { agent.session.append('step/end', { turn, step: output.step }); }
     }
   }
 

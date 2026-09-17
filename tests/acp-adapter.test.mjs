@@ -31,7 +31,7 @@ const update = (update) => ctx.notify('session/update', { sessionId, update });
 const commands = () => update({ sessionUpdate: 'available_commands_update', availableCommands: [{ name: '$probe-skill', description: 'probe', input: null }, { name: 'status', description: 'Show status', input: { hint: 'none' } }] });
 let counter = 0;
 const app = agent({ name: 'peer' })
-  .onRequest('initialize', ({ params, client }) => { ctx = client; note({ initialize: params.clientCapabilities }); return { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true }, sessionCapabilities: { fork: {}, resume: {}, close: {} } }, authMethods: [], _meta: { steering: { supported: true } } }; })
+  .onRequest('initialize', ({ params, client }) => { ctx = client; note({ initialize: params.clientCapabilities, instructions: process.env.PEER_INSTRUCTIONS ?? null }); return { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true }, sessionCapabilities: { fork: {}, resume: {}, close: {} } }, authMethods: [], _meta: { steering: { supported: true } } }; })
   .onRequest('session/new', async ({ params, client }) => { ctx = client; note({ new: params }); setTimeout(commands, 10); return { sessionId, ...opened() }; })
   .onRequest('session/load', async ({ params, client }) => {
     ctx = client;
@@ -54,7 +54,7 @@ const app = agent({ name: 'peer' })
     ctx = client; cancelled = false;
     const raw = params.prompt.filter(b => b.type === 'text').map(b => b.text).join('');
     note({ prompt: raw });
-    const text = (raw.startsWith('PREFIX ') ? raw.slice(7) : raw).replace('[HOST]', '');
+    const text = raw.replace('[HOST]', '');
     const image = params.prompt.find(b => b.type === 'image');
     if (text.startsWith('/rename ')) return { stopReason: 'end_turn' };
     const turn = ++counter, userId = 'u' + turn, replyId = 'm' + turn;
@@ -130,9 +130,10 @@ async function fixture() {
   const env = { PATH: process.env.PATH, PEER_HISTORY: join(root, 'history.json'), PEER_LOG: join(root, 'log.jsonl') };
   const profile = {
     harnessId: 'codex',
-    spawn: environment => ({ command: process.execPath, args: ['--input-type=module', '-e', peer], env: { ...env, ...environment } }),
+    // A profile without a session instruction channel takes the Host instructions at launch (Codex's developer instructions).
+    spawn: (environment, instructions) => ({ command: process.execPath, args: ['--input-type=module', '-e', peer],
+      env: { ...env, ...environment, ...(instructions === undefined ? {} : { PEER_INSTRUCTIONS: 'PREFIX' + instructions }) } }),
     sessionMeta: (_kind, instructions) => ({ systemPrompt: { append: 'PREFIX' + (instructions ?? '') } }),
-    firstPromptPrefix: 'PREFIX ',
     titleCommand: title => `/rename ${title}`,
     skillInvocation: command => command.name.startsWith('$') ? command.name : `/${command.name}`,
     legacyPermissionModes: { workspaceWrite: 'agent', dangerFullAccess: 'agent-full-access' },
@@ -192,7 +193,7 @@ test('turns stream text, apply hints, steer, cancel, and carry cumulative usage 
     value(await session.execute({ type: 'turn.start', turnId: 'host-1', input: [{ type: 'text', text: 'first' }, { type: 'text', text: '[HOST]' }] }));
     let seen = await until(output, 'turn.completed');
     assert.equal(events(seen, 'item.updated')[0].update.text, 'reply:first');
-    assert.deepEqual((await f.notes()).filter(note => note.prompt).map(note => note.prompt), ['/rename first', 'PREFIX first[HOST]']); // the session is named from the user's own block only, then the prefix rides on the first prompt
+    assert.deepEqual((await f.notes()).filter(note => note.prompt).map(note => note.prompt), ['/rename first', 'first[HOST]']); // the session is named from the user's own block only; the prompt carries the blocks verbatim
     const started = events(seen, 'turn.started')[0];
     assert.match(started.nativeTurnRef.nativeTurnKey, /^[0-9a-f]{16}\.1$/);
     assert.equal(events(seen, 'turn.completed')[0].nativeTurnRef.nativeTurnKey, started.nativeTurnRef.nativeTurnKey);
@@ -226,7 +227,7 @@ test('turns stream text, apply hints, steer, cancel, and carry cumulative usage 
     }
     assert.equal(state.resolvedModelLabel, 'Mini');
     const snapshot = value(await session.readSnapshot());
-    assert.deepEqual(snapshot.turns.map(turn => [turn.input[0].text, turn.outcome.status]), [['PREFIX first[HOST]', 'succeeded'], ['second', 'succeeded'], ['$probe-skill go\nmore', 'succeeded'], ['/status now', 'succeeded'], ['', 'succeeded'], ['wait', 'succeeded'], ['cancel', 'unknown']]);
+    assert.deepEqual(snapshot.turns.map(turn => [turn.input[0].text, turn.outcome.status]), [['first[HOST]', 'succeeded'], ['second', 'succeeded'], ['$probe-skill go\nmore', 'succeeded'], ['/status now', 'succeeded'], ['', 'succeeded'], ['wait', 'succeeded'], ['cancel', 'unknown']]);
     await session.close();
   } finally { await adapter.close(); await f.close(); }
 });
@@ -261,7 +262,7 @@ test('Codex skill context budget warning is hidden without hiding the reply', { 
 
 test('permissions, forms (secret + custom answers), URL steps, failures and tool activity project onto the host contract', { timeout: 20000 }, async () => {
   const f = await fixture();
-  // An agent without an instruction channel (Codex) gets the Host instructions after the user's input on every prompt.
+  // An agent without a session instruction channel (Codex) gets the Host instructions at launch, never in the prompt.
   const adapter = new AcpAdapter({ profile: { ...f.profile, sessionMeta: undefined }, environment: {} });
   try {
     const session = value(await adapter.open({ kind: 'create', cwd: f.root, instructions: '[HOST]' }));
@@ -276,7 +277,8 @@ test('permissions, forms (secret + custom answers), URL steps, failures and tool
     let seen = await until(output, 'turn.completed');
     assert.equal(events(seen, 'interaction.closed')[0].reason, 'responded');
     assert.equal(events(seen, 'item.completed')[0].snapshot.item.text, 'approved:allow-session');
-    assert.deepEqual((await f.notes()).filter(note => note.prompt).map(note => note.prompt), ['/rename approve', 'PREFIX approve[HOST]']);
+    assert.deepEqual((await f.notes()).filter(note => note.prompt).map(note => note.prompt), ['/rename approve', 'approve']);
+    assert.equal((await f.notes()).find(note => note.initialize).instructions, 'PREFIX[HOST]');
     value(await session.execute({ type: 'turn.start', turnId: 'host-b', input: [{ type: 'text', text: 'form' }] }));
     pending = await interaction(output);
     assert.equal(pending.type, 'question'); assert.equal(pending.title, 'Choose region');
@@ -357,9 +359,9 @@ test('a new process resumes through session/load, rebuilds the same turn keys, a
   } finally { await adapter.close(); await f.close(); }
 });
 
-test('without an instruction channel, turn keys stay the same across processes with the prefix and Host instructions in every prompt', { timeout: 20000 }, async () => {
+test('launch-time instructions keep every prompt and its replay the user\'s own, and a resumed process receives them again', { timeout: 20000 }, async () => {
   const f = await fixture();
-  // Codex: the feedback prefix rides on the first prompt and the Host instructions on every prompt; history replays both verbatim.
+  // Codex: the Host instructions ride on the process launch, so history replays only what the user wrote.
   const profile = { ...f.profile, sessionMeta: undefined };
   const live = async (session, output, text, turnId) => {
     value(await session.execute({ type: 'turn.start', turnId, input: [{ type: 'text', text }] }));
@@ -380,19 +382,12 @@ test('without an instruction channel, turn keys stay the same across processes w
   try {
     const session = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref, instructions: '[HOST]' }));
     const snapshot = value(await session.readSnapshot());
-    assert.deepEqual(snapshot.turns.map(turn => turn.input[0].text), ['PREFIX first[HOST]', 'first[HOST]', 'second[HOST]']);
+    assert.deepEqual(snapshot.turns.map(turn => turn.input[0].text), ['first', 'first', 'second']);
     assert.deepEqual(snapshot.turns.map(turn => turn.nativeTurnRef.nativeTurnKey), keys);
-    // A resumed session appends the instructions again but never the first-prompt prefix, and its new key replays the same.
     keys.push(await live(session, session.outputs[Symbol.asyncIterator](), 'first', 'host-3'));
     await session.close();
-  } finally { await adapter.close(); }
-  adapter = new AcpAdapter({ profile, environment: {} });
-  try {
-    const session = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref }));
-    const turns = value(await session.readSnapshot()).turns;
-    assert.equal(turns.at(-1).input[0].text, 'first[HOST]');
-    assert.deepEqual(turns.map(turn => turn.nativeTurnRef.nativeTurnKey), keys);
-    await session.close();
+    assert.deepEqual((await f.notes()).filter(note => note.initialize).map(note => note.instructions), ['PREFIX[HOST]', 'PREFIX[HOST]']);
+    assert.deepEqual((await f.notes()).filter(note => note.prompt && !note.prompt.startsWith('/rename')).map(note => note.prompt), ['first', 'first', 'second', 'first']);
   } finally { await adapter.close(); await f.close(); }
 });
 
