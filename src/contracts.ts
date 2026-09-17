@@ -138,7 +138,7 @@ export interface HostSubagentState {
   background: boolean; status: HostSubagentStatus; resultSummary?: string;
 }
 export type HostItem =
-  | { type: 'agentMessage'; itemId: HostItemId; text: string; phase?: 'commentary' | 'final_answer' }
+  | { type: 'agentMessage'; itemId: HostItemId; text: string }
   | { type: 'reasoning'; itemId: HostItemId; text: string }
   | { type: 'contextCompaction'; itemId: HostItemId }
   | { type: 'commandExecution'; itemId: HostItemId; command: string; description?: string; cwd?: string; output?: string; outputTruncated?: boolean; exitCode?: number | null; durationMs?: number }

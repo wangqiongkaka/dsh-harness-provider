@@ -56,6 +56,7 @@ const REQUEST_TIMEOUT_MS = 60_000;
 const CLOSE_TIMEOUT_MS = 5_000;
 const TITLE_TIMEOUT_MS = 30_000;
 const TOOL_OUTPUT_LIMIT = 64_000;
+const SKILLS_CONTEXT_BUDGET_NOTICE = 'Skill descriptions were shortened to fit the skills context budget.';
 const record = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown, max = 500): string | undefined => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
 const error = (code: HarnessError['code'], message: string, retryable = false): HarnessError => ({ code, message, retryable });
@@ -711,8 +712,7 @@ class AcpSession implements HarnessSession {
         if (active.message && update.messageId && active.messageId && update.messageId !== active.messageId) this.#completeMessage(active, { status: 'succeeded' });
         this.#completeThought(active, { status: 'succeeded' });
         if (!active.message) {
-          const phase = record(record(update._meta).codex).phase;
-          active.message = { type: 'agentMessage', itemId: newItemId(), text: '', ...(phase === 'commentary' || phase === 'final_answer' ? { phase } : {}) };
+          active.message = { type: 'agentMessage', itemId: newItemId(), text: '' };
           active.messageId = update.messageId ?? undefined;
           this.#emit({ type: 'item.started', turnId, item: active.message });
         }
@@ -809,9 +809,9 @@ class AcpSession implements HarnessSession {
       }
       case 'session_info_update': {
         const notice = text(record(record(record(update._meta).codex).error).message, 500) ?? (() => { const failure = sessionFailure(update._meta); return failure && `${failure.title}${failure.details ? `\n${failure.details}` : ''}`; })();
-        if (!notice) return;
+        if (!notice || notice.startsWith(SKILLS_CONTEXT_BUDGET_NOTICE)) return;
         this.#completeMessage(active, { status: 'succeeded' });
-        const item: HostItem = { type: 'agentMessage', itemId: newItemId(), text: notice, phase: 'commentary' };
+        const item: HostItem = { type: 'agentMessage', itemId: newItemId(), text: notice };
         this.#emit({ type: 'item.started', turnId, item });
         this.#emit({ type: 'item.completed', turnId, snapshot: { item, outcome: { status: 'succeeded' } } });
         return;

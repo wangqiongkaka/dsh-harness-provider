@@ -81,6 +81,18 @@ const app = agent({ name: 'peer' })
       await reply('form:' + answer.action); return end();
     }
     if (text === 'url') { const answer = await client.request('elicitation/create', { sessionId, mode: 'url', elicitationId: 'e1', message: 'Sign in', url: 'https://example.com/auth' }); note({ url: answer }); await reply('url:' + answer.action); return end(); }
+    if (text === 'phases') {
+      await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId + '-commentary', content: { type: 'text', text: 'working' }, _meta: { codex: { phase: 'commentary' } } });
+      await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: 'done' }, _meta: { codex: { phase: 'final_answer' } } });
+      return end();
+    }
+    if (text === 'skill-warning') {
+      await update({ sessionUpdate: 'session_info_update', _meta: { jetbrains: { air: { version: 1, sessionFailure: {
+        id: sessionId + ':notice:1', revision: 1, category: 'unknown', severity: 'warning',
+        title: 'Skill descriptions were shortened to fit the skills context budget. Disable unused skills or plugins to leave more room for the rest.', actions: [],
+      } } } } });
+      await reply('reply:' + text); return end();
+    }
     if (text === 'tool') {
       await update({ sessionUpdate: 'agent_thought_chunk', messageId: 'th1', content: { type: 'text', text: 'thinking' } });
       // Claude streams command before the required description; the client must not freeze the incomplete input.
@@ -215,6 +227,34 @@ test('turns stream text, apply hints, steer, cancel, and carry cumulative usage 
     assert.equal(state.resolvedModelLabel, 'Mini');
     const snapshot = value(await session.readSnapshot());
     assert.deepEqual(snapshot.turns.map(turn => [turn.input[0].text, turn.outcome.status]), [['PREFIX first[HOST]', 'succeeded'], ['second', 'succeeded'], ['$probe-skill go\nmore', 'succeeded'], ['/status now', 'succeeded'], ['', 'succeeded'], ['wait', 'succeeded'], ['cancel', 'unknown']]);
+    await session.close();
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('Codex message phases split messages without leaking internal labels to the host', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  const adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-phases', input: [{ type: 'text', text: 'phases' }] }));
+    const completed = events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item);
+    assert.deepEqual(completed.map(item => ({ type: item.type, text: item.text, phase: item.phase })), [
+      { type: 'agentMessage', text: 'working', phase: undefined },
+      { type: 'agentMessage', text: 'done', phase: undefined },
+    ]);
+    await session.close();
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('Codex skill context budget warning is hidden without hiding the reply', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  const adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-skill-warning', input: [{ type: 'text', text: 'skill-warning' }] }));
+    assert.deepEqual(events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item.text), ['reply:skill-warning']);
     await session.close();
   } finally { await adapter.close(); await f.close(); }
 });
