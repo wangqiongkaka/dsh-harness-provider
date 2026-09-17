@@ -359,11 +359,11 @@ const commandOf = (raw: unknown): string | undefined => {
 };
 const hasInput = (value: unknown) => value !== undefined && value !== null && (typeof value !== 'object' || Object.keys(record(value)).length > 0);
 const jsonOf = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value ?? null)) as JsonValue;
-function toolItem(call: acp.ToolCall | acp.ToolCallUpdate, progress?: string): HostItemOf<'commandExecution'> | HostItemOf<'toolExecution'> {
+function toolItem(call: acp.ToolCall | acp.ToolCallUpdate): HostItemOf<'commandExecution'> | HostItemOf<'toolExecution'> {
   const command = call.kind === 'execute' ? commandOf(call.rawInput) : undefined;
   const title = text(call.title, 200);
   // Claude Code's Bash carries the user-facing purpose in `description`; the activity card shows it ahead of the command.
-  const description = text(record(call.rawInput).description, 200) ?? (title && title !== command ? title : undefined) ?? progress;
+  const description = text(record(call.rawInput).description, 200) ?? (title && title !== command ? title : undefined);
   if (command) return { type: 'commandExecution', itemId: hostItemIdSchema.parse(call.toolCallId), command,
     ...(description ? { description } : {}), ...(text(record(call.rawInput).cwd, 1000) ? { cwd: text(record(call.rawInput).cwd, 1000)! } : {}) };
   const native = dshTool(call);
@@ -729,7 +729,6 @@ class AcpSession implements HarnessSession {
         return;
       }
       case 'tool_call': case 'tool_call_update': {
-        const progress = text(active.message?.text, 200);
         this.#completeMessage(active, { status: 'succeeded' });
         this.#completeThought(active, { status: 'succeeded' });
         let item = active.tools.get(update.toolCallId);
@@ -754,7 +753,7 @@ class AcpSession implements HarnessSession {
           if (!hasInput(merged.rawInput) && !ended) return;
           if (!merged.title && !merged.name) return;
           active.announced.delete(update.toolCallId);
-          item = toolItem({ ...merged, title: merged.title ?? merged.name ?? 'tool' }, progress);
+          item = toolItem({ ...merged, title: merged.title ?? merged.name ?? 'tool' });
           active.tools.set(update.toolCallId, item);
           this.#emit({ type: 'item.started', turnId, item });
         }

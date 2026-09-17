@@ -255,7 +255,7 @@ test('Codex message phases split messages without leaking internal labels to the
   } finally { await adapter.close(); await f.close(); }
 });
 
-test('Codex command uses the preceding progress message when ACP provides no description', { timeout: 20000 }, async () => {
+test('Codex command does not duplicate the preceding progress message as its description', { timeout: 20000 }, async () => {
   const f = await fixture();
   const adapter = new AcpAdapter({ profile: f.profile, environment: {} });
   try {
@@ -264,7 +264,7 @@ test('Codex command uses the preceding progress message when ACP provides no des
     value(await session.execute({ type: 'turn.start', turnId: 'host-codex-command', input: [{ type: 'text', text: 'codex-command' }] }));
     const completed = events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item);
     assert.deepEqual(completed.map(item => item.type), ['agentMessage', 'commandExecution', 'agentMessage']);
-    assert.equal(completed[1].description, '先检查当前改动。');
+    assert.equal(completed[1].description, undefined);
     await session.close();
   } finally { await adapter.close(); await f.close(); }
 });
