@@ -121,6 +121,34 @@ const app = agent({ name: 'peer' })
       await update({ sessionUpdate: 'usage_update', used: 4200, size: 200000 });
       await reply('tools done'); return end();
     }
+    if (text === 'claude-subagent') {
+      // Claude Code (no native subagent sessions): the Agent call stays in the main session, the subagent's own events carry its id.
+      const tag = { claudeCode: { parentToolUseId: 'agent-1' } };
+      const updates = [
+        { sessionUpdate: 'tool_call', toolCallId: 'agent-1', name: 'Agent', title: 'Find auth', kind: 'think', status: 'pending', rawInput: { description: 'Find auth', prompt: 'Search auth code', subagent_type: 'Explore' }, _meta: { claudeCode: { toolName: 'Agent', subagent: true } } },
+        { sessionUpdate: 'agent_thought_chunk', messageId: 'sub-th', content: { type: 'text', text: 'looking' }, _meta: tag },
+        { sessionUpdate: 'agent_message_chunk', messageId: 'sub-m', content: { type: 'text', text: 'Searching ' }, _meta: tag },
+        { sessionUpdate: 'agent_message_chunk', messageId: 'sub-m', content: { type: 'text', text: 'now' }, _meta: tag },
+        { sessionUpdate: 'tool_call', toolCallId: 'sub-grep', name: 'Grep', title: 'grep auth', kind: 'search', status: 'pending', rawInput: { pattern: 'auth' }, _meta: { claudeCode: { toolName: 'Grep', parentToolUseId: 'agent-1' } } },
+        { sessionUpdate: 'tool_call_update', toolCallId: 'sub-grep', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'src/auth.ts' } }], _meta: tag },
+        { sessionUpdate: 'tool_call_update', toolCallId: 'agent-1', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'auth lives in src/auth.ts' } }], _meta: { claudeCode: { toolName: 'Agent' } } },
+      ];
+      for (const entry of updates) await update(entry);
+      await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: 'found it' } });
+      entries.push({ input: raw, userId, reply: 'found it', replyId, updates }); save(entries);
+      return end();
+    }
+    if (text === 'codex-subagent') {
+      // Codex with native subagent sessions: lifecycle on the root session, the child's own events and approvals under its id.
+      const child = entry => ctx.notify('session/update', { sessionId: 'child-1', update: entry });
+      await update({ sessionUpdate: 'subagent_spawned', subagentSessionId: 'child-1', name: 'explorer', task: 'Map the repo', capabilities: {} });
+      await child({ sessionUpdate: 'agent_message_chunk', messageId: 'c-m', content: { type: 'text', text: 'mapping' } });
+      const answer = await client.request('session/request_permission', { sessionId: 'child-1', toolCall: { toolCallId: 'c-cmd', title: 'ls', kind: 'execute', status: 'pending', rawInput: { command: 'ls' } },
+        options: [{ optionId: 'yes', name: 'Yes', kind: 'allow_once' }, { optionId: 'no', name: 'No', kind: 'reject_once' }] });
+      await child({ sessionUpdate: 'tool_call', toolCallId: 'c-cmd', title: 'ls', kind: 'execute', status: 'completed', rawInput: { command: 'ls' }, rawOutput: { output: 'src\\n' } });
+      await update({ sessionUpdate: 'subagent_state_update', subagentSessionId: 'child-1', state: 'completed' });
+      await reply('child-permission:' + (answer.outcome.optionId ?? answer.outcome.outcome)); return end();
+    }
     if (text === 'fail') {
       await update({ sessionUpdate: 'session_info_update', _meta: { codex: { error: { message: 'Reconnecting... 1/5', willRetry: true } } } });
       return { stopReason: 'end_turn', _meta: { jetbrains: { air: { version: 1, sessionFailure: { id: 'x', revision: 1, category: 'limit', severity: 'error', title: 'Usage limit reached', actions: [] } } } } };
@@ -353,6 +381,53 @@ test('permissions, forms (secret + custom answers), URL steps, failures and tool
     assert.deepEqual(events(seen, 'turn.completed')[0].outcome, { status: 'failed', error: { code: 'nativeFailure', message: 'Usage limit reached', retryable: true } });
     await session.close();
   } finally { await adapter.close(); await f.close(); }
+});
+
+test('Harness subagents leave the main transcript for the sidebar: Claude Code tagged events (live and replayed) and Codex child sessions with their approvals', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  const expected = [{ id: 'agent-1', parentId: null, name: 'Find auth', task: 'Search auth code', status: 'completed', entries: [
+    { kind: 'thought', text: 'looking' }, { kind: 'message', text: 'Searching now' }, { kind: 'tool', title: 'grep auth', status: 'completed', output: 'src/auth.ts' },
+  ] }];
+  let adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  let ref;
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    ref = session.initialState.nativeRef;
+    const initialize = (await f.notes()).find(note => note.initialize).initialize;
+    assert.equal(initialize._meta['subagent-transcript'], true);
+    assert.deepEqual(initialize._meta.jetbrains.air.capabilities, ['sessionFailure', 'recommendedValue']);
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-sub', input: [{ type: 'text', text: 'claude-subagent' }] }));
+    const completed = events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item);
+    assert.deepEqual(completed.map(item => [item.type, item.toolName ?? item.text]), [['toolExecution', 'Agent'], ['agentMessage', 'found it']]);
+    assert.deepEqual(session.subagents(), expected);
+    await session.close();
+  } finally { await adapter.close(); }
+  adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref }));
+    assert.deepEqual(session.subagents(), expected);
+    assert.deepEqual(value(await session.readSnapshot()).turns[0].items.map(snapshot => snapshot.item.type), ['toolExecution', 'agentMessage']);
+    await session.close();
+  } finally { await adapter.close(); await f.close(); }
+
+  const g = await fixture();
+  adapter = new AcpAdapter({ profile: { ...g.profile, nativeSubagents: true }, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: g.root }));
+    assert.deepEqual((await g.notes()).find(note => note.initialize).initialize._meta.jetbrains.air.capabilities, ['sessionFailure', 'recommendedValue', 'nativeSubagentSessions']);
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-codex-sub', input: [{ type: 'text', text: 'codex-subagent' }] }));
+    const pending = await interaction(output);
+    assert.equal(pending.title, 'ls');
+    value(await session.execute({ type: 'interaction.respond', interactionId: pending.interactionId, response: { type: 'approval', actionId: 'yes' } }));
+    const completed = events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item);
+    assert.deepEqual(completed.map(item => item.text), ['child-permission:yes']);
+    assert.deepEqual(session.subagents(), [{ id: 'child-1', parentId: null, name: 'explorer', task: 'Map the repo', status: 'completed', entries: [
+      { kind: 'message', text: 'mapping' }, { kind: 'tool', title: 'ls', status: 'completed', output: 'src' },
+    ] }]);
+    await session.close();
+  } finally { await adapter.close(); await g.close(); }
 });
 
 test('a new process resumes through session/load, rebuilds the same turn keys, and forks at a message boundary', { timeout: 20000 }, async () => {

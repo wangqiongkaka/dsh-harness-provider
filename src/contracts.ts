@@ -137,6 +137,15 @@ export interface HostSubagentState {
   subagentId: string; nativeSubagentId?: string; description: string; role?: string; model?: string; reasoningEffort?: string;
   background: boolean; status: HostSubagentStatus; resultSummary?: string;
 }
+/** A Harness-internal subagent as the sidebar shows it; `parentId` names the subagent that spawned it. */
+export interface HarnessSubagent {
+  id: string; parentId: string | null; name: string; task: string | null;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  entries: HarnessSubagentEntry[];
+}
+export type HarnessSubagentEntry =
+  | { kind: 'message' | 'thought'; text: string }
+  | { kind: 'tool'; title: string; status: 'running' | 'completed' | 'failed'; output: string | null };
 export type HostItem =
   | { type: 'agentMessage'; itemId: HostItemId; text: string }
   | { type: 'reasoning'; itemId: HostItemId; text: string }
@@ -182,6 +191,8 @@ export interface HarnessSession {
   /** The agent's current slash-menu entries when it publishes them per session. */
   listSkills?(): Promise<HarnessSkill[]>;
   readSnapshot?(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>>;
+  /** Subagents the Harness ran in this session (live and replayed), oldest first, with what each one said and did. */
+  subagents?(): HarnessSubagent[];
   execute(command: TurnStartCommand): Promise<HarnessResult<TurnStartAccepted>>;
   execute(command: TurnCancelCommand): Promise<HarnessResult<TurnCancelAccepted>>;
   execute(command: InteractionRespondCommand): Promise<HarnessResult<InteractionRespondAccepted>>;

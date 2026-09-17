@@ -15,11 +15,17 @@ const {startMessagesFixture}=await import(pathToFileURL(join(reference,'packages
 const codex=await startResponsesFixture([{kind:'complete',text:'Codex native first'},{kind:'complete',text:'Codex native second'},{kind:'complete',text:'Codex native resumed'},{kind:'complete',text:'Codex after rollback'}]);
 const skillsProbe=process.env.DSH_SKILLS_PROBE === '1';
 const delegationProbe=process.env.DSH_DELEGATION_PROBE === '1';
+const subagentProbe=process.env.DSH_SUBAGENT_PROBE === '1';
 const quote=text=>"'"+text.replaceAll("'","'\\''")+"'";
 const delegateCommand=[process.execPath,resolve('dist/delegate-cli.mjs'),'create',JSON.stringify({requestId:'web-review',harness:'codex',prompt:'Review this workspace without editing'})].map(quote).join(' ');
 const claude=await startMessagesFixture(delegationProbe
  ? {kind:'tool-use',toolName:'Bash',input:{command:delegateCommand,description:'Create visible Codex review'},finalText:'Claude native reply'}
+ : subagentProbe ? {kind:'tool-use',toolName:'Agent',input:{description:'Find fixture files',prompt:'List the fixture files',subagent_type:'general-purpose'},finalText:'Claude native reply'}
  : {kind:'complete',text:'Claude native reply'});
+// DSH's own subagent: the parent calls the subagent tool, the child replies, then the parent finishes.
+// DeepSeek's default Messages protocol posts to {DEEPSEEK_BASE_URL}/v1/messages, which the Messages fixture serves.
+const deepseek=subagentProbe ? await startMessagesFixture({kind:'tool-use',toolName:'subagent',
+ input:{description:'Scan workspace natively',prompt:'List the workspace files',run_in_background:false},finalText:'DSH child reply'}) : undefined;
 // Both fixtures answer with one fixed message id; the proxies make ids unique so message-addressed forks (rollback) are exact.
 const codexProxy=await delayedFixture(codex.baseUrl),claudeProxy=await delayedFixture(claude.baseUrl);
 await mkdir('.cache',{recursive:true});
@@ -50,7 +56,8 @@ const env={PATH:process.env.PATH,HOME:root,DSH_HOME:dshHome,DSH_TELEMETRY_DISABL
  CODEXHOST_CLAUDE_COMMAND:process.env.CLAUDE_COMMAND ?? '/opt/homebrew/bin/claude',CLAUDE_CONFIG_DIR:claudeHome,
  OPENAI_API_KEY:'fixture-only',ANTHROPIC_API_KEY:'fixture-only',ANTHROPIC_BASE_URL:claudeProxy.baseUrl,
  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:'1',
- DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',NO_PROXY:'127.0.0.1,localhost'};
+ DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',NO_PROXY:'127.0.0.1,localhost',
+ ...(deepseek ? {DEEPSEEK_BASE_URL:deepseek.baseUrl,DEEPSEEK_API_KEY:'fixture-only'} : {})};
 const pkg=JSON.parse(await readFile('package.json','utf8'));
 const tar=resolve(process.env.DSH_PLUGIN_TAR ?? `${pkg.name}-${pkg.version}.tgz`);
 const hash=createHash('sha256').update(await readFile(tar)).digest('hex').slice(0,12);
@@ -148,6 +155,48 @@ try{
    assert.ok(requests.some(request=>JSON.stringify(request.body).includes(harness==='codex'?'input_image':'"type":"image"')),'native model request must contain image');
    console.log('PASS: '+label+' composer image upload reaches the native model request');
   }
+ }else if(subagentProbe){
+  const sessionId='claude-subagent-probe';
+  await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId});
+  await rpc('harness/select',{sessionId,harness:'claude-code'});
+  await rpc('harness/selectPermission',{sessionId,permission:'bypassPermissions'});
+  await page.reload();await dismiss();
+  await rpc('session/prompt',{sessionId,requestId:'subagent-web',mode:'queue',content:[{type:'text',text:'Explore with a subagent'}]});
+  await expect.poll(async()=>(await rpc('harness/subagents',{sessionId})).map(agent=>agent.status).join(),{timeout:90000}).toBe('completed');
+  const [agent]=await rpc('harness/subagents',{sessionId});
+  assert.equal(agent.name,'Find fixture files',JSON.stringify(agent));
+  assert.ok(agent.entries.some(entry=>entry.kind==='message'&&entry.text.includes('Claude native reply')),JSON.stringify(agent));
+  console.log('PASS: real Claude Code Agent call surfaced as a completed subagent with its own reply');
+  await page.getByRole('button',{name:'Open right sidebar',exact:true}).click();
+  await page.locator('[data-sidebar-right-guide-entry="harness-subagents"]').click();
+  const head=page.locator('.hp-sub-head').filter({hasText:'Find fixture files'});
+  await expect(head).toContainText('Completed',{timeout:10000});
+  await head.click();
+  await expect(page.locator('.hp-sub-entries').getByText('Claude native reply',{exact:true})).toBeVisible();
+  await page.screenshot({path:resolve('.cache/subagents-web.png')});
+  console.log('PASS: the right sidebar Subagents tab shows the subagent status and, expanded, its content');
+  const nativeId='dsh-subagent-probe';
+  await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:nativeId});
+  await rpc('harness/select',{sessionId:nativeId,harness:'dsh'}); // a fresh session would otherwise adopt the Claude Code pick above
+  await rpc('session/prompt',{sessionId:nativeId,requestId:'dsh-subagent-web',mode:'queue',content:[{type:'text',text:'Scan with a DSH subagent'}]});
+  await expect.poll(async()=>(await rpc('harness/subagents',{sessionId:nativeId})).map(agent=>agent.status).join(),{timeout:90000}).toBe('completed')
+   .catch(error=>{throw new Error(error.message+'\nmock requests: '+JSON.stringify(deepseek.requests.map(request=>[request.path,(request.body.tools??[]).map(tool=>tool.name)])));});
+  const [native]=await rpc('harness/subagents',{sessionId:nativeId});
+  assert.equal(native.name,'Scan workspace natively',JSON.stringify(native));
+  assert.ok(native.entries.some(entry=>entry.kind==='message'&&entry.text.includes('DSH child reply')),JSON.stringify(native));
+  console.log('PASS: a DSH-native subagent surfaced with its status and reply, read without loading the parent-owned child Agent');
+  // The title model is the fixture too, so the native session is listed under its fixed reply.
+  await page.locator('[role="treeitem"]').filter({hasText:'DSH child reply'}).first().click();
+  const expand=page.getByRole('button',{name:'Open right sidebar',exact:true});
+  if(await expand.isVisible())await expand.click();
+  const entry=page.locator('[data-sidebar-right-guide-entry="harness-subagents"]');
+  if(await entry.isVisible().catch(()=>false))await entry.click();
+  const nativeHead=page.locator('.hp-sub-head').filter({hasText:'Scan workspace natively'});
+  await expect(nativeHead).toContainText('Completed',{timeout:10000});
+  await nativeHead.click();
+  await expect(page.locator('.hp-sub-entries').getByText('DSH child reply',{exact:true})).toBeVisible();
+  await page.screenshot({path:resolve('.cache/dsh-subagents-web.png')});
+  console.log('PASS: the Subagents tab shows DSH-native subagents in the live sidebar');
  }else if(delegationProbe){
   const sessionId='claude-delegation-parent';
   await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId});
@@ -166,6 +215,11 @@ try{
   assert.equal((await rpc('harness/state',{sessionId:childId})).harness,'codex');
   assert.equal((await rpc('harness/state',{sessionId})).harness,'claude-code');
   await expect.poll(()=>claude.requests.some(request=>JSON.stringify(request.body.messages).includes(`委派会话 ${childId} 已结束`)),{timeout:60000}).toBe(true);
+  const badge=page.locator('[role="treeitem"][data-hp-harness="codex"][data-hp-delegated]>span:first-child').first();
+  await badge.waitFor({state:'attached'});
+  assert.notEqual(await badge.evaluate(el=>getComputedStyle(el,'::after').backgroundImage),'none');
+  await expect(page.locator('[role="treeitem"][data-hp-harness="claude-code"]:not([data-hp-delegated])')).not.toHaveCount(0);
+  console.log('PASS: the delegated Codex session carries a badge on its logo; the source session does not');
   await page.screenshot({path:resolve('.cache/delegation-web.png')});
   console.log('PASS: real Claude Code tool created a delegated Codex session in the live DSH sidebar; selecting it displayed its native reply');
   console.log('PASS: delegation completion automatically woke the source Claude Code session with the result-reading instruction');
@@ -228,12 +282,19 @@ try{
  await send('Claude after restart','Claude native reply');
  assert.ok(claude.requests.some(request=>JSON.stringify(request.body.messages).includes('Claude first marker')&&JSON.stringify(request.body.messages).includes('Claude after restart')));
  console.log('PASS: DSH restart and the original session list resume Claude Code with prior context');
+ for(const harness of ['codex','claude-code']){
+  const cell=page.locator(`[role="treeitem"][data-hp-harness="${harness}"]>span:first-child`).first();
+  await cell.waitFor({state:'attached'});
+  assert.notEqual(await cell.evaluate(el=>{const style=getComputedStyle(el,'::before');return style.maskImage||style.webkitMaskImage;}),'none');
+ }
+ await page.screenshot({path:resolve('.cache/sidebar-marks.png')});
+ console.log('PASS: sidebar session rows carry their Harness logo');
  }
  console.log('Native replies came only from local fixture servers; no real model endpoint was used.');
 } catch(error){
  if(page){console.error((await page.locator('body').innerText()).slice(-7000));await page.screenshot({path:resolve('.cache/web-failure.png')});}
  console.error(logs.replace(/token=[\w-]+/g,'token=[redacted]'));throw error;
 } finally {
- await browser?.close();await stop();await Promise.all([codexProxy.close(),claudeProxy.close(),codex.close(),claude.close()]);
+ await browser?.close();await stop();await Promise.all([codexProxy.close(),claudeProxy.close(),codex.close(),claude.close(),deepseek?.close()]);
  if(process.env.KEEP_DSH_PROBE)console.log('Retained test directory:',root);else await rm(root,{recursive:true,force:true});
 }

@@ -21,14 +21,18 @@ import type {} from '@deepseek-ai/dsh-attachment';
 import type {} from '@deepseek-ai/dsh-client-file-upload';
 import type {} from '@deepseek-ai/dsh-session-title';
 import type {} from '@deepseek-ai/dsh-agent-presets/types';
+import type {} from '@deepseek-ai/dsh-subagent';
+import type {} from '@deepseek-ai/dsh-session-query';
+import type { SessionEvent } from '@deepseek-ai/dsh-session';
+import type { HarnessSubagent } from './contracts.js';
 import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, type HarnessAccountSnapshot } from './contracts.js';
 import { z } from 'zod';
 import { Bindings, type Binding } from './bindings.js';
-import { AcpAdapter } from './acp-adapter.js';
+import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT } from './acp-adapter.js';
 import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
-import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest } from './remote.js';
+import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest } from './delegation.js';
 
 export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions', 'attachments', 'fileUploads'];
@@ -60,6 +64,31 @@ const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>
 const FULL_ACCESS: Record<Binding['harness'], string> = { codex: 'agent-full-access', 'claude-code': 'bypassPermissions' };
 /** Cross-harness delegation below full access still lets the child work: Codex auto-approves, Claude Code accepts edits. */
 const DELEGATED: Record<Binding['harness'], string> = { codex: 'agent', 'claude-code': 'acceptEdits' };
+
+/** One DSH child session as a sidebar subagent: its first prompt is the task, its messages, reasoning and tool calls the entries. */
+export function nativeSubagent(child: { id: string; parentId: string | null; label?: string | undefined; running: boolean }, events: readonly SessionEvent[]): HarnessSubagent {
+  const entries: HarnessSubagent['entries'] = [], tools = new Map<string, Extract<HarnessSubagent['entries'][number], { kind: 'tool' }>>();
+  let task: string | null = null, end: string | undefined;
+  const textOf = (blocks: readonly { type: string; text?: unknown }[]) => blocks.flatMap(block => block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n');
+  for (const event of events) {
+    if (event.type === 'user/message' && task === null) task = textOf(event.data.content).trim() || null;
+    else if (event.type === 'assistant/message') for (const block of event.data.message.content) {
+      if ((block.type === 'text' || block.type === 'reasoning') && 'text' in block && typeof block.text === 'string' && block.text.trim()) entries.push({ kind: block.type === 'text' ? 'message' : 'thought', text: block.text });
+      else if (block.type === 'tool-call') {
+        const args = (() => { try { return JSON.parse(block.arguments) as Record<string, unknown>; } catch { return {}; } })();
+        const detail = ['description', 'command', 'file_path', 'path', 'pattern', 'query', 'url'].map(key => args[key]).find(value => typeof value === 'string' && value.trim());
+        const entry = { kind: 'tool' as const, title: (detail ? `${block.name} · ${String(detail)}` : block.name).slice(0, 200), status: 'running' as const, output: null };
+        tools.set(block.id, entry); entries.push(entry);
+      }
+    } else if (event.type === 'tool/result') {
+      const result = event.data.message.content[0], entry = tools.get(result.toolCallId);
+      if (entry) Object.assign(entry, { status: result.isError ? 'failed' : 'completed', output: textOf(result.content).slice(0, SUBAGENT_OUTPUT_LIMIT) || null });
+    } else if (event.type === 'turn/end') end = event.data.reason.kind;
+  }
+  const status = child.running || end === undefined ? 'running' : end === 'completed' || end === 'max-tokens' ? 'completed' : end === 'aborted' ? 'cancelled' : 'failed';
+  if (status !== 'running') for (const entry of tools.values()) if (entry.status === 'running') entry.status = 'failed';
+  return { id: child.id, parentId: child.parentId, name: child.label ?? task?.split('\n')[0]!.slice(0, 80) ?? 'Subagent', task, status, entries: entries.slice(-SUBAGENT_ENTRY_LIMIT) };
+}
 
 export class HarnessService extends TypertRemoteService {
   readonly bindings: Bindings;
@@ -240,6 +269,15 @@ export class HarnessService extends TypertRemoteService {
     await this.agent(sessionId);
     this.runner.secrets.answer(sessionId, id, { type: 'question', answers, ...(cancelled ? { cancelled } : {}) });
     return { accepted: true };
+  }
+
+  async harnesses(raw: unknown) {
+    const { sessionIds } = harnessesRequest.parse(raw);
+    return Object.fromEntries(await Promise.all(sessionIds.map(async id => {
+      const delegated = await this.bindings.readDelegated(id).catch(() => undefined);
+      const harness = delegated?.harness ?? (await this.bindings.read(id).catch(() => undefined))?.harness ?? 'dsh';
+      return [id, { harness, delegated: !!delegated }] as const;
+    })));
   }
 
   async state(raw: unknown) {
@@ -595,6 +633,30 @@ export class HarnessService extends TypertRemoteService {
     const usage = live?.usage ?? (await this.bindings.read(sessionId))?.usage;
     if (!usage || (usage.contextUsedTokens === undefined && usage.totalTokens === undefined)) return null;
     return { contextUsedTokens: usage.contextUsedTokens ?? null, contextWindowTokens: usage.contextWindowTokens ?? null, totalTokens: usage.totalTokens ?? null };
+  }
+
+  async subagents(raw: unknown): Promise<HarnessSubagent[]> {
+    const { sessionId } = address.parse(raw);
+    await this.agent(sessionId);
+    if (await this.bindings.read(sessionId)) return this.runner.live.get(sessionId)?.session.subagents?.() ?? [];
+    return this.nativeSubagents(sessionId);
+  }
+
+  /** DSH's own subagents: the durable descendant tree, each child's log observed read-only (its parent owns the child Agent). */
+  // ponytail: every poll re-lists the tree and observes each child (cold reads are cached by revision); add a change feed if trees grow large.
+  private async nativeSubagents(sessionId: string): Promise<HarnessSubagent[]> {
+    const runtime = this.ctx.get('subagents'), query = this.ctx.get('sessionQuery');
+    if (!runtime || !query) return [];
+    const children = (await runtime.listDescendants(SessionId(sessionId))).flatMap(entry => entry.kind === 'child' ? [entry] : []).slice(-SUBAGENT_LIMIT);
+    return Promise.all(children.map(async child => {
+      const running = this.ctx.agents.get(child.id)?.status === 'running';
+      let events: readonly SessionEvent[] = [];
+      try {
+        const observation = await query.observeSession(child.id, { projectionMode: 'none' });
+        try { events = observation.events; } finally { observation[Symbol.dispose](); }
+      } catch { /* an unreadable child still lists, without content */ }
+      return nativeSubagent({ id: child.id, parentId: child.depth > 1 ? child.parentId : null, label: child.label, running }, events);
+    }));
   }
 
   async quota(raw: unknown): Promise<Quota> {

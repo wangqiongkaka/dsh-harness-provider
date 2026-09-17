@@ -7,8 +7,9 @@ import type {} from '@deepseek-ai/dsh-client-locale/client';
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client';
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
-import { contribution, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema } from './remote.js';
+import { contribution, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema } from './remote.js';
 import type { z } from 'zod';
 
 type State = z.infer<typeof stateSchema>;
@@ -16,6 +17,7 @@ type Models = z.infer<typeof modelsSchema>;
 type Usage = z.infer<typeof usageSchema>;
 type Quota = z.infer<typeof quotaSchema>;
 type SecretStatus = z.infer<typeof secretStatusSchema>;
+type Subagents = z.infer<typeof subagentsSchema>;
 type Api = {
   recover(request: {sessionId: string; action: 'check' | 'unlock'}): Promise<RemoteResult<State & {detail: string}>>;
   secretStatus(request: {sessionId: string}): Promise<RemoteResult<SecretStatus>>;
@@ -28,7 +30,9 @@ type Api = {
   selectPermission(request: {sessionId: string; permission: string}): Promise<RemoteResult<State>>;
   selectConfig(request: {sessionId: string; configId: string; value: string | boolean}): Promise<RemoteResult<State>>;
   usage(request: {sessionId: string}): Promise<RemoteResult<Usage>>;
+  harnesses(request: {sessionIds: string[]}): Promise<RemoteResult<Record<string, {harness: State['harness']; delegated: boolean}>>>;
   quota(request: {sessionId: string}): Promise<RemoteResult<Quota>>;
+  subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
 };
 const zh = {
   harness: '选择 Harness', model: '选择 Harness 模型', native: 'DSH 原生', defaultModel: '默认模型',
@@ -47,6 +51,9 @@ const zh = {
   'window.five_hour': '5 小时', 'window.seven_day': '本周', 'window.weekly': '本周', 'window.monthly': '本月', 'window.unknown': '额度',
   'window.5-hour window': '5 小时', 'window.7-day window': '本周', 'window.Opus · 7-day': 'Opus 本周', 'window.Sonnet · 7-day': 'Sonnet 本周',
   'window.OAuth apps · 7-day': 'OAuth 应用本周',
+  subagents: '子代理', subagentsDescription: '查看子代理的运行状态和内容',
+  subagentsEmpty: '当前会话还没有子代理活动。Codex / Claude Code 会话在本次运行中打开后才会显示其子代理。', subagentNoActivity: '暂无内容',
+  'subagent.running': '运行中', 'subagent.completed': '已完成', 'subagent.failed': '失败', 'subagent.cancelled': '已取消',
 };
 const en: Record<keyof typeof zh,string> = {
   harness:'Select Harness', model:'Select Harness model', native:'Native DSH', defaultModel:'Default model',
@@ -65,6 +72,9 @@ const en: Record<keyof typeof zh,string> = {
   'window.five_hour':'5-hour', 'window.seven_day':'Weekly', 'window.weekly':'Weekly', 'window.monthly':'Monthly', 'window.unknown':'Quota',
   'window.5-hour window':'5-hour', 'window.7-day window':'Weekly', 'window.Opus · 7-day':'Opus weekly', 'window.Sonnet · 7-day':'Sonnet weekly',
   'window.OAuth apps · 7-day':'OAuth apps weekly',
+  subagents:'Subagents', subagentsDescription:'Status and activity of subagents',
+  subagentsEmpty:'No subagent activity in this session yet. Codex / Claude Code subagents appear once the session is open in this run.', subagentNoActivity:'Nothing yet',
+  'subagent.running':'Running', 'subagent.completed':'Completed', 'subagent.failed':'Failed', 'subagent.cancelled':'Cancelled',
 };
 type Key = keyof typeof zh;
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -92,7 +102,7 @@ interface Injected {
   selectConfig(id: string, configId: string, value: string | boolean): Promise<State>;
   usage(id: string): Promise<Usage>;
   quota(id: string): Promise<Quota>;
-  changed(id: string, external: boolean): void;
+  changed(id: string, harness: State['harness']): void;
   /** Fires after any selection made in a sibling seat; seats reload their state on it. */
   subscribe(listener: () => void): () => void;
 }
@@ -351,7 +361,7 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, cha
   useEffect(() => {
     const version = ++generation.current;
     setError(undefined);
-    void read(sessionId).then(next => { if (generation.current === version) { setState(next); changed(sessionId, next.harness !== 'dsh'); } })
+    void read(sessionId).then(next => { if (generation.current === version) { setState(next); changed(sessionId, next.harness); } })
       .catch(error => { if (generation.current === version) setError(error instanceof Error ? error.message : String(error)); });
     return () => { generation.current++; };
   }, [sessionId,summary?.running,read,changed]);
@@ -361,7 +371,7 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, cha
     try {
       const result = await select(sessionId, next);
       if (generation.current !== version) return;
-      setState(result); changed(sessionId, result.harness !== 'dsh');
+      setState(result); changed(sessionId, result.harness);
     } catch(error) { if (generation.current === version) setError(error instanceof Error ? error.message : String(error)); }
     finally { if (generation.current === version) setBusy(false); }
   }
@@ -540,6 +550,36 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
   </div>;
 }
 
+// ---- right sidebar tab: Harness subagents, newest first; polled only while the tab is on screen ----
+type SubagentsTabProps = PropsRuntime<'sidebar.right.pane.tab'> & PropsLocale<'harness'> & { load(): Promise<Subagents> };
+export function SubagentsTab({ useTabInfo, load, t }: SubagentsTabProps) {
+  const { tab } = useTabInfo();
+  const list = usePolled(() => tab.visible ? load() : Promise.reject(), 2_000, [tab.visible]);
+  const [open, setOpen] = useState<string>();
+  if (!list) return <div className="hp-sub-empty">{t('loading')}</div>;
+  if (!list.length) return <div className="hp-sub-empty">{t('subagentsEmpty')}</div>;
+  return <div className="hp-sub">
+    {[...list].reverse().map(agent => {
+      const expanded = open === agent.id;
+      return <section key={agent.id} className="hp-sub-agent">
+        <button type="button" className="hp-sub-head" aria-expanded={expanded} onClick={() => setOpen(expanded ? undefined : agent.id)}>
+          <span className={`hp-sub-dot hp-sub-${agent.status}`} aria-hidden />
+          <span className="hp-sub-name">{agent.name}</span>
+          <span className="hp-sub-status">{t(`subagent.${agent.status}`)}</span>
+          <Chevron open={expanded} />
+        </button>
+        {agent.task && <p className={expanded ? 'hp-sub-task' : 'hp-sub-task hp-sub-clamp'}>{agent.task}</p>}
+        {expanded && <div className="hp-sub-entries">
+          {!agent.entries.length && <p className="hp-muted">{t('subagentNoActivity')}</p>}
+          {agent.entries.map((entry, index) => entry.kind === 'tool'
+            ? <details key={index} className="hp-sub-tool"><summary><span className={`hp-sub-dot hp-sub-${entry.status}`} aria-hidden />{entry.title}</summary>{entry.output && <pre>{entry.output}</pre>}</details>
+            : <p key={index} className={entry.kind === 'thought' ? 'hp-sub-text hp-muted' : 'hp-sub-text'}>{entry.text}</p>)}
+        </div>}
+      </section>;
+    })}
+  </div>;
+}
+
 function ExternalOnboarding({ complete }: PropsRuntime<'settings.onboarding'>) {
   useEffect(() => { complete(); }, [complete]);
   return null;
@@ -607,8 +647,50 @@ const styles = `
 .hp-row dd{margin:0;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
 .hp-section{margin-top:12px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}
 .hp-foot{margin-top:10px;padding-top:8px;border-top:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-caption)}
+.hp-sub{display:flex;flex-direction:column;gap:8px;height:100%;box-sizing:border-box;overflow:auto;padding:12px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary)}
+.hp-sub-empty{padding:24px 16px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-tertiary);text-align:center}
+.hp-sub-agent{border-radius:12px;background:var(--dsw-alias-interactive-bg-hover)}
+.hp-sub-head{display:flex;align-items:center;gap:8px;width:100%;min-height:36px;padding:6px 10px;border:none;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.hp-sub-name{flex:1;min-width:0;overflow:hidden;font-weight:500;text-overflow:ellipsis;white-space:nowrap}
+.hp-sub-status{flex:none;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.hp-sub-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-label-dimmed)}
+.hp-sub-running{background:var(--dsw-static-blue-450);animation:hp-pulse 1.2s ease-in-out infinite}.hp-sub-completed{background:var(--dsw-alias-state-success-primary)}.hp-sub-failed{background:var(--dsw-alias-state-error-primary)}
+@keyframes hp-pulse{50%{opacity:.35}}
+.hp-sub-task{margin:0;padding:0 10px 8px 26px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-word}
+.hp-sub-clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.hp-sub-entries{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px;border-top:.5px solid var(--dsw-alias-border-l2)}
+.hp-sub-text{margin:0;white-space:pre-wrap;word-break:break-word}
+.hp-sub-tool summary{display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.hp-sub-tool pre{max-height:240px;margin:4px 0 0;padding:8px;overflow:auto;border-radius:8px;background:var(--dsw-specific-menu);font-size:12px;line-height:18px;white-space:pre-wrap;word-break:break-word}
 .hp-secret{position:absolute;bottom:100%;left:0;z-index:110;max-height:60vh;overflow:auto;width:340px;padding:16px;border-radius:12px;background:var(--dsw-specific-menu);box-shadow:var(--dsw-elevation-prominent);font-size:14px}.hp-secret input,.hp-secret select{display:block;box-sizing:border-box;width:100%;margin-top:4px}.hp-secret p{font-size:12px}.hp-alert{max-width:360px;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
 `;
+
+// ---- sidebar marks: host session rows expose no slot, so rows get a data attribute and CSS draws the logo in the empty status cell ----
+// Brand marks: DeepSeek whale from dsh-client-ui-primitives FishLogo; OpenAI and Claude from Simple Icons (CC0).
+const FISH_LOGO_PATH = 'M22.9168 1.43018C22.6713 1.31018 22.5658 1.53918 22.4223 1.65519C22.3733 1.69269 22.3318 1.74169 22.2903 1.78669C21.9317 2.1697 21.5127 2.42121 20.9657 2.39121C20.1657 2.34621 19.4827 2.59771 18.8787 3.20973C18.7502 2.45521 18.3236 2.0047 17.6746 1.71569C17.3351 1.56568 16.9916 1.41518 16.7536 1.08867C16.5876 0.856163 16.5421 0.597155 16.4591 0.341647C16.4061 0.187643 16.3536 0.0301382 16.1761 0.00363739C15.9836 -0.0263635 15.9081 0.135141 15.8326 0.270145C15.5306 0.822162 15.4136 1.43018 15.4251 2.0462C15.4516 3.43174 16.0366 4.53527 17.1991 5.3203C17.3311 5.4103 17.3651 5.5003 17.3236 5.63181C17.2441 5.90231 17.1501 6.16482 17.0671 6.43533C17.0141 6.60784 16.9351 6.64584 16.7501 6.57033C16.1121 6.30383 15.5611 5.90931 15.074 5.4328C14.2475 4.63328 13.5 3.75075 12.568 3.05973C12.349 2.89822 12.13 2.74822 11.9034 2.60522C10.9524 1.68169 12.028 0.923165 12.277 0.833162C12.5375 0.739159 12.3675 0.41615 11.5259 0.42015C10.6844 0.42365 9.91439 0.705658 8.93286 1.08117C8.78935 1.13767 8.63835 1.17867 8.48384 1.21267C7.59332 1.04367 6.66829 1.00617 5.70226 1.11517C3.88321 1.31768 2.43016 2.1777 1.36213 3.64575C0.0790928 5.4103 -0.222916 7.41536 0.146595 9.50642C0.535106 11.7105 1.66014 13.535 3.38869 14.9616C5.18125 16.4406 7.24581 17.1657 9.60138 17.0266C11.0319 16.9441 12.6245 16.7526 14.421 15.2321C14.874 15.4576 15.3496 15.5476 16.1381 15.6151C16.7456 15.6716 17.3306 15.5851 17.7836 15.4911C18.4931 15.3411 18.4441 14.6841 18.1876 14.5636C16.1081 13.595 16.5646 13.9891 16.1496 13.67C17.2061 12.42 18.8202 10.1979 19.3182 7.17235C19.3672 6.83834 19.4297 6.36783 19.4222 6.09732C19.4182 5.93231 19.4562 5.86831 19.6447 5.84931C20.1657 5.78931 20.6712 5.64681 21.1357 5.3913C22.4833 4.65528 23.0268 3.44624 23.1548 1.9972C23.1738 1.77569 23.1508 1.54668 22.9168 1.43018ZM11.1749 14.4736C9.15936 12.889 8.18184 12.3675 7.77832 12.39C7.40081 12.4125 7.46881 12.8445 7.55182 13.126C7.63882 13.404 7.75182 13.5955 7.91033 13.8396C8.01983 14.0011 8.09533 14.2411 7.80083 14.4216C7.15181 14.8231 6.02327 14.2866 5.97027 14.2601C4.65673 13.4865 3.5587 12.4655 2.78467 11.069C2.03715 9.72493 1.60314 8.28289 1.53164 6.74384C1.51264 6.37233 1.62214 6.24082 1.99215 6.17332C2.47916 6.08332 2.98118 6.06432 3.46769 6.13582C5.52476 6.43633 7.27581 7.35586 8.74385 8.8129C9.58188 9.64243 10.2159 10.634 10.8689 11.6025C11.5634 12.631 12.3105 13.611 13.262 14.4146C13.598 14.6961 13.866 14.9101 14.1225 15.0681C13.349 15.1546 12.058 15.1731 11.1749 14.4746L11.1749 14.4736ZM12.141 8.25988C12.141 8.09488 12.273 7.96338 12.439 7.96338C12.4765 7.96338 12.5105 7.97088 12.541 7.98188C12.5825 7.99688 12.6205 8.01938 12.6505 8.05338C12.7035 8.10588 12.7335 8.18088 12.7335 8.25988C12.7335 8.42489 12.6015 8.55639 12.4355 8.55639C12.2695 8.55639 12.141 8.42489 12.141 8.25988ZM15.1415 9.79893C14.949 9.87793 14.7565 9.94544 14.5715 9.95294C14.2845 9.96794 13.9715 9.85143 13.8015 9.70893C13.5375 9.48742 13.3485 9.36342 13.2695 8.97691C13.2355 8.8119 13.2545 8.55639 13.2845 8.40989C13.3525 8.09438 13.277 7.89187 13.0545 7.70787C12.8735 7.55786 12.643 7.51636 12.39 7.51636C12.2955 7.51636 12.209 7.47486 12.1445 7.44136C12.039 7.38886 11.9519 7.25735 12.035 7.09585C12.0615 7.04335 12.19 6.91584 12.22 6.89334C12.5635 6.69784 12.9595 6.76184 13.326 6.90834C13.6655 7.04735 13.9225 7.30236 14.292 7.66287C14.6695 8.09838 14.7375 8.21838 14.9525 8.54539C15.1225 8.8009 15.277 9.06341 15.3831 9.36392C15.4471 9.55142 15.3641 9.70493 15.1415 9.79893Z';
+const OPENAI_PATH = 'M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z';
+const CLAUDE_PATH = 'm4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z';
+const svg = (viewBox: string, path: string) => `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}"><path d="${path}"/></svg>`)}")`;
+const logos: Record<State['harness'], { mask: string; color: string }> = {
+  dsh: { color: '#4D6BFE', mask: svg('0 0 23.16 17.04', FISH_LOGO_PATH) },
+  codex: { color: 'var(--dsw-alias-label-primary)', mask: svg('0 0 24 24', OPENAI_PATH) },
+  'claude-code': { color: '#D97757', mask: svg('0 0 24 24', CLAUDE_PATH) },
+};
+const markStyles = Object.entries(logos).map(([harness, { mask, color }]) =>
+  `[data-hp-harness="${harness}"]>span:first-child:empty::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`).join('\n')
+  // Delegated sessions: a small arrow badge on the logo's bottom-right corner.
+  + `\n[data-hp-delegated]>span:first-child:empty{position:relative}[data-hp-delegated]>span:first-child:empty::after{content:"";position:absolute;right:-1px;bottom:1px;width:8px;height:8px;background:url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="#8A8F98"/><path d="M3 3l4 4M7 4v3H4" stroke="#fff" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>')}") center/contain no-repeat}`;
+/** Session id from the row's React props (the host's SessionNodeItem receives `node`); undefined for non-session rows. */
+// ponytail: reads React internals because the host has no session-row slot; replace with a slot once DSH offers one.
+function rowSessionId(row: Element): string | undefined {
+  const key = Object.keys(row).find(name => name.startsWith('__reactFiber$'));
+  let fiber = key ? (row as unknown as Record<string, { return?: unknown; memoizedProps?: { node?: { id?: unknown } } }>)[key] : undefined;
+  for (let depth = 0; fiber && depth < 20; depth++, fiber = fiber.return as typeof fiber) {
+    const id = fiber.memoizedProps?.node?.id;
+    if (typeof id === 'string') return id;
+  }
+  return undefined;
+}
 
 export async function apply(ctx: Context): Promise<void> {
   const unmount = await ctx.remote.$mount(contribution);
@@ -619,9 +701,39 @@ export async function apply(ctx: Context): Promise<void> {
     style.textContent=styles;
     document.head.append(style);return ()=>style.remove();
   }, 'harness: selector styles');
+  ctx.effect(() => {
+    const style=document.createElement('style');
+    style.textContent=markStyles;
+    document.head.append(style);return ()=>style.remove();
+  }, 'harness: sidebar mark styles');
   ctx.inject(['sessions', 'remote.harness'], scope => {
     let nativeSeats: Array<()=>void> = [];
-    const known = new Map<string,boolean>();
+    const known = new Map<string,State['harness']>();
+    // Harness per session id for sidebar marks; external results are final, native ones are re-read when the session list changes.
+    const fetched = new Set<string>(), delegated = new Set<string>();
+    let frame = 0, loading = false;
+    function paint() {
+      frame = 0;
+      const {byId}=scope.sessions.list.getSnapshot();
+      const missing: string[] = [];
+      for (const row of document.querySelectorAll<HTMLElement>('[role="treeitem"]')) {
+        const id=rowSessionId(row);
+        if (!id || !(id in byId)) continue;
+        const harness=known.get(id);
+        if (harness && row.dataset.hpHarness !== harness) row.dataset.hpHarness=harness;
+        if (delegated.has(id) && row.dataset.hpDelegated === undefined) row.dataset.hpDelegated='';
+        if (!fetched.has(id)) missing.push(id);
+      }
+      if (!missing.length || loading) return;
+      loading=true;
+      void value(scope.remote.harness.harnesses({sessionIds:missing})).then(result => {
+        for (const [id,mark] of Object.entries(result)) {
+          fetched.add(id); if (mark.delegated) delegated.add(id);
+          if (!known.has(id) || mark.harness !== 'dsh') known.set(id,mark.harness);
+        }
+      }, () => {}).finally(() => { loading=false; schedule(); });
+    }
+    const schedule = () => { if (!frame) frame=requestAnimationFrame(paint); };
     const listeners = new Set<() => void>();
     const api: Injected = {
       recover:(sessionId,action)=>value(scope.remote.harness.recover({sessionId,action})),
@@ -636,13 +748,15 @@ export async function apply(ctx: Context): Promise<void> {
       selectConfig:(id,configId,value_)=>value(scope.remote.harness.selectConfig({sessionId:id,configId,value:value_})),
       usage:id=>value(scope.remote.harness.usage({sessionId:id})),
       quota:id=>value(scope.remote.harness.quota({sessionId:id})),
-      changed:(id,external)=>{known.set(id,external);syncModel();for (const listener of listeners) listener();},
+      changed:(id,harness)=>{known.set(id,harness);syncModel();schedule();for (const listener of listeners) listener();},
       subscribe:listener=>{listeners.add(listener);return ()=>{listeners.delete(listener);};},
     };
     function syncModel() {
       const {current,byId}=scope.sessions.list.getSnapshot();
       for (const id of known.keys()) if (!(id in byId)) known.delete(id);
-      const external=current !== undefined && known.get(current) === true;
+      for (const id of fetched) if (known.get(id) === 'dsh' && id !== current) fetched.delete(id);
+      schedule();
+      const external=current !== undefined && known.get(current) !== undefined && known.get(current) !== 'dsh';
       if (external && !nativeSeats.length) {
         nativeSeats = [scope.slots.register({ name: 'conversation.input.plan', priority: -100 }, () => null)];
         nativeSeats.push(scope.slots.register({ name: 'conversation.input.permission', priority: -100, locale: 'harness', inject: () => api }, HarnessPermission));
@@ -655,8 +769,22 @@ export async function apply(ctx: Context): Promise<void> {
       const stop=scope.sessions.list.subscribe(syncModel);
       return ()=>{stop();for (const dispose of nativeSeats) dispose();};
     },'harness: native model seat');
+    scope.effect(()=>{
+      const observer=new MutationObserver(schedule);
+      observer.observe(document.body,{childList:true,subtree:true});
+      schedule();
+      return ()=>{observer.disconnect();cancelAnimationFrame(frame);frame=0;for (const row of document.querySelectorAll<HTMLElement>('[data-hp-harness],[data-hp-delegated]')) { delete row.dataset.hpHarness; delete row.dataset.hpDelegated; }};
+    },'harness: sidebar marks');
     scope.slots.inject('conversation.input.left',()=>scope.slots.register({
       name:'conversation.input.left',id:'harness-selector',order:-100,locale:'harness',inject:()=>api,
     },HarnessSelect));
+  });
+  // Optional: a DSH build without the right sidebar simply has no subagents tab.
+  ctx.inject(['sidebarRightTabs', 'remote.harness'], scope => {
+    const id = 'dsh-harness-provider/subagents', t = ctx.locale.bind('harness');
+    scope.effect(() => scope.sidebarRightTabs.register({ id, kind: 'harness-subagents', title: () => t('subagents'),
+      guide: [{ id: 'open', order: 40, title: () => t('subagents'), description: () => t('subagentsDescription') }] }), 'harness: subagents tab type');
+    scope.effect(() => scope.slots.inject('sidebar.right.pane.tab', () => scope.slots.register({ name: 'sidebar.right.pane.tab', key: id, locale: 'harness',
+      inject: sessionId => ({ load: () => value(scope.remote.harness.subagents({ sessionId })) }) }, SubagentsTab)), 'harness: subagents tab');
   });
 }

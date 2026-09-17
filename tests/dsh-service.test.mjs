@@ -33,8 +33,22 @@ test('thinking selection validates against the catalog, persists, and quota read
   ctx.provide('agents',{get:()=>agent});ctx.provide('sessions',{});ctx.provide('userQuestions',{});
   ctx.provide('sessionProjections',{stateOf:(session,key)=>{assert.equal(session.header.cwd,root);return key==='permissions'?{sandbox:'danger-full-access'}:undefined;}});
   ctx.provide('attachments',{});ctx.provide('fileUploads',{});
+  const childEvents=[
+   {type:'user/message',data:{content:[{type:'text',text:'Map the repo\nthoroughly'}]}},
+   {type:'assistant/message',data:{message:{content:[{type:'reasoning',text:'plan'},{type:'text',text:'Looking'},{type:'tool-call',id:'c1',name:'bash',arguments:'{"command":"ls"}'},{type:'tool-call',id:'c2',name:'read',arguments:'{"file_path":"a.ts"}'}]}}},
+   {type:'tool/result',data:{message:{content:[{type:'tool-result',toolCallId:'c1',content:[{type:'text',text:'src'}],isError:false}]}}},
+   {type:'turn/end',data:{reason:{kind:'completed'}}},
+  ];
+  ctx.provide('subagents',{listDescendants:async id=>id==='started'?[{kind:'child',id:'child',parentId:'started',depth:1,mode:'one-shot',label:'explorer'},{kind:'diagnostic',id:'bad',reason:'corrupt'},{kind:'child',id:'grandchild',parentId:'child',depth:2,mode:'one-shot'}]:[]});
+  ctx.provide('sessionQuery',{observeSession:async id=>({events:id==='child'?childEvents:[],[Symbol.dispose](){}})});
   await ctx.plugin({inject,apply(scope){new HarnessService(scope,root,{codex:adapter,'claude-code':adapter});}});
   const h=ctx.harness;
+  // DSH's own subagents: the descendant tree read from child logs, without loading the parent-owned child Agents.
+  assert.deepEqual(await h.subagents({sessionId:'started'}),[
+   {id:'child',parentId:null,name:'explorer',task:'Map the repo\nthoroughly',status:'completed',entries:[
+    {kind:'thought',text:'plan'},{kind:'message',text:'Looking'},{kind:'tool',title:'bash · ls',status:'completed',output:'src'},{kind:'tool',title:'read · a.ts',status:'failed',output:null}]},
+   {id:'grandchild',parentId:'child',name:'Subagent',task:null,status:'running',entries:[]},
+  ]);
   assert.equal(await h.quota({sessionId:'bound'}),null); // native session, no provider route exposed here
   // Native full access carries over when the Harness offers the matching mode; Codex ids differ from this catalog, so nothing is seeded.
   assert.equal((await h.select({sessionId:'bound',harness:'claude-code'})).permission,'bypassPermissions');
@@ -82,6 +96,8 @@ test('thinking selection validates against the catalog, persists, and quota read
   await h.select({sessionId:'fresh',harness:'dsh'});
   assert.equal((await h.state({sessionId:'fresh'})).harness,'dsh');
   await h.select({sessionId:'bound',harness:'codex'});
+  // Sidebar marks read bindings only: an unbound fresh session stays native instead of adopting the remembered Harness.
+  assert.deepEqual(await h.harnesses({sessionIds:['bound','fresh','unknown']}),{bound:{harness:'codex',delegated:false},fresh:{harness:'dsh',delegated:false},unknown:{harness:'dsh',delegated:false}});
   assert.equal(inspections,2); // one per harness, cached per cwd afterwards
   const quota=await h.quota({sessionId:'bound'});
   assert.deepEqual(quota,{kind:'windows',source:'codex',plan:'pro',windows:[
@@ -89,6 +105,12 @@ test('thinking selection validates against the catalog, persists, and quota read
   await h.quota({sessionId:'bound'});
   assert.equal(accounts,1);
   assert.equal(await h.usage({sessionId:'bound'}),null);
+  // The subagents tab reads the live native session only; without one it is empty.
+  assert.deepEqual(await h.subagents({sessionId:'bound'}),[]);
+  const harnessSubagent={id:'a',parentId:null,name:'explorer',task:null,status:'running',entries:[{kind:'message',text:'hi'}]};
+  h.runner.live.set('bound',{session:{subagents:()=>[harnessSubagent]}});
+  assert.deepEqual(await h.subagents({sessionId:'bound'}),[harnessSubagent]);
+  h.runner.live.delete('bound');
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });
 

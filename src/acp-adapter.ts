@@ -16,7 +16,7 @@ import {
   type HarnessSessionCapabilities, type HarnessSessionState, type HarnessSkill, type HostApprovalInteraction, type HostChoiceQuestion,
   type HostCommand, type HostEvent, type HostInput, type HostInteraction, type HostInteractionId, type HostItem, type HostItemOf,
   type HostItemOutcome, type HostItemSnapshot, type HostQuestion, type HostQuestionInteraction, type HostTurnId, type HostTurnSnapshot,
-  type HostUsage, type InteractionRespondCommand, type JsonValue, type ModelSelectCommand, type NativeSessionRef, type OpenSessionInput,
+  type HostUsage, type HarnessSubagent, type HarnessSubagentEntry, type InteractionRespondCommand, type JsonValue, type ModelSelectCommand, type NativeSessionRef, type OpenSessionInput,
   type PermissionModeSelectCommand, type ThinkingSelectCommand, type TurnCancelCommand, type TurnOutcome, type TurnStartCommand,
 } from './contracts.js';
 
@@ -26,6 +26,12 @@ export interface AcpProfile {
   harnessId: string;
   /** Whether ACP thought chunks should be exposed as DSH reasoning rows. */
   showThoughts?: boolean;
+  /**
+   * Subagents as their own ACP sessions (AIR `nativeSubagentSessions`; the adapters' schemas drop a bare `subagents` capability):
+   * Codex streams child threads only this way. Without
+   * it the agent tags a subagent's events in the main session (Claude Code, which keeps the Agent call and report there).
+   */
+  nativeSubagents?: boolean;
   /**
    * The agent program; throws a HarnessError-like `{ code, message }` when its executable is missing. A session's process
    * gets the Host's session instructions for agents that only take them at launch (Codex's developer instructions).
@@ -51,10 +57,16 @@ export interface AcpProfile {
   inspectAccount?(): Promise<HarnessAccountSnapshot | null>;
 }
 
-const CLIENT_CAPABILITIES: acp.ClientCapabilities = {
+const clientCapabilities = (profile: AcpProfile): acp.ClientCapabilities => ({
   session: { compaction: {}, configOptions: { boolean: {} } }, elicitation: { form: {}, url: {} }, plan: {},
-  _meta: { steering: { supported: true }, jetbrains: { air: { version: 1, capabilities: ['sessionFailure', 'recommendedValue'] } } },
-};
+  // `subagent-transcript`: Claude Code forwards a tagged subagent's text and reasoning too, not only its tool calls.
+  _meta: { steering: { supported: true }, 'subagent-transcript': true,
+    jetbrains: { air: { version: 1, capabilities: ['sessionFailure', 'recommendedValue', ...(profile.nativeSubagents ? ['nativeSubagentSessions'] : [])] } } },
+});
+/** Subagent lifecycle updates the ACP SDK's schema does not know yet; they are renamed on the wire so its validation lets them through. */
+const SUBAGENT_LIFECYCLE = new Set(['subagent_spawned', 'subagent_state_update']);
+const SUBAGENT_UPDATE = '_dsh/subagent_update';
+type SubagentLifecycle = { sessionUpdate: 'subagent_spawned'; subagentSessionId: string; name?: unknown; task?: unknown } | { sessionUpdate: 'subagent_state_update'; subagentSessionId: string; state: unknown };
 const REQUEST_TIMEOUT_MS = 60_000;
 const CLOSE_TIMEOUT_MS = 5_000;
 const TITLE_TIMEOUT_MS = 30_000;
@@ -224,9 +236,14 @@ class AcpProcess {
     const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', process.env.DSH_HARNESS_ACP_STDERR === '1' ? 'inherit' : 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
     child.stderr?.resume();
     const exited = new Promise<void>(resolve => { child.once('close', () => resolve()); child.once('error', () => resolve()); });
-    const stream = ndJsonStream(Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>);
+    const wire = ndJsonStream(Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>);
+    const stream = { writable: wire.writable, readable: wire.readable.pipeThrough(new TransformStream<acp.AnyMessage, acp.AnyMessage>({ transform(message, controller) {
+      const update = 'method' in message && message.method === 'session/update' ? record(record(message.params).update).sessionUpdate : undefined;
+      controller.enqueue(typeof update === 'string' && SUBAGENT_LIFECYCLE.has(update) ? { ...message, method: SUBAGENT_UPDATE } as acp.AnyMessage : message);
+    } })) };
     const app = client({ name: pkg.name })
       .onNotification('session/update', ({ params }) => handlers.update(params))
+      .onNotification(SUBAGENT_UPDATE, params => params as acp.SessionNotification, ({ params }) => handlers.update(params))
       .onNotification('elicitation/complete', ({ params }) => handlers.elicitationComplete(params))
       .onNotification('_auth/status_update', params => params, () => {})
       .onRequest('session/request_permission', ({ params, signal }) => handlers.permission(params, signal))
@@ -234,7 +251,7 @@ class AcpProcess {
     const process_ = new AcpProcess(child, app.connect(stream), exited);
     void Promise.race([process_.connection.closed, exited]).then(() => { if (process_.live) { process_.live = false; handlers.fault(new Error(`${profile.harnessId} agent exited`)); } });
     try {
-      process_.initialized = await request<acp.InitializeResponse>(process_.agent, 'initialize', { protocolVersion: 1, clientCapabilities: CLIENT_CAPABILITIES,
+      process_.initialized = await request<acp.InitializeResponse>(process_.agent, 'initialize', { protocolVersion: 1, clientCapabilities: clientCapabilities(profile),
         clientInfo: { name: pkg.name, version: pkg.version, title: 'DSH Harness Plugin' } });
       return process_;
     } catch (cause) { await process_.close(); throw cause; }
@@ -403,6 +420,61 @@ function dshTool(call: acp.ToolCall | acp.ToolCallUpdate): { toolName: string; a
   if (search) return row('grep', { pattern: search[1], path: search[2] });
   return undefined;
 }
+// ── Subagents: what each one said and did, for the sidebar; never part of the main transcript ─────────────────────────
+
+export const SUBAGENT_LIMIT = 200, SUBAGENT_ENTRY_LIMIT = 300, SUBAGENT_OUTPUT_LIMIT = 4_000;
+type ToolEntry = Extract<HarnessSubagentEntry, { kind: 'tool' }>;
+/** One session's subagents, bounded: the oldest subagent, and a subagent's oldest entries, give way first. */
+class Subagents {
+  readonly #byId = new Map<string, HarnessSubagent>();
+  /** Merged tool call per `subagent\0toolCallId`, and the message id of each subagent's trailing text entry. */
+  readonly #tools = new Map<string, { call: acp.ToolCallUpdate; entry: ToolEntry }>();
+  readonly #messageIds = new Map<string, string | undefined>();
+  has(id: string): boolean { return this.#byId.has(id); }
+  list(): HarnessSubagent[] { return [...this.#byId.values()].map(agent => ({ ...agent, entries: agent.entries.map(entry => ({ ...entry })) })); }
+  upsert(id: string, fields: { name?: string | undefined; task?: string | undefined; parentId?: string | undefined }): void {
+    const agent = this.#byId.get(id);
+    if (agent) { if (fields.name) agent.name = fields.name; if (fields.task) agent.task = fields.task; return; }
+    if (this.#byId.size >= SUBAGENT_LIMIT) this.#drop(this.#byId.keys().next().value!);
+    this.#byId.set(id, { id, parentId: fields.parentId ?? null, name: fields.name ?? 'Subagent', task: fields.task ?? null, status: 'running', entries: [] });
+  }
+  finish(id: string, status: HarnessSubagent['status']): void { const agent = this.#byId.get(id); if (agent?.status === 'running') agent.status = status; }
+  /** A turn that did not end normally ends every subagent still running. */
+  settle(status: 'failed' | 'cancelled'): void { for (const agent of this.#byId.values()) if (agent.status === 'running') agent.status = status; }
+  append(id: string, update: acp.SessionUpdate, showThoughts: boolean): void {
+    const agent = this.#byId.get(id);
+    if (!agent) return;
+    if (update.sessionUpdate === 'agent_message_chunk' || update.sessionUpdate === 'agent_thought_chunk') {
+      if (update.content.type !== 'text' || (update.sessionUpdate === 'agent_thought_chunk' && !showThoughts)) return;
+      const kind = update.sessionUpdate === 'agent_message_chunk' ? 'message' : 'thought', last = agent.entries.at(-1), messageId = update.messageId ?? undefined;
+      if (last?.kind === kind && this.#messageIds.get(id) === messageId) { last.text += update.content.text; return; }
+      this.#messageIds.set(id, messageId);
+      this.#push(agent, { kind, text: update.content.text });
+    } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+      const key = `${id}\0${update.toolCallId}`, known = this.#tools.get(key);
+      const call = { ...known?.call, ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined && value !== null)) } as acp.ToolCallUpdate;
+      const status = call.status === 'completed' || call.status === 'failed' ? call.status : 'running';
+      const fields = { title: text(record(call.rawInput).description, 200) ?? text(call.title, 200) ?? commandOf(call.rawInput)?.slice(0, 200) ?? text(call.name, 120) ?? 'tool',
+        status, output: status === 'running' ? null : text(replayedOutput(call), SUBAGENT_OUTPUT_LIMIT) ?? null } as const;
+      if (known) { known.call = call; Object.assign(known.entry, fields); return; }
+      const entry: ToolEntry = { kind: 'tool', ...fields };
+      this.#tools.set(key, { call, entry });
+      this.#push(agent, entry);
+    }
+  }
+  #push(agent: HarnessSubagent, entry: HarnessSubagentEntry): void {
+    agent.entries.push(entry);
+    if (agent.entries.length <= SUBAGENT_ENTRY_LIMIT) return;
+    const dropped = agent.entries.shift();
+    for (const [key, tool] of this.#tools) if (tool.entry === dropped) this.#tools.delete(key);
+  }
+  #drop(id: string): void {
+    this.#byId.delete(id); this.#messageIds.delete(id);
+    for (const key of this.#tools.keys()) if (key.startsWith(`${id}\0`)) this.#tools.delete(key);
+  }
+}
+const subagentStatus = (state: unknown): HarnessSubagent['status'] => state === 'completed' ? 'completed' : state === 'cancelled' ? 'cancelled' : 'failed';
+
 /** A reported diff as DSH's own edit row (or write row for a new file); the edit card reads its hunk from these arguments. */
 const diffTool = (itemId: string, diff: acp.Diff): HostItemOf<'toolExecution'> => ({ type: 'toolExecution', itemId: hostItemIdSchema.parse(itemId), namespace: 'edit',
   ...(diff.oldText ? { toolName: 'edit', arguments: { file_path: diff.path, old_string: diff.oldText, new_string: diff.newText } }
@@ -430,6 +502,7 @@ class AcpSession implements HarnessSession {
   readonly #channel = new HarnessOutputChannel<HarnessOutput>();
   readonly outputs = this.#channel.outputs;
   readonly #transcript = new Transcript();
+  readonly #subagents = new Subagents();
   readonly #process: AcpProcess;
   readonly #sessionId: string;
   readonly #cwd: string;
@@ -469,14 +542,15 @@ class AcpSession implements HarnessSession {
   static async open(options: SessionOptions): Promise<AcpSession> {
     const { profile, input } = options;
     let session: AcpSession | undefined;
-    const replay: acp.SessionUpdate[] = [];
+    const replay: acp.SessionNotification[] = [];
     let commands: acp.AvailableCommand[] | undefined;
     let sessionId = input.kind === 'resume' ? input.nativeRef.nativeSessionId : undefined;
     const process_ = await AcpProcess.connect(profile, options.environment, input.cwd, {
       update: notification => {
-        if (notification.sessionId !== sessionId) return;
-        if (session) { session.#update(notification.update); return; }
-        if (notification.update.sessionUpdate === 'available_commands_update') commands = notification.update.availableCommands; else replay.push(notification.update);
+        if (session) { session.#notify(notification); return; }
+        if (sessionId === undefined) return;
+        if (notification.sessionId === sessionId && notification.update.sessionUpdate === 'available_commands_update') commands = notification.update.availableCommands;
+        else replay.push(notification);
       },
       permission: (params, signal) => session ? session.#permission(params, signal) : Promise.resolve({ outcome: { outcome: 'cancelled' } }),
       elicitation: (params, signal) => session ? session.#elicitation(params, signal) : Promise.resolve({ action: 'cancel' }),
@@ -497,7 +571,7 @@ class AcpSession implements HarnessSession {
       const skills = (await waitFor(() => commands, 3_000)) ?? [];
       session = new AcpSession(options, process_, sessionId, opened, catalogs, skillsOf(profile, skills));
       session.#rawCommands = skills;
-      for (const update of replay) session.#transcript.replay(update);
+      for (const { sessionId: owner, update } of replay) if (!session.#routeSubagent(owner, update)) session.#transcript.replay(update);
       await session.#applyHints(input);
       return session;
     } catch (cause) { await process_.close(); throw cause; }
@@ -521,6 +595,7 @@ class AcpSession implements HarnessSession {
   get initialState(): HarnessSessionState { return this.#state; }
 
   async listSkills(): Promise<HarnessSkill[]> { return this.#commands; }
+  subagents(): HarnessSubagent[] { return this.#subagents.list(); }
 
   async readSnapshot(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>> {
     if (this.#fault) return { ok: false, error: this.#fault };
@@ -681,6 +756,7 @@ class AcpSession implements HarnessSession {
     for (const pending of [...active.interactions.values()]) pending.settle(pending.kind === 'permission' ? { outcome: { outcome: 'cancelled' } } : { action: 'cancel' });
     this.#completeMessage(active, outcome);
     this.#completeThought(active, outcome);
+    if (outcome.status !== 'succeeded') this.#subagents.settle(outcome.status === 'cancelled' ? 'cancelled' : 'failed');
     for (const [id, item] of active.tools) { active.tools.delete(id); this.#emit({ type: 'item.completed', turnId: active.hostId, snapshot: { item, outcome: outcome.status === 'succeeded' ? { status: 'succeeded' } : outcome } }); }
     for (const [id, item] of active.compaction) { active.compaction.delete(id); this.#emit({ type: 'item.completed', turnId: active.hostId, snapshot: { item, outcome } }); }
     this.#emit({ type: 'turn.completed', turnId: active.hostId, nativeTurnRef: this.#turnRef(this.#transcript.key(active.transcript)), outcome });
@@ -689,6 +765,37 @@ class AcpSession implements HarnessSession {
   }
 
   // ── session/update ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  #notify(notification: acp.SessionNotification): void {
+    if (!this.#routeSubagent(notification.sessionId, notification.update)) this.#update(notification.update);
+  }
+  /** The main session or one of its Codex subagent sessions; their approvals and questions reach the user alike. */
+  #owns(sessionId: string): boolean { return sessionId === this.#sessionId || this.#subagents.has(sessionId); }
+  /**
+   * Takes what belongs to subagents; false leaves the update to the main transcript. Codex announces child sessions and
+   * streams each under its own id; Claude Code tags a subagent's events with its Agent call, which itself stays in the main transcript.
+   */
+  #routeSubagent(sessionId: string, update: acp.SessionUpdate): boolean {
+    const lifecycle = update as unknown as SubagentLifecycle;
+    if (lifecycle.sessionUpdate === 'subagent_spawned') {
+      this.#subagents.upsert(lifecycle.subagentSessionId, { name: text(lifecycle.name, 200), task: text(lifecycle.task, 4000), ...(sessionId !== this.#sessionId ? { parentId: sessionId } : {}) });
+      return true;
+    }
+    if (lifecycle.sessionUpdate === 'subagent_state_update') { this.#subagents.finish(lifecycle.subagentSessionId, subagentStatus(lifecycle.state)); return true; }
+    const showThoughts = this.#profile.showThoughts !== false;
+    if (sessionId !== this.#sessionId) { this.#subagents.append(sessionId, update, showThoughts); return true; }
+    const claude = record(record((update as { _meta?: unknown })._meta).claudeCode);
+    const parent = text(claude.parentToolUseId, 200);
+    if ((update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') && (claude.subagent === true || claude.toolName === 'Agent' || claude.toolName === 'Task')) {
+      const input = record(update.rawInput);
+      this.#subagents.upsert(update.toolCallId, { name: text(input.description, 200) ?? text(update.title, 200), task: text(input.prompt, 4000), ...(parent ? { parentId: parent } : {}) });
+      if (update.status === 'completed' || update.status === 'failed') this.#subagents.finish(update.toolCallId, update.status);
+    }
+    if (!parent) return false;
+    this.#subagents.upsert(parent, {});
+    this.#subagents.append(parent, update, showThoughts);
+    return true;
+  }
 
   #update(update: acp.SessionUpdate): void {
     if (update.sessionUpdate === 'available_commands_update') { this.#rawCommands = update.availableCommands; this.#commands = skillsOf(this.#profile, update.availableCommands); return; }
@@ -848,7 +955,7 @@ class AcpSession implements HarnessSession {
 
   #permission(params: acp.RequestPermissionRequest, signal: AbortSignal): Promise<acp.RequestPermissionResponse> {
     const active = this.#active;
-    if (!active || params.sessionId !== this.#sessionId || !params.options.length) return Promise.resolve({ outcome: { outcome: 'cancelled' } });
+    if (!active || !this.#owns(params.sessionId) || !params.options.length) return Promise.resolve({ outcome: { outcome: 'cancelled' } });
     const presentation = record(record(params._meta).permission);
     const command = commandOf(params.toolCall.rawInput);
     const title = text(presentation.title, 200) ?? text(params.toolCall.title, 200) ?? command ?? text(params.toolCall.name, 120) ?? 'Approval required';
@@ -863,7 +970,7 @@ class AcpSession implements HarnessSession {
   }
   #elicitation(params: acp.CreateElicitationRequest, signal: AbortSignal): Promise<acp.CreateElicitationResponse> {
     const active = this.#active;
-    if (!active || ('sessionId' in params && params.sessionId !== this.#sessionId)) return Promise.resolve({ action: 'cancel' });
+    if (!active || ('sessionId' in params && !this.#owns(String(params.sessionId)))) return Promise.resolve({ action: 'cancel' });
     const title = text(params.message, 200) ?? 'Input required';
     if (params.mode === 'url') {
       const url = 'url' in params ? String(params.url) : '';

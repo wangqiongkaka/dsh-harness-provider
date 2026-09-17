@@ -38,6 +38,17 @@ export const quotaSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('windows'), source: z.string(), plan: z.string().nullable(), windows: z.array(quotaWindowSchema) }),
   z.object({ kind: z.literal('balance'), source: z.string(), currency: z.string(), total: z.string(), granted: z.string(), toppedUp: z.string() }),
 ]).nullable();
+/** Sidebar marks: the Harness of each listed session and whether it was delegated, read from bindings only (no agent load, no remembered-Harness binding). */
+export const harnessesRequest = z.object({ sessionIds: z.array(z.string().min(1)).max(1000) }).strict();
+export const harnessesSchema = z.record(z.string(), z.object({ harness: selection, delegated: z.boolean() }));
+/** Harness-internal subagents of the live native session, oldest first; empty while no native session runs in this process. */
+export const subagentsSchema = z.array(z.object({
+  id: z.string(), parentId: z.string().nullable(), name: z.string(), task: z.string().nullable(), status: z.enum(['running', 'completed', 'failed', 'cancelled']),
+  entries: z.array(z.discriminatedUnion('kind', [
+    z.object({ kind: z.enum(['message', 'thought']), text: z.string() }),
+    z.object({ kind: z.literal('tool'), title: z.string(), status: z.enum(['running', 'completed', 'failed']), output: z.string().nullable() }),
+  ])),
+}));
 export const recoveryRequest = address.extend({ action: z.enum(['check', 'unlock']) });
 export const recoverySchema = stateSchema.extend({ detail: z.string() });
 export const secretAnswerRequest = address.extend({ id: z.string().min(1), answers: z.record(z.string(), z.array(z.string().min(1).max(64_000))), cancelled: z.boolean().optional() });
@@ -52,7 +63,8 @@ export const descriptors: InvocationDescriptor[] = [
   ['state', address, stateSchema], ['select', selectRequest, stateSchema],
   ['models', address, modelsSchema], ['selectModel', modelRequest, stateSchema],
   ['selectThinking', thinkingRequest, stateSchema], ['selectPermission', permissionRequest, stateSchema], ['selectConfig', configRequest, stateSchema],
-  ['usage', address, usageSchema], ['quota', address, quotaSchema],
+  ['usage', address, usageSchema], ['harnesses', harnessesRequest, harnessesSchema], ['quota', address, quotaSchema],
+  ['subagents', address, subagentsSchema],
 ].map(([method, request, result]) => ({
   id: `dsh-harness-provider#harness/${method}`, service: 'harness', namespace: 'harness', method: method as string,
   invocation: { kind: 'direct' },

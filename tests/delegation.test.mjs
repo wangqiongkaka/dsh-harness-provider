@@ -187,6 +187,9 @@ test('session CLI creates a visible independent harness session, reads its resul
   assert.deepEqual(presetSets,[[dshChild.sessionId,'read-only']]);
   assert.equal(nativePrompts.at(-1).sessionId,dshChild.sessionId);
   assert.equal((await h.state({sessionId:dshChild.sessionId})).harness,'dsh');
+  // Sidebar marks badge delegated children of either kind; the source session is not delegated.
+  assert.deepEqual(await h.harnesses({sessionIds:[first.sessionId,dshChild.sessionId,'other']}),
+   {[first.sessionId]:{harness:'codex',delegated:true},[dshChild.sessionId]:{harness:'dsh',delegated:true},other:{harness:'dsh',delegated:false}});
   const dshRead=await h.readDelegation('other',{sessionId:dshChild.sessionId});
   assert.equal(dshRead.harness,'dsh');assert.equal(dshRead.status,'completed');
   const nativePromptCount=nativePrompts.length;

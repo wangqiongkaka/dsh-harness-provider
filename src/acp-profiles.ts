@@ -97,6 +97,7 @@ export function codexProfile(options: { command: string; environment: NodeJS.Pro
   return {
     harnessId: 'codex',
     showThoughts: false,
+    nativeSubagents: true,
     // codex-acp reads no instructions from session/new, but merges CODEX_CONFIG into every thread/start and thread/resume; as
     // developer instructions the feedback contract and Host instructions stay out of the user's messages and survive compaction.
     spawn: (environment, instructions) => ({ command: process.execPath, args: [bundled('codex-acp.mjs')],
