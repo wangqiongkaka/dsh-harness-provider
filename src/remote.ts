@@ -49,6 +49,8 @@ export const subagentsSchema = z.array(z.object({
     z.object({ kind: z.literal('tool'), title: z.string(), status: z.enum(['running', 'completed', 'failed']), output: z.string().nullable() }),
   ])),
 }));
+/** `@` menu entries of the session's Harness; empty for DSH sessions and Harnesses without plugins. */
+export const pluginsSchema = z.array(z.object({ name: z.string(), displayName: z.string(), description: z.string().nullable(), mention: z.string() }));
 export const recoveryRequest = address.extend({ action: z.enum(['check', 'unlock']) });
 export const recoverySchema = stateSchema.extend({ detail: z.string() });
 export const secretAnswerRequest = address.extend({ id: z.string().min(1), answers: z.record(z.string(), z.array(z.string().min(1).max(64_000))), cancelled: z.boolean().optional() });
@@ -64,7 +66,7 @@ export const descriptors: InvocationDescriptor[] = [
   ['models', address, modelsSchema], ['selectModel', modelRequest, stateSchema],
   ['selectThinking', thinkingRequest, stateSchema], ['selectPermission', permissionRequest, stateSchema], ['selectConfig', configRequest, stateSchema],
   ['usage', address, usageSchema], ['harnesses', harnessesRequest, harnessesSchema], ['quota', address, quotaSchema],
-  ['subagents', address, subagentsSchema],
+  ['subagents', address, subagentsSchema], ['plugins', address, pluginsSchema],
 ].map(([method, request, result]) => ({
   id: `dsh-harness-provider#harness/${method}`, service: 'harness', namespace: 'harness', method: method as string,
   invocation: { kind: 'direct' },

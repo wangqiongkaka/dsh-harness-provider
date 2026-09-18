@@ -203,10 +203,13 @@ export interface HarnessSession {
   close(): Promise<void>;
 }
 export interface HarnessSkill { name: string; description: string; path?: string; modelInvocable: boolean }
+/** An installed, enabled plugin the Harness injects when the prompt mentions it; `mention` is that exact prompt text. */
+export interface HarnessPlugin { name: string; displayName: string; description: string | null; mention: string }
 export interface HarnessAdapter {
   readonly harnessId: HarnessId;
   inspect(input?: { cwd?: string; refresh?: boolean }): Promise<HarnessInspection>;
   listSkills(input: { cwd: string }): Promise<HarnessSkill[]>;
+  listPlugins?(input: { cwd: string }): Promise<HarnessPlugin[]>;
   /** Fresh, bounded quota read for the current native authentication; null when unavailable. */
   inspectAccount?(): Promise<HarnessAccountSnapshot | null>;
   open(input: OpenSessionInput): Promise<HarnessResult<HarnessSession>>;

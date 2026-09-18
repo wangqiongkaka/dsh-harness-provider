@@ -128,10 +128,14 @@ try{
    await editor.fill('/');
    await expect(page.getByRole('option',{name:new RegExp(expected)})).toBeVisible({timeout:30000});
    for(const name of absent) await expect(page.getByRole('option',{name:new RegExp(name)})).toHaveCount(0);
+   // DSH's own commands belong to native DSH only; a Harness `/` menu is the Harness's catalog (its names are lowercase).
+   await expect(page.getByRole('option',{name:new RegExp(expected)})).toBeVisible();
+   const dshRows=(await page.getByRole('option').allTextContents()).filter(text=>/^(File|Goal|Plan|Feedback|Compact|Permission|Model|Export)(?=[A-Z]|$)/.test(text));
+   if(label==='Native DSH') assert.equal(dshRows.length,8,JSON.stringify(dshRows)); else assert.deepEqual(dshRows,[],label+' menu shows DSH commands');
    await page.getByRole('option',{name:new RegExp(expected)}).click();
    await expect(editor).toHaveText('/'+expected+' ');
    await editor.fill('');
-   console.log('PASS: '+label+' slash menu shows and selects only its native skill catalog');
+   console.log('PASS: '+label+' slash menu shows and selects only its native skill catalog'+(label==='Native DSH'?' with DSH commands':' without DSH commands'));
   }
   assert.equal(codex.requests.length,0);assert.equal(claude.requests.length,0);
  }else if(process.env.DSH_IMAGE_PROBE === '1'){

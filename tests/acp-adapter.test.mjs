@@ -4,7 +4,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AcpAdapter, modelRef } from '../dist/acp-adapter.js';
-import { codexTurnOutcomes } from '../dist/acp-profiles.js';
+import { codexPlugins, codexTurnOutcomes } from '../dist/acp-profiles.js';
 
 // A stateful ACP agent written with the official SDK: its history survives across processes through a JSON file so
 // session/load can replay it, and every host answer it receives is checked before the turn ends.
@@ -584,6 +584,37 @@ for await (const line of createInterface({ input: process.stdin })) {
       ['u2', { status: 'cancelled', reason: 'Codex 原生记录：该轮已中断' }],
       ['u3', { status: 'failed', error: { code: 'nativeFailure', message: 'model error', retryable: true } }],
       ['u4', { status: 'unknown', reason: 'Codex 原生记录显示该轮仍在执行' }],
+    ]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('Codex plugins come from app-server plugin/installed as the linked mentions Codex injects', { timeout: 10000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'codex-plugins-'));
+  const command = join(root, 'codex');
+  await writeFile(command, `#!${process.execPath}
+import { createInterface } from 'node:readline';
+const plugin = (id, name, extra = {}) => ({ id, name, installed: true, enabled: true, availability: 'AVAILABLE',
+  interface: { displayName: name === 'notion' ? 'Notion' : null, shortDescription: name === 'notion' ? 'Notion docs and workflows' : null }, ...extra });
+for await (const line of createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.id === undefined) continue;
+  let result = {};
+  if (request.method === 'plugin/installed') {
+    if (process.argv[2] !== 'app-server' || request.params.cwds[0] !== '/work') process.exit(3);
+    result = { marketplaceLoadErrors: [], marketplaces: [
+      { name: 'openai-curated', path: null, interface: null, plugins: [plugin('notion@openai-curated', 'notion'), plugin('sentry@openai-curated', 'sentry', { interface: null }),
+        plugin('off@openai-curated', 'off', { enabled: false }), plugin('gone@openai-curated', 'gone', { installed: false }), plugin('admin@openai-curated', 'admin', { availability: 'DISABLED_BY_ADMIN' })] },
+      { name: 'repo', path: '/work', interface: null, plugins: [plugin('notion@openai-curated', 'notion'), plugin('bad name@repo', 'bad name')] },
+    ] };
+  }
+  process.stdout.write(JSON.stringify({ id: request.id, result }) + '\\n');
+}
+`);
+  await chmod(command, 0o755);
+  try {
+    assert.deepEqual(await codexPlugins(command, { PATH: process.env.PATH }, '/work'), [
+      { name: 'notion', displayName: 'Notion', description: 'Notion docs and workflows', mention: '[@notion](plugin://notion@openai-curated)' },
+      { name: 'sentry', displayName: 'sentry', description: null, mention: '[@sentry](plugin://sentry@openai-curated)' },
     ]);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

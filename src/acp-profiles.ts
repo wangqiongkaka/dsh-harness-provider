@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
 import pkg from '../package.json' with { type: 'json' };
-import type { HarnessAccountSnapshot, HostTurnSnapshot } from './contracts.js';
+import type { HarnessAccountSnapshot, HarnessPlugin, HostTurnSnapshot } from './contracts.js';
 import { feedbackInstructions } from './feedback.js';
 import { CodexRpc } from './codex-rpc.js';
 import { ClaudeInspector, ClaudeNotInstalledError, resolveClaudeExecutable, withNodeOnPath, withUserShellEnvironment } from './claude-sdk.js';
@@ -83,6 +83,28 @@ export async function codexTurnOutcomes(command: string, environment: NodeJS.Pro
   });
 }
 
+// Official app-server protocol (`codex app-server generate-ts`): v2/PluginInstalledResponse, PluginMarketplaceEntry, PluginSummary.
+const installedPlugins = z.object({
+  marketplaces: z.array(z.object({ plugins: z.array(z.object({
+    id: z.string(), name: z.string(), installed: z.boolean(), enabled: z.boolean(), availability: z.string(),
+    interface: z.object({ displayName: z.string().nullable(), shortDescription: z.string().nullable() }).passthrough().nullable(),
+  }).passthrough()) }).passthrough()),
+}).passthrough();
+/**
+ * Installed, enabled plugins of the workspace. Codex injects a plugin only for the linked mention `[@<name>](plugin://<id>)`
+ * (verified by experiments/plugin-mention-probe.mjs); codex-acp passes that text through unchanged.
+ */
+export async function codexPlugins(command: string, environment: NodeJS.ProcessEnv, cwd: string): Promise<HarnessPlugin[]> {
+  const { marketplaces } = installedPlugins.parse(await withCodexServer(command, environment, rpc => rpc.request('plugin/installed', { cwds: [cwd] })));
+  const seen = new Set<string>();
+  return marketplaces.flatMap(entry => entry.plugins).flatMap(plugin => {
+    // The link grammar cannot carry brackets, parentheses or whitespace.
+    if (!plugin.installed || !plugin.enabled || plugin.availability !== 'AVAILABLE' || seen.has(plugin.id) || !/^[^\s\[\]()]+$/u.test(plugin.id + plugin.name)) return [];
+    seen.add(plugin.id);
+    return [{ name: plugin.name, displayName: plugin.interface?.displayName || plugin.name, description: plugin.interface?.shortDescription || null, mention: `[@${plugin.name}](plugin://${plugin.id})` }];
+  });
+}
+
 /** A CODEX_CONFIG the user already set keeps its settings; its own developer instructions come first. */
 function withDeveloperInstructions(raw: string | undefined, instructions: string): string {
   const config = raw ? JSON.parse(raw) as Record<string, unknown> : {};
@@ -108,6 +130,7 @@ export function codexProfile(options: { command: string; environment: NodeJS.Pro
     skillInvocation: (command: AvailableCommand) => command.name.startsWith('$') ? command.name : `/${command.name}`,
     titleCommand: title => `/rename ${title}`,
     inspectAccount: () => codexAccount(options.command, options.environment),
+    listPlugins: cwd => codexPlugins(options.command, options.environment, cwd),
     turnOutcomes: threadId => codexTurnOutcomes(options.command, options.environment, threadId),
   };
 }

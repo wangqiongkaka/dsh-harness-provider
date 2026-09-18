@@ -11,7 +11,7 @@ import pkg from '../package.json' with { type: 'json' };
 import {
   HarnessOutputChannel, harnessIdSchema, harnessModelRefSchema, harnessPermissionModeIdSchema, harnessThinkingOptionIdSchema,
   hostInteractionIdSchema, hostItemIdSchema, nativeSessionRefSchema, validateHostInteractionResponse,
-  type HarnessAccountSnapshot, type HarnessAdapter, type HarnessError, type HarnessId, type HarnessInspection, type HarnessModelCatalog,
+  type HarnessAccountSnapshot, type HarnessAdapter, type HarnessError, type HarnessPlugin, type HarnessId, type HarnessInspection, type HarnessModelCatalog,
   type HarnessModelRef, type HarnessOutput, type HarnessPermissionModeCatalog, type HarnessResult, type HarnessSession,
   type HarnessSessionCapabilities, type HarnessSessionState, type HarnessSkill, type HostApprovalInteraction, type HostChoiceQuestion,
   type HostCommand, type HostEvent, type HostInput, type HostInteraction, type HostInteractionId, type HostItem, type HostItemOf,
@@ -55,6 +55,8 @@ export interface AcpProfile {
   turnOutcomes?(nativeSessionId: string): Promise<Map<string, HostTurnSnapshot['outcome']>>;
   /** Native quota probe; ACP carries no account windows. */
   inspectAccount?(): Promise<HarnessAccountSnapshot | null>;
+  /** Plugins the agent program can be pointed at from the prompt; ACP carries no plugin catalog. */
+  listPlugins?(cwd: string): Promise<HarnessPlugin[]>;
 }
 
 const clientCapabilities = (profile: AcpProfile): acp.ClientCapabilities => ({
@@ -1111,6 +1113,10 @@ export class AcpAdapter implements HarnessAdapter {
       }
       return skillsOf(this.#options.profile, latest ?? []);
     }));
+  }
+  listPlugins({ cwd }: { cwd: string }): Promise<HarnessPlugin[]> {
+    if (this.#closing || !this.#options.profile.listPlugins) return Promise.resolve([]);
+    return this.#track(() => this.#options.profile.listPlugins!(cwd));
   }
   inspectAccount(): Promise<HarnessAccountSnapshot | null> {
     if (this.#closing || !this.#options.profile.inspectAccount) return Promise.resolve(null);

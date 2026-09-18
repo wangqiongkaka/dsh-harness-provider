@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService, RemoteError } from '@deepseek-ai/dsh-typert-protocol';
@@ -23,8 +23,11 @@ import type {} from '@deepseek-ai/dsh-session-title';
 import type {} from '@deepseek-ai/dsh-agent-presets/types';
 import type {} from '@deepseek-ai/dsh-subagent';
 import type {} from '@deepseek-ai/dsh-session-query';
+import type {} from '@deepseek-ai/dsh-commands';
+import type { CommandExecution, CommandSubmitAttachment } from '@deepseek-ai/dsh-commands/types';
+import type {} from '@deepseek-ai/dsh-session-reference';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
-import type { HarnessSubagent } from './contracts.js';
+import type { HarnessPlugin, HarnessSubagent } from './contracts.js';
 import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, type HarnessAccountSnapshot } from './contracts.js';
 import { z } from 'zod';
 import { Bindings, type Binding } from './bindings.js';
@@ -34,6 +37,9 @@ import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest } from './delegation.js';
+
+/** DSH commands a Harness session keeps: the row stays DSH's, the work runs on the Harness's own command or mode. */
+const HARNESS_COMMANDS = new Set(['goal', 'plan', 'compact']);
 
 export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions', 'attachments', 'fileUploads'];
 export const configSchema = z.object({
@@ -53,6 +59,18 @@ export async function apply(ctx: Context, rawConfig: unknown = {}): Promise<void
 }
 
 type Ready = Extract<HarnessInspection, { status: 'ready' }>;
+
+/** Replaces a Service method for the scope's lifetime; a later plugin's replacement is left intact on dispose. */
+function override<T extends object, K extends keyof T>(scope: Context, target: T, key: K, replacement: T[K], label: string): void {
+  const descriptor = Object.getOwnPropertyDescriptor(target, key);
+  scope.effect(() => {
+    target[key] = replacement;
+    return () => {
+      if (Object.getOwnPropertyDescriptor(target, key)?.value !== replacement) return;
+      if (descriptor) Object.defineProperty(target, key, descriptor); else Reflect.deleteProperty(target, key);
+    };
+  }, label);
+}
 
 // DSH native sandbox mode -> the Harness permission mode it most closely matches, so switching Harness keeps the
 // permission the user already picked. Claude Code has no sandbox tiers below full access; those fall to its default.
@@ -99,6 +117,8 @@ export class HarnessService extends TypertRemoteService {
   private readonly catalogs = new Map<string, { until: number; work: Promise<Ready | { error: string }> }>();
   // ponytail: per-session automatic recovery check; each check loads native history in a new agent process.
   private readonly checks = new Map<string, { until: number; work: Promise<void> }>();
+  // ponytail: per-Harness+cwd plugin catalog cache for the `@` menu; installs show up within 30s, failures are not kept.
+  private readonly pluginCatalogs = new Map<string, { until: number; plugins: Promise<HarnessPlugin[]> }>();
   // ponytail: per-source quota cache; account probes are rate-limited upstream and identical across sessions.
   private readonly quotas = new Map<string, { until: number; work: Promise<Quota> }>();
   constructor(ctx: Context, root: string, private readonly adapters: Record<Binding['harness'], HarnessAdapter>) {
@@ -148,9 +168,8 @@ export class HarnessService extends TypertRemoteService {
     this.wrapCommands(ctx);
     ctx.inject(['sessionSkillCatalog'], scope => {
       const catalog = scope.sessionSkillCatalog;
-      const descriptor = Object.getOwnPropertyDescriptor(catalog, 'list');
       const original = catalog.list.bind(catalog);
-      const list: typeof catalog.list = async (request, signal) => {
+      override(scope, catalog, 'list', async (request, signal) => {
         signal.throwIfAborted();
         // Resolve remembered Harness selection before the composer's scope-birth prewarm.
         await this.state(request);
@@ -162,16 +181,33 @@ export class HarnessService extends TypertRemoteService {
           const live = this.runner.live.get(request.sessionId)?.session;
           const skills = live?.listSkills ? await live.listSkills() : await this.adapters[binding.harness].listSkills({ cwd: binding.cwd });
           signal.throwIfAborted();
-          return { skills };
+          // The kept DSH rows already carry these; the native entries would list them twice.
+          return { skills: skills.filter(skill => !HARNESS_COMMANDS.has(skill.name)) };
         });
-      };
-      scope.effect(() => {
-        catalog.list = list;
-        return () => {
-          if (Object.getOwnPropertyDescriptor(catalog, 'list')?.value !== list) return;
-          if (descriptor) Object.defineProperty(catalog, 'list', descriptor); else Reflect.deleteProperty(catalog, 'list');
-        };
       }, 'harness: session skill catalog');
+    });
+    // A Harness session keeps only the DSH commands every Harness can carry out (`/goal`, `/plan`, `/compact`), run on the
+    // Harness itself; the rest act on DSH's agent loop and stay hidden, so their `/…` line reaches the Harness as a prompt.
+    // The Remote gateway awaits these methods, so the async overrides keep their wire shape.
+    ctx.inject(['commands'], scope => {
+      const commands = scope.commands;
+      const list = commands.list.bind(commands), execute = commands.execute.bind(commands);
+      override(scope, commands, 'list', (async (agent: Parameters<typeof list>[0]) =>
+        await this.boundHarness(agent.id) ? list(agent).filter(command => HARNESS_COMMANDS.has(command.name)) : list(agent)) as unknown as typeof list, 'harness: DSH commands');
+      override(scope, commands, 'execute', async (agent, line, attachments, signal) => {
+        if (!await this.boundHarness(agent.id)) return execute(agent, line, attachments, signal);
+        const [, name = '', args = ''] = /^\/(\S+)\s*([\s\S]*)$/.exec(line.trim()) ?? [];
+        if (!HARNESS_COMMANDS.has(name)) return undefined;
+        await this.harnessCommand(agent.id, name, line.trim(), args.trim(), attachments, signal);
+        return { commandId: brandString<CommandExecution['commandId']>(`harness-${randomUUID()}`), result: { kind: 'success' } };
+      }, 'harness: DSH command execution');
+    });
+    // `@` session mentions are expanded only by DSH's own agent loop; a Harness would get an unreadable link.
+    ctx.inject(['sessionReferenceResolver'], scope => {
+      const resolver = scope.sessionReferenceResolver;
+      const candidates = resolver.remoteExportCandidates.bind(resolver);
+      override(scope, resolver, 'remoteExportCandidates', async (agent, query, signal) =>
+        await this.boundHarness(agent.id) ? [] : candidates(agent, query, signal), 'harness: session references');
     });
     void this.bindings.delegated().then(bindings => Promise.allSettled(bindings.map(binding => this.notifyDelegation(binding.sessionId)))).catch(() => {});
   }
@@ -624,6 +660,46 @@ export class HarnessService extends TypertRemoteService {
     });
   }
 
+  /**
+   * `/goal` and `/compact` reach the Harness as typed, so its own command runs. `/plan` switches the Harness's plan mode
+   * (Claude Code's `plan` permission mode, Codex's plan collaboration mode): bare toggles, `off` leaves, text enters and sends it.
+   */
+  private async harnessCommand(sessionId: string, name: string, line: string, args: string, attachments: readonly CommandSubmitAttachment[], signal: AbortSignal): Promise<void> {
+    // Command attachments are the prompt's own image / file-receipt parts; only the receipt id's brand differs.
+    type Content = Parameters<Context['sessionController']['prompt']>[0]['content'];
+    const send = (content: readonly ({ type: 'text'; text: string } | CommandSubmitAttachment)[]) => this.ctx.sessionController.prompt({
+      sessionId: SessionId(sessionId), requestId: brandString<SessionRequestId>(`harness-${randomUUID()}`), mode: 'queue', content: content as Content }, signal);
+    if (name !== 'plan') { await send([{ type: 'text', text: line }, ...attachments]); return; }
+    if (args === 'off' && attachments.length) throw new Error('/plan off 不能附带附件');
+    const binding = await this.bindings.read(sessionId);
+    if (!binding) throw new Error('请使用 DSH 原生计划模式');
+    const inspection = await this.inspection(binding);
+    if ('error' in inspection) throw new Error(inspection.error);
+    const modes = inspection.permissionModes;
+    const collaboration = inspection.catalog.configOptions?.find(option => option.id === 'collaboration_mode' && option.choices?.some(choice => choice.value === 'plan'));
+    let active: boolean, enter: () => Promise<unknown>, leave: () => Promise<unknown>;
+    if (modes?.modes.some(mode => mode.id === 'plan')) {
+      const current = binding.permission ?? modes.defaultModeId;
+      active = current === 'plan';
+      enter = async () => {
+        await this.bindings.serial(sessionId, async () => {
+          const latest = await this.bindings.read(sessionId);
+          if (latest) { latest.beforePlan = harnessPermissionModeIdSchema.parse(current); await this.bindings.write(latest); }
+        });
+        return this.selectPermission({ sessionId, permission: 'plan' });
+      };
+      leave = () => this.selectPermission({ sessionId, permission: binding.beforePlan ?? modes.defaultModeId });
+    } else if (collaboration) {
+      active = (binding.configs?.[collaboration.id] ?? collaboration.currentValue) === 'plan';
+      enter = () => this.selectConfig({ sessionId, configId: collaboration.id, value: 'plan' });
+      leave = () => this.selectConfig({ sessionId, configId: collaboration.id, value: collaboration.choices!.find(choice => choice.value !== 'plan')!.value });
+    } else throw new Error('这个 Harness 没有计划模式');
+    const message = args === 'off' ? '' : args;
+    const on = args === 'off' ? false : message || attachments.length ? true : !active;
+    if (on !== active) await (on ? enter() : leave());
+    if (message || attachments.length) await send([...(message ? [{ type: 'text' as const, text: message }] : []), ...attachments]);
+  }
+
   async usage(raw: unknown) {
     const { sessionId } = address.parse(raw);
     await this.agent(sessionId);
@@ -633,6 +709,22 @@ export class HarnessService extends TypertRemoteService {
     const usage = live?.usage ?? (await this.bindings.read(sessionId))?.usage;
     if (!usage || (usage.contextUsedTokens === undefined && usage.totalTokens === undefined)) return null;
     return { contextUsedTokens: usage.contextUsedTokens ?? null, contextWindowTokens: usage.contextWindowTokens ?? null, totalTokens: usage.totalTokens ?? null };
+  }
+
+  /** The `@` menu queries on every keystroke; a catalog read spawns the Harness program, so one read serves 30 seconds. */
+  async plugins(raw: unknown): Promise<HarnessPlugin[]> {
+    const { sessionId } = address.parse(raw);
+    await this.state({ sessionId });
+    const binding = await this.bindings.read(sessionId);
+    const adapter = binding && this.adapters[binding.harness];
+    if (!binding || !adapter?.listPlugins) return [];
+    const key = `${binding.harness}\0${binding.cwd}`, cached = this.pluginCatalogs.get(key);
+    if (cached && cached.until > Date.now()) return cached.plugins;
+    const plugins = adapter.listPlugins({ cwd: binding.cwd });
+    const entry = { until: Infinity, plugins };
+    this.pluginCatalogs.set(key, entry);
+    plugins.then(() => { entry.until = Date.now() + 30_000; }, () => { if (this.pluginCatalogs.get(key) === entry) this.pluginCatalogs.delete(key); });
+    return plugins;
   }
 
   async subagents(raw: unknown): Promise<HarnessSubagent[]> {
@@ -709,6 +801,11 @@ export class HarnessService extends TypertRemoteService {
     return { harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? nativeLocked,
       model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null,
       configs: binding?.configs ?? {}, recoveryRequired: !!binding?.pending };
+  }
+  /** Whether the session runs on an external Harness, after its remembered Harness selection has been applied. */
+  private async boundHarness(sessionId: string): Promise<boolean> {
+    await this.state({ sessionId });
+    return !!await this.bindings.read(sessionId);
   }
   private async agent(id: string) {
     const result = await this.ctx.sessionController.resolveAgent(SessionId(id));

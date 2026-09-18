@@ -8,8 +8,10 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client';
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client';
+import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client';
+import type {} from '@deepseek-ai/dsh-client-ui-commands/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
-import { contribution, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema } from './remote.js';
+import { contribution, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema } from './remote.js';
 import type { z } from 'zod';
 
 type State = z.infer<typeof stateSchema>;
@@ -18,6 +20,7 @@ type Usage = z.infer<typeof usageSchema>;
 type Quota = z.infer<typeof quotaSchema>;
 type SecretStatus = z.infer<typeof secretStatusSchema>;
 type Subagents = z.infer<typeof subagentsSchema>;
+type Plugin = z.infer<typeof pluginsSchema>[number];
 type Api = {
   recover(request: {sessionId: string; action: 'check' | 'unlock'}): Promise<RemoteResult<State & {detail: string}>>;
   secretStatus(request: {sessionId: string}): Promise<RemoteResult<SecretStatus>>;
@@ -33,6 +36,7 @@ type Api = {
   harnesses(request: {sessionIds: string[]}): Promise<RemoteResult<Record<string, {harness: State['harness']; delegated: boolean}>>>;
   quota(request: {sessionId: string}): Promise<RemoteResult<Quota>>;
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
+  plugins(request: {sessionId: string}): Promise<RemoteResult<Plugin[]>>;
 };
 const zh = {
   harness: '选择 Harness', model: '选择 Harness 模型', native: 'DSH 原生', defaultModel: '默认模型',
@@ -54,6 +58,7 @@ const zh = {
   subagents: '子代理', subagentsDescription: '查看子代理的运行状态和内容',
   subagentsEmpty: '当前会话还没有子代理活动。Codex / Claude Code 会话在本次运行中打开后才会显示其子代理。', subagentNoActivity: '暂无内容',
   'subagent.running': '运行中', 'subagent.completed': '已完成', 'subagent.failed': '失败', 'subagent.cancelled': '已取消',
+  plugins: '插件',
 };
 const en: Record<keyof typeof zh,string> = {
   harness:'Select Harness', model:'Select Harness model', native:'Native DSH', defaultModel:'Default model',
@@ -75,6 +80,7 @@ const en: Record<keyof typeof zh,string> = {
   subagents:'Subagents', subagentsDescription:'Status and activity of subagents',
   subagentsEmpty:'No subagent activity in this session yet. Codex / Claude Code subagents appear once the session is open in this run.', subagentNoActivity:'Nothing yet',
   'subagent.running':'Running', 'subagent.completed':'Completed', 'subagent.failed':'Failed', 'subagent.cancelled':'Cancelled',
+  plugins:'Plugins',
 };
 type Key = keyof typeof zh;
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -115,6 +121,7 @@ type PermissionProps = PropsRuntime<'conversation.input.permission'> & PropsLoca
 const Chevron = ({ open }: { open?: boolean }) => <svg className={`hp-chevron${open ? ' hp-chevron-open' : ''}`} width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const ChevronRight = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const Back = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M10 4L6 8l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
+const PluginIcon = ({ size = 16 }: { size?: number }) => <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden><path d="M6 2.5h4v2a1.5 1.5 0 003 0V6h.5v4H13v-.5a1.5 1.5 0 00-3 0v4H6v-2a1.5 1.5 0 00-3 0V12h-.5V6H3v.5a1.5 1.5 0 003 0v-4z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/></svg>;
 const Check = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const icons: Record<string, ReactNode> = {
   clock: <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden><circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.4"/><path d="M8 4.5V8l2.5 1.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>,
@@ -706,6 +713,16 @@ export async function apply(ctx: Context): Promise<void> {
     style.textContent=markStyles;
     document.head.append(style);return ()=>style.remove();
   }, 'harness: sidebar mark styles');
+  // Harness per session for the composer menus; the selector reports every switch, a failed read is retried next time.
+  const harnesses = new Map<string, Promise<State['harness']>>();
+  const harnessOf = (remote: Api, sessionId: string) => {
+    let harness = harnesses.get(sessionId);
+    if (!harness) {
+      harnesses.set(sessionId, harness = value(remote.state({ sessionId })).then(state => state.harness));
+      harness.catch(() => { if (harnesses.get(sessionId) === harness) harnesses.delete(sessionId); });
+    }
+    return harness;
+  };
   ctx.inject(['sessions', 'remote.harness'], scope => {
     let nativeSeats: Array<()=>void> = [];
     const known = new Map<string,State['harness']>();
@@ -735,6 +752,8 @@ export async function apply(ctx: Context): Promise<void> {
     }
     const schedule = () => { if (!frame) frame=requestAnimationFrame(paint); };
     const listeners = new Set<() => void>();
+    // `/plan` in a Harness session switches its permission or collaboration mode; the seats re-read it.
+    scope.on('command/executed', (_sessionId, name) => { if (name === 'plan') for (const listener of listeners) listener(); });
     const api: Injected = {
       recover:(sessionId,action)=>value(scope.remote.harness.recover({sessionId,action})),
       secretStatus:id=>value(scope.remote.harness.secretStatus({sessionId:id})),
@@ -748,7 +767,7 @@ export async function apply(ctx: Context): Promise<void> {
       selectConfig:(id,configId,value_)=>value(scope.remote.harness.selectConfig({sessionId:id,configId,value:value_})),
       usage:id=>value(scope.remote.harness.usage({sessionId:id})),
       quota:id=>value(scope.remote.harness.quota({sessionId:id})),
-      changed:(id,harness)=>{known.set(id,harness);syncModel();schedule();for (const listener of listeners) listener();},
+      changed:(id,harness)=>{known.set(id,harness);harnesses.set(id,Promise.resolve(harness));syncModel();schedule();for (const listener of listeners) listener();},
       subscribe:listener=>{listeners.add(listener);return ()=>{listeners.delete(listener);};},
     };
     function syncModel() {
@@ -778,6 +797,45 @@ export async function apply(ctx: Context): Promise<void> {
     scope.slots.inject('conversation.input.left',()=>scope.slots.register({
       name:'conversation.input.left',id:'harness-selector',order:-100,locale:'harness',inject:()=>api,
     },HarnessSelect));
+  });
+  // `/` in a Harness session keeps the DSH rows a Harness carries out: attaching files, and goal / plan / compact, which the
+  // server runs on the Harness. The rest act on DSH's agent (the server already hides its commands); a typed `/model`
+  // reaches the Harness as a prompt instead of DSH's model picker.
+  ctx.inject(['commandUi', 'remote.harness'], scope => {
+    type Source = { candidates(session: { sessionId: string }, ...rest: unknown[]): Promise<{ name: string }[]>; matchEnter(session: { sessionId: string }, line: string, ...rest: unknown[]): Promise<unknown> };
+    const runtime = scope.commandUi as unknown as Source;
+    const external = async (sessionId: string) => (await harnessOf(scope.remote.harness, sessionId).catch(() => 'dsh')) !== 'dsh';
+    const candidates = runtime.candidates.bind(runtime), matchEnter = runtime.matchEnter.bind(runtime);
+    const kept = new Set(['file', 'goal', 'plan', 'compact']);
+    const replacements: Source = {
+      candidates: async (session, ...rest) => await external(session.sessionId) ? (await candidates(session, ...rest)).filter(row => kept.has(row.name)) : candidates(session, ...rest),
+      matchEnter: async (session, line, ...rest) => /^\/model(\s|$)/.test(line.trim()) && await external(session.sessionId) ? undefined : matchEnter(session, line, ...rest),
+    };
+    scope.effect(() => {
+      Object.assign(runtime, replacements);
+      return () => { for (const key of ['candidates', 'matchEnter'] as const) if (Object.hasOwn(runtime, key) && runtime[key] === replacements[key]) Reflect.deleteProperty(runtime, key); };
+    }, 'harness: DSH slash commands');
+  });
+  // `@` menu: the session Harness's installed plugins after the files. A pick inserts a chip whose prompt text is the Harness's
+  // own plugin mention; the server returns nothing for DSH sessions and Harnesses without plugins.
+  ctx.inject(['inputTriggers', 'remote.harness'], scope => {
+    const t = ctx.locale.bind('harness');
+    scope.effect(() => scope.inputTriggers.registerSource({
+      trigger: '@', name: 'harness-plugin', order: 10, showGroupTitle: false,
+      async candidates(session, { query, quoted, signal }) {
+        if (quoted) return [];
+        const plugins = await value(scope.remote.harness.plugins({ sessionId: session.sessionId }));
+        if (signal.aborted) return [];
+        const needle = query.toLowerCase();
+        return plugins.filter(plugin => !needle || plugin.name.toLowerCase().includes(needle) || plugin.displayName.toLowerCase().includes(needle))
+          .map(plugin => ({ name: plugin.displayName, ...(plugin.description ? { description: plugin.description } : {}), icon: PluginIcon, section: t('plugins'), value: JSON.stringify(plugin) }));
+      },
+      onPick({ candidate }) {
+        const plugin = JSON.parse(candidate.value!) as Plugin;
+        return { insert: { source: 'harness-plugin', ref: plugin.mention, label: plugin.displayName, clipboardText: plugin.mention } };
+      },
+      codec: { clipboardText: ref => ref, serialize: ref => Promise.resolve(ref) },
+    }), 'harness: plugin mentions');
   });
   // Optional: a DSH build without the right sidebar simply has no subagents tab.
   ctx.inject(['sidebarRightTabs', 'remote.harness'], scope => {
