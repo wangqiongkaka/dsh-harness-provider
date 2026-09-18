@@ -561,18 +561,17 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
   </div>;
 }
 
-// ---- right sidebar guide card: the host's capsule geometry, plus the plugin that provides it ----
+// ---- right sidebar guide card: the host's title-only capsule, with the plugin that provides it on the same line ----
 type GuideEntryProps = PropsRuntime<'sidebar.right.tab.guide.entry'> & PropsLocale<'harness'>;
 export function GuideEntry({ kind, title, description, useTabInfo, t }: GuideEntryProps) {
   const { tab } = useTabInfo();
   return <button type="button" className="hp-guide" data-sidebar-right-guide-entry={kind} onClick={() => tab.actions.openTab(kind, { replaceTab: true })}>
-    <svg className="hp-guide-icon" width="26" height="26" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" aria-hidden>
+    <svg className="hp-guide-icon" width="22" height="22" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" aria-hidden>
       <path d="M 8 2.5 L 12.9 5.2 V 10.8 L 8 13.5 L 3.1 10.8 V 5.2 Z" /><path d="M 3.1 5.2 L 8 7.9 L 12.9 5.2 M 8 7.9 V 13.5" strokeLinecap="round" />
     </svg>
     <span className="hp-guide-text">
       <span className="hp-guide-title">{title}</span>
-      {description && <span className="hp-guide-line">{description}</span>}
-      <span className="hp-guide-line">{t('providedBy')}</span>
+      <span className="hp-guide-line">{[description, t('providedBy')].filter(Boolean).join(' · ')}</span>
     </span>
   </button>;
 }
@@ -676,8 +675,9 @@ const styles = `
 .hp-foot{margin-top:10px;padding-top:8px;border-top:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-caption)}
 .hp-guide{display:flex;gap:14px;align-items:center;box-sizing:border-box;width:100%;min-height:56px;padding:14px 20px;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l4);border-radius:24px;cursor:pointer}
 .hp-guide:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.hp-guide-icon{flex:none;color:var(--dsw-alias-label-tertiary)}
-.hp-guide-text{display:flex;flex-direction:column;gap:3px;min-width:0}
+.hp-guide-icon{flex:none;margin:0 2px;color:var(--dsw-alias-label-tertiary)}
+.hp-guide-text{display:flex;align-items:baseline;gap:8px;min-width:0}
+.hp-guide-title{flex:none}
 .hp-guide-title,.hp-guide-line{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1.4}
 .hp-guide-title{font-size:15px}
 .hp-guide-line{font-size:13px;color:var(--dsw-alias-label-caption)}
