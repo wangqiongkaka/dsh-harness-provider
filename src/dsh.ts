@@ -35,7 +35,7 @@ import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT
 import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
-import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest } from './remote.js';
+import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest } from './delegation.js';
 
 /** DSH commands a Harness session keeps: the row stays DSH's, the work runs on the Harness's own command or mode. */
@@ -267,30 +267,70 @@ export class HarnessService extends TypertRemoteService {
     });
   }
 
+  /** Moves the native context back to just before `binding.turns[index]` (the last turn when absent); workspace files stay. */
+  private async rewind(agent: Awaited<ReturnType<HarnessService['agent']>>, binding: Binding, index?: number) {
+    if (binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先结束当前请求并处理未确认结果');
+    const ref = await this.withSession(binding, async session => {
+      if (!session.fork || !session.readSnapshot) throw new Error('Harness 未提供历史操作');
+      const snapshot = unwrap(await session.readSnapshot());
+      if (!snapshot.turns.length) throw new Error('没有可回滚的对话');
+      const key = binding.turns?.[index ?? binding.turns.length - 1]?.key;
+      const native = key ? snapshot.turns.findIndex(turn => turn.nativeTurnRef.nativeTurnKey === key) : index === undefined ? snapshot.turns.length - 1 : -1;
+      if (native < 0) throw new Error('无法确认该轮的原生边界');
+      const previous = snapshot.turns[native - 1]?.nativeTurnRef.nativeTurnKey;
+      return unwrap(await session.fork(previous ?? null));
+    });
+    const live = this.runner.live.get(binding.sessionId);
+    if (live) { await live.session.close(); this.runner.live.delete(binding.sessionId); }
+    if (ref) binding.nativeRef = ref; else delete binding.nativeRef;
+    binding.turns = (binding.turns ?? []).slice(0, index ?? -1);
+    delete binding.usage;
+    await this.bindings.write(binding);
+  }
+  private async notice(agent: Awaited<ReturnType<HarnessService['agent']>>, summary: string, text: string) {
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice', summary },
+      content: [{ type: 'text', text }] }), { surfaceOp: 'append' });
+    await this.ctx.sessions.flush(agent.session);
+  }
+
   async rollback(raw: unknown) {
     const { sessionId } = address.parse(raw);
     return this.bindings.serial(sessionId, async () => {
       const agent = await this.agent(sessionId), binding = await this.bindings.read(sessionId);
-      if (!binding || binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先结束当前请求并处理未确认结果');
-      const ref = await this.withSession(binding, async session => {
-        if (!session.fork || !session.readSnapshot) throw new Error('Harness 未提供历史操作');
-        const snapshot = unwrap(await session.readSnapshot());
-        if (!snapshot.turns.length) throw new Error('没有可回滚的对话');
-        const currentKey = binding.turns?.at(-1)?.key;
-        const index = currentKey ? snapshot.turns.findIndex(turn => turn.nativeTurnRef.nativeTurnKey === currentKey) : snapshot.turns.length - 1;
-        if (index < 0) throw new Error('无法确认最后一轮的原生边界');
-        const previous = snapshot.turns[index - 1]?.nativeTurnRef.nativeTurnKey;
-        return unwrap(await session.fork(previous ?? null));
+      if (!binding) throw new Error('请先结束当前请求并处理未确认结果');
+      await this.rewind(agent, binding);
+      await this.notice(agent, '对话已回滚', '已撤销最后一轮原生对话上下文，工作区文件保持原状。上方原记录保留供查阅，后续对话从回滚位置继续。');
+      return this.view(binding);
+    });
+  }
+
+  /** Reruns a user prompt with new text: the native context goes back to before its turn, the old transcript stays above a notice. */
+  async edit(raw: unknown) {
+    const { sessionId, seq, text, requestId } = editRequest.parse(raw);
+    return this.bindings.serial(sessionId, async () => {
+      const agent = await this.agent(sessionId), binding = await this.bindings.read(sessionId);
+      if (!binding) throw new Error('只有 Codex / Claude Code 会话支持编辑消息');
+      const events = agent.session.snapshotEvents();
+      const typed = (event: SessionEvent | undefined): event is Extract<SessionEvent, { type: 'user/message' }> => event?.type === 'user/message' && event.data.source.kind === 'user';
+      if (events.some(event => typed(event) && (event.data.source as { rpcId?: string }).rpcId === requestId)) return this.view(binding);
+      // A turn's prompt is the run of user messages right after its step/start; steering arrives later and cannot be edited alone.
+      let start = events.findIndex(event => event.seq === seq);
+      const target = events[start];
+      while (typed(events[start - 1])) start--;
+      const head = events[start - 1];
+      if (!typed(target) || head?.type !== 'step/start') throw new Error('只能编辑一轮对话开头的用户消息');
+      const prompt: Array<Extract<SessionEvent, { type: 'user/message' }>> = [];
+      for (let i = start; typed(events[i]); i++) prompt.push(events[i] as Extract<SessionEvent, { type: 'user/message' }>);
+      const index = (binding.turns ?? []).findIndex(entry => entry.turn === head.data.turn);
+      if (index < 0) throw new Error('该消息所在轮次的原生边界无法确认（可能已被回滚或编辑过），无法编辑');
+      const content = [...(text.trim() ? [{ type: 'text' as const, text }] : []), ...target.data.content.filter(part => part.type !== 'text')];
+      if (!content.length) throw new RemoteError('gateway/bad-request', '请输入文字或保留附件', {});
+      await this.rewind(agent, binding, index);
+      await this.notice(agent, '消息已编辑', '已撤销该消息及之后的原生对话上下文，并按编辑后的内容重新执行；工作区文件保持原状。上方原记录保留供查阅。');
+      prompt.forEach((event, offset) => {
+        agent.followup(createUserMessage({ content: event === target ? content : event.data.content,
+          source: { kind: 'user', rpcId: event === target ? requestId : `${requestId}#${offset}` } }));
       });
-      const live = this.runner.live.get(sessionId);
-      if (live) { await live.session.close(); this.runner.live.delete(sessionId); }
-      if (ref) binding.nativeRef = ref; else delete binding.nativeRef;
-      binding.turns = (binding.turns ?? []).slice(0, -1);
-      delete binding.usage;
-      await this.bindings.write(binding);
-      agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice', summary: '对话已回滚' },
-        content: [{ type: 'text', text: '已撤销最后一轮原生对话上下文，工作区文件保持原状。上方原记录保留供查阅，后续对话从回滚位置继续。' }] }), { surfaceOp: 'append' });
-      await this.ctx.sessions.flush(agent.session);
       return this.view(binding);
     });
   }
@@ -800,7 +840,7 @@ export class HarnessService extends TypertRemoteService {
   private view(binding?: Binding, nativeLocked = false) {
     return { harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? nativeLocked,
       model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null,
-      configs: binding?.configs ?? {}, recoveryRequired: !!binding?.pending };
+      configs: binding?.configs ?? {}, recoveryRequired: !!binding?.pending, editableTurns: binding?.turns?.map(entry => entry.turn) ?? [] };
   }
   /** Whether the session runs on an external Harness, after its remembered Harness selection has been applied. */
   private async boundHarness(sessionId: string): Promise<boolean> {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
 import type {} from '@deepseek-ai/dsh-api-remotes/client';
@@ -11,6 +11,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client';
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client';
 import type {} from '@deepseek-ai/dsh-client-ui-commands/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
+import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client';
 import { contribution, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema } from './remote.js';
 import type { z } from 'zod';
 
@@ -37,6 +38,7 @@ type Api = {
   quota(request: {sessionId: string}): Promise<RemoteResult<Quota>>;
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
   plugins(request: {sessionId: string}): Promise<RemoteResult<Plugin[]>>;
+  edit(request: {sessionId: string; seq: number; text: string; requestId: string}): Promise<RemoteResult<State>>;
 };
 const zh = {
   harness: '选择 Harness', model: '选择 Harness 模型', native: 'DSH 原生', defaultModel: '默认模型',
@@ -59,6 +61,7 @@ const zh = {
   subagentsEmpty: '当前会话还没有子代理活动。Codex / Claude Code 会话在本次运行中打开后才会显示其子代理。', subagentNoActivity: '暂无内容',
   'subagent.running': '运行中', 'subagent.completed': '已完成', 'subagent.failed': '失败', 'subagent.cancelled': '已取消',
   plugins: '插件',
+  edit: '编辑', editCancel: '取消', editSend: '发送', editHint: '发送后从这条消息重新执行，之后的原生上下文会撤销；工作区文件不会还原。',
 };
 const en: Record<keyof typeof zh,string> = {
   harness:'Select Harness', model:'Select Harness model', native:'Native DSH', defaultModel:'Default model',
@@ -81,6 +84,7 @@ const en: Record<keyof typeof zh,string> = {
   subagentsEmpty:'No subagent activity in this session yet. Codex / Claude Code subagents appear once the session is open in this run.', subagentNoActivity:'Nothing yet',
   'subagent.running':'Running', 'subagent.completed':'Completed', 'subagent.failed':'Failed', 'subagent.cancelled':'Cancelled',
   plugins:'Plugins',
+  edit:'Edit', editCancel:'Cancel', editSend:'Send', editHint:'Sending reruns from this message and drops the native context after it; workspace files are not restored.',
 };
 type Key = keyof typeof zh;
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -670,7 +674,81 @@ const styles = `
 .hp-sub-tool summary{display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:var(--dsw-alias-label-secondary);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .hp-sub-tool pre{max-height:240px;margin:4px 0 0;padding:8px;overflow:auto;border-radius:8px;background:var(--dsw-specific-menu);font-size:12px;line-height:18px;white-space:pre-wrap;word-break:break-word}
 .hp-secret{position:absolute;bottom:100%;left:0;z-index:110;max-height:60vh;overflow:auto;width:340px;padding:16px;border-radius:12px;background:var(--dsw-specific-menu);box-shadow:var(--dsw-elevation-prominent);font-size:14px}.hp-secret input,.hp-secret select{display:block;box-sizing:border-box;width:100%;margin-top:4px}.hp-secret p{font-size:12px}.hp-alert{max-width:360px;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
+.hp-user-editable{position:relative}
+.hp-user-editable>div>div:last-child{padding-right:calc(36px + var(--dsh-content-font-delta,0px))}
+.hp-edit-action{position:absolute;right:0;bottom:0;display:inline-flex;align-items:center;justify-content:center;width:calc(28px + var(--dsh-content-font-delta,0px));height:calc(28px + var(--dsh-content-font-delta,0px));padding:6px;border:none;border-radius:28px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer}
+.hp-edit-action:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
+@media (hover:hover){
+[data-chat-flow-kind='user']:has(~ :is([data-chat-flow-kind='user'],[data-chat-flow-kind='steering'])) .hp-edit-action{opacity:0;transition:opacity 80ms ease}
+[data-chat-flow-kind='user']:has(~ :is([data-chat-flow-kind='user'],[data-chat-flow-kind='steering'])):is(:hover,:focus-within) .hp-edit-action{opacity:1}
+}
+.hp-edit{display:flex;flex-direction:column;gap:8px;margin-left:auto;width:min(calc(var(--dsh-chat-content-width,748px) * 0.702),82%)}
+.hp-edit textarea{box-sizing:border-box;width:100%;padding:10px 16px;border:1px solid var(--dsw-alias-border-l2);border-radius:16px;background:var(--dsw-specific-bubble);color:var(--dsw-alias-label-primary);font:inherit;font-size:var(--dsh-content-font-size,14px);line-height:calc(22px + var(--dsh-content-font-delta,0px));resize:vertical;outline:none}
+.hp-edit textarea:focus{border-color:var(--dsw-alias-border-l3)}
+.hp-edit-bar{display:flex;align-items:center;justify-content:flex-end;gap:8px}
+.hp-edit-hint{flex:1;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
+.hp-edit-bar button{height:30px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:15px;background:transparent;color:var(--dsw-alias-label-primary);font-size:13px;cursor:pointer}
+.hp-edit-bar button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
+.hp-edit-bar .hp-edit-send{border-color:transparent;background:var(--dsw-alias-label-primary);color:var(--dsw-specific-bubble)}
+.hp-edit-bar .hp-edit-send:hover:not(:disabled){background:var(--dsw-alias-label-secondary)}
+.hp-edit-bar button:disabled{opacity:.5;cursor:default}
+.hp-edit-error{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
 `;
+
+// ---- editable user messages: wraps the host's user bubble; registered only while the current session runs on a Harness ----
+const Pencil = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M10.2 3.3l2.5 2.5M3 13l.6-2.9 7.3-7.3a1.2 1.2 0 011.7 0l.6.6a1.2 1.2 0 010 1.7l-7.3 7.3L3 13z" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>;
+interface EditInjected {
+  read(id: string): Promise<State>;
+  edit(id: string, seq: number, text: string, requestId: string): Promise<State>;
+  /** The user renderer this one shadows (the host's bubble). */
+  host(): ComponentType<ChatNodeViewProps<'user'>> | undefined;
+  ht: T;
+}
+export function EditableUserMessage(props: ChatNodeViewProps<'user'> & InjectFace<EditInjected>) {
+  const { sessionId, useSessions, node, read, edit, host, ht } = props;
+  const Host = host();
+  const running = !!useSessions(s => s.byId[sessionId]?.running);
+  const [state, setState] = useState<State>();
+  const [draft, setDraft] = useState<string>();
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const requestId = useRef('');
+  useEffect(() => {
+    let live = true;
+    void read(sessionId).then(next => { if (live) setState(next); }, () => {});
+    return () => { live = false; };
+  }, [sessionId, running, read]);
+  const content = node.data.content;
+  const text = content.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
+  const attached = content.some(part => part.type !== 'text');
+  const turn = node.location.kind === 'turn' || node.location.kind === 'step' ? node.location.turn.turn : undefined;
+  const editable = !running && !!state && !state.recoveryRequired && turn !== undefined && state.editableTurns.includes(turn);
+  async function submit() {
+    if (draft === undefined || busy || (!draft.trim() && !attached)) return;
+    setBusy(true); setError('');
+    try { setState(await edit(sessionId, node.data.seq, draft, requestId.current)); setDraft(undefined); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  }
+  if (draft !== undefined) return <div className="hp-edit">
+    <textarea autoFocus value={draft} disabled={busy} aria-label={ht('edit')} rows={Math.min(12, draft.split('\n').length + 1)}
+      onChange={event => setDraft(event.target.value)}
+      onKeyDown={event => {
+        if (event.key === 'Escape' && !busy) setDraft(undefined);
+        else if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void submit(); }
+      }} />
+    {error && <p className="hp-edit-error" role="alert">{error}</p>}
+    <div className="hp-edit-bar">
+      <span className="hp-edit-hint">{ht('editHint')}</span>
+      <button type="button" disabled={busy} onClick={() => setDraft(undefined)}>{ht('editCancel')}</button>
+      <button type="button" className="hp-edit-send" disabled={busy || (!draft.trim() && !attached)} onClick={() => void submit()}>{ht('editSend')}</button>
+    </div>
+  </div>;
+  return <div className={editable ? 'hp-user hp-user-editable' : 'hp-user'}>
+    {Host && <Host {...props} />}
+    {editable && <button type="button" className="hp-edit-action" aria-label={ht('edit')} title={ht('edit')}
+      onClick={() => { requestId.current = crypto.randomUUID(); setError(''); setDraft(text); }}><Pencil /></button>}
+  </div>;
+}
 
 // ---- sidebar marks: host session rows expose no slot, so rows get a data attribute and CSS draws the logo in the empty status cell ----
 // Brand marks: DeepSeek whale from dsh-client-ui-primitives FishLogo; OpenAI and Claude from Simple Icons (CC0).
@@ -770,6 +848,19 @@ export async function apply(ctx: Context): Promise<void> {
       changed:(id,harness)=>{known.set(id,harness);harnesses.set(id,Promise.resolve(harness));syncModel();schedule();for (const listener of listeners) listener();},
       subscribe:listener=>{listeners.add(listener);return ()=>{listeners.delete(listener);};},
     };
+    // Every user bubble reads the same state after a turn; concurrent reads share one request.
+    const reads = new Map<string, Promise<State>>();
+    const editApi: EditInjected = {
+      read: id => {
+        let read = reads.get(id);
+        if (!read) { reads.set(id, read = api.read(id)); read.finally(() => reads.delete(id)).catch(() => {}); }
+        return read;
+      },
+      edit: (sessionId, seq, text, requestId) => value(scope.remote.harness.edit({ sessionId, seq, text, requestId })),
+      host: () => scope.slots.entries('conversation.chat.node').filter(entry => entry.options.key === 'user' && entry.component !== EditableUserMessage)
+        .sort((a, b) => (a.options.priority ?? 0) - (b.options.priority ?? 0))[0]?.component as ComponentType<ChatNodeViewProps<'user'>> | undefined,
+      ht: ctx.locale.bind('harness'),
+    };
     function syncModel() {
       const {current,byId}=scope.sessions.list.getSnapshot();
       for (const id of known.keys()) if (!(id in byId)) known.delete(id);
@@ -781,6 +872,8 @@ export async function apply(ctx: Context): Promise<void> {
         nativeSeats.push(scope.slots.register({ name: 'conversation.input.permission', priority: -100, locale: 'harness', inject: () => api }, HarnessPermission));
         nativeSeats.push(scope.slots.register({ name: 'conversation.input.model', priority: -100, locale: 'harness', inject: () => api }, HarnessModel));
         nativeSeats.push(scope.slots.register({ name: 'settings.onboarding', id: 'deepseek-official', priority: -100 }, ExternalOnboarding));
+        nativeSeats.push(scope.slots.inject('conversation.chat.node', () => scope.slots.register({ name: 'conversation.chat.node', key: 'user', priority: -100,
+          locale: 'chat', inject: () => editApi }, EditableUserMessage)));
       }
       if (!external && nativeSeats.length) { for (const dispose of nativeSeats) dispose(); nativeSeats = []; }
     }

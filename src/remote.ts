@@ -7,6 +7,8 @@ export const stateSchema = z.object({
   harness: selection, locked: z.boolean(), model: z.string().nullable(), thinking: z.string().nullable(), permission: z.string().nullable(),
   configs: z.record(z.string(), z.union([z.string(), z.boolean()])),
   recoveryRequired: z.boolean(),
+  /** DSH turns whose native boundary is known, so their prompt can be edited and rerun in place. */
+  editableTurns: z.array(z.number().int()),
 });
 export const selectRequest = address.extend({ harness: selection });
 export const modelRequest = address.extend({ model: z.string().min(1) });
@@ -51,6 +53,7 @@ export const subagentsSchema = z.array(z.object({
 }));
 /** `@` menu entries of the session's Harness; empty for DSH sessions and Harnesses without plugins. */
 export const pluginsSchema = z.array(z.object({ name: z.string(), displayName: z.string(), description: z.string().nullable(), mention: z.string() }));
+export const editRequest = address.extend({ seq: z.number().int().nonnegative(), text: z.string().max(1_000_000), requestId: z.string().min(1).max(200) });
 export const recoveryRequest = address.extend({ action: z.enum(['check', 'unlock']) });
 export const recoverySchema = stateSchema.extend({ detail: z.string() });
 export const secretAnswerRequest = address.extend({ id: z.string().min(1), answers: z.record(z.string(), z.array(z.string().min(1).max(64_000))), cancelled: z.boolean().optional() });
@@ -60,7 +63,7 @@ export const secretStatusSchema = z.object({ id: z.string(), title: z.string(), 
 ])) }).nullable();
 const codec = (schema: z.ZodType) => ({ mode: 'strict' as const, typeSymbol: 'dsh-harness-provider#Contract', create: () => schema });
 export const descriptors: InvocationDescriptor[] = [
-  ['recover', recoveryRequest, recoverySchema], ['rollback', address, stateSchema],
+  ['recover', recoveryRequest, recoverySchema], ['rollback', address, stateSchema], ['edit', editRequest, stateSchema],
   ['secretStatus', address, secretStatusSchema], ['answerSecret', secretAnswerRequest, z.object({ accepted: z.boolean() })],
   ['state', address, stateSchema], ['select', selectRequest, stateSchema],
   ['models', address, modelsSchema], ['selectModel', modelRequest, stateSchema],

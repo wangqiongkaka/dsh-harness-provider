@@ -76,3 +76,35 @@ test('confirmed recovery is idempotent; rollback/fork preserve files and select 
     assert.equal((await h.bindings.read(child.sessionId)).delegation,undefined);
   } finally {await f.close();}
 });
+
+test('editing a prompt forks before its turn, resends it with the kept attachments, and is idempotent',async()=>{
+  const f=await fixture();
+  try {
+    const h=f.ctx.harness,followups=[];f.agent.followup=message=>followups.push(message);
+    await h.bindings.write({version:1,sessionId:'session',harness:'codex',cwd:f.root,locked:true,nativeRef:{harnessId:'codex',nativeSessionId:'native',formatVersion:1},turns:[{turn:1,key:'first'},{turn:2,key:'last'}]});
+    const user=(text,rpcId,extra=[])=>f.agent.session.append('user/message',{id:rpcId,content:[{type:'text',text},...extra],source:{kind:'user',rpcId}});
+    const image={type:'image',attachment:{id:'img'}};
+    f.agent.session.append('step/start',{turn:1,step:1});user('one','r1');
+    f.agent.session.append('step/start',{turn:2,step:1});const second=user('two','r2',[image]);
+    const queued=user('queued','r3');
+    f.agent.session.append('assistant/message',{turn:2,step:1});const steering=user('steer','r4');
+    await writeFile(join(f.root,'keep.txt'),'worktree changes');
+    await assert.rejects(h.edit({sessionId:'session',seq:steering.seq,text:'x',requestId:'e0'}),/开头的用户消息/);
+    const state=await h.edit({sessionId:'session',seq:second.seq,text:'two, edited',requestId:'e1'});
+    assert.deepEqual(state.editableTurns,[1]);
+    assert.deepEqual(f.calls.filter(call=>'fork' in call),[{fork:'first'}]);
+    const binding=await h.bindings.read('session');
+    assert.equal(binding.nativeRef.nativeSessionId,'forked');assert.deepEqual(binding.turns,[{turn:1,key:'first'}]);
+    assert.equal(await readFile(join(f.root,'keep.txt'),'utf8'),'worktree changes');
+    assert.equal(f.events.at(-1).data.source.summary,'消息已编辑');
+    assert.equal(followups.length,2); // a message queued into the same turn is resent unchanged; steering is not
+    assert.equal(followups[1].content[0].text,'queued');
+    assert.deepEqual(followups[0].content,[{type:'text',text:'two, edited'},image]);assert.equal(followups[0].source.rpcId,'e1');
+    // A retried request that already landed changes nothing.
+    f.agent.session.append('user/message',followups[0]);
+    await h.edit({sessionId:'session',seq:second.seq,text:'two, edited',requestId:'e1'});
+    assert.equal(f.calls.filter(call=>'fork' in call).length,1);
+    // The rewound turn no longer has a native boundary.
+    await assert.rejects(h.edit({sessionId:'session',seq:second.seq,text:'again',requestId:'e2'}),/原生边界无法确认/);
+  } finally {await f.close();}
+});
