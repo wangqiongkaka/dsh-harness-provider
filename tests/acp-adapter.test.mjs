@@ -228,6 +228,8 @@ test('turns stream text, apply hints, steer, cancel, and carry cumulative usage 
     value(await session.execute({ type: 'turn.start', turnId: 'host-1', input: [{ type: 'text', text: 'first' }, { type: 'text', text: '[HOST]' }] }));
     let seen = await until(output, 'turn.completed');
     assert.equal(events(seen, 'item.updated')[0].update.text, 'reply:first');
+    const streamedText = events(seen, 'item.started')[0].item.text + events(seen, 'item.updated').map(event => event.update.text).join('');
+    assert.equal(streamedText, events(seen, 'item.completed')[0].snapshot.item.text);
     assert.deepEqual((await f.notes()).filter(note => note.prompt).map(note => note.prompt), ['/rename first', 'first[HOST]']); // the session is named from the user's own block only; the prompt carries the blocks verbatim
     const started = events(seen, 'turn.started')[0];
     assert.match(started.nativeTurnRef.nativeTurnKey, /^[0-9a-f]{16}\.1$/);

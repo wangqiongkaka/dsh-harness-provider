@@ -1058,7 +1058,7 @@ class AcpSession implements HarnessSession {
       }
     })();
   }
-  #emit(event: HostEvent): void { this.#channel.emit({ kind: 'event', event }); }
+  #emit(event: HostEvent): void { this.#channel.emit({ kind: 'event', event: structuredClone(event) }); }
 }
 
 const blocksOf = (input: HostInput[]): acp.ContentBlock[] => input.map(part => part.type === 'text' ? { type: 'text', text: part.text } : { type: 'image', mimeType: part.mimeType, data: part.base64Data });
