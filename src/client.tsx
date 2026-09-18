@@ -57,7 +57,7 @@ const zh = {
   'window.five_hour': '5 小时', 'window.seven_day': '本周', 'window.weekly': '本周', 'window.monthly': '本月', 'window.unknown': '额度',
   'window.5-hour window': '5 小时', 'window.7-day window': '本周', 'window.Opus · 7-day': 'Opus 本周', 'window.Sonnet · 7-day': 'Sonnet 本周',
   'window.OAuth apps · 7-day': 'OAuth 应用本周',
-  subagents: '子代理', subagentsDescription: '查看子代理的运行状态和内容',
+  subagents: '子代理', subagentsDescription: '查看子代理的运行状态和内容', providedBy: '由 dsh-harness-provider 插件提供',
   subagentsEmpty: '当前会话还没有子代理活动。Codex / Claude Code 会话在本次运行中打开后才会显示其子代理。', subagentNoActivity: '暂无内容',
   'subagent.running': '运行中', 'subagent.completed': '已完成', 'subagent.failed': '失败', 'subagent.cancelled': '已取消',
   plugins: '插件',
@@ -80,7 +80,7 @@ const en: Record<keyof typeof zh,string> = {
   'window.five_hour':'5-hour', 'window.seven_day':'Weekly', 'window.weekly':'Weekly', 'window.monthly':'Monthly', 'window.unknown':'Quota',
   'window.5-hour window':'5-hour', 'window.7-day window':'Weekly', 'window.Opus · 7-day':'Opus weekly', 'window.Sonnet · 7-day':'Sonnet weekly',
   'window.OAuth apps · 7-day':'OAuth apps weekly',
-  subagents:'Subagents', subagentsDescription:'Status and activity of subagents',
+  subagents:'Subagents', subagentsDescription:'Status and activity of subagents', providedBy:'Provided by the dsh-harness-provider plugin',
   subagentsEmpty:'No subagent activity in this session yet. Codex / Claude Code subagents appear once the session is open in this run.', subagentNoActivity:'Nothing yet',
   'subagent.running':'Running', 'subagent.completed':'Completed', 'subagent.failed':'Failed', 'subagent.cancelled':'Cancelled',
   plugins:'Plugins',
@@ -561,6 +561,22 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
   </div>;
 }
 
+// ---- right sidebar guide card: the host's capsule geometry, plus the plugin that provides it ----
+type GuideEntryProps = PropsRuntime<'sidebar.right.tab.guide.entry'> & PropsLocale<'harness'>;
+export function GuideEntry({ kind, title, description, useTabInfo, t }: GuideEntryProps) {
+  const { tab } = useTabInfo();
+  return <button type="button" className="hp-guide" data-sidebar-right-guide-entry={kind} onClick={() => tab.actions.openTab(kind, { replaceTab: true })}>
+    <svg className="hp-guide-icon" width="26" height="26" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" aria-hidden>
+      <path d="M 8 2.5 L 12.9 5.2 V 10.8 L 8 13.5 L 3.1 10.8 V 5.2 Z" /><path d="M 3.1 5.2 L 8 7.9 L 12.9 5.2 M 8 7.9 V 13.5" strokeLinecap="round" />
+    </svg>
+    <span className="hp-guide-text">
+      <span className="hp-guide-title">{title}</span>
+      {description && <span className="hp-guide-line">{description}</span>}
+      <span className="hp-guide-line">{t('providedBy')}</span>
+    </span>
+  </button>;
+}
+
 // ---- right sidebar tab: Harness subagents, newest first; polled only while the tab is on screen ----
 type SubagentsTabProps = PropsRuntime<'sidebar.right.pane.tab'> & PropsLocale<'harness'> & { load(): Promise<Subagents> };
 export function SubagentsTab({ useTabInfo, load, t }: SubagentsTabProps) {
@@ -658,6 +674,13 @@ const styles = `
 .hp-row dd{margin:0;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
 .hp-section{margin-top:12px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}
 .hp-foot{margin-top:10px;padding-top:8px;border-top:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-caption)}
+.hp-guide{display:flex;gap:14px;align-items:center;box-sizing:border-box;width:100%;min-height:56px;padding:14px 20px;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l4);border-radius:24px;cursor:pointer}
+.hp-guide:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.hp-guide-icon{flex:none;color:var(--dsw-alias-label-tertiary)}
+.hp-guide-text{display:flex;flex-direction:column;gap:3px;min-width:0}
+.hp-guide-title,.hp-guide-line{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1.4}
+.hp-guide-title{font-size:15px}
+.hp-guide-line{font-size:13px;color:var(--dsw-alias-label-caption)}
 .hp-sub{display:flex;flex-direction:column;gap:8px;height:100%;box-sizing:border-box;overflow:auto;padding:12px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary)}
 .hp-sub-empty{padding:24px 16px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-tertiary);text-align:center}
 .hp-sub-agent{border-radius:12px;background:var(--dsw-alias-interactive-bg-hover)}
@@ -862,7 +885,9 @@ export async function apply(ctx: Context): Promise<void> {
       ht: ctx.locale.bind('harness'),
     };
     function syncModel() {
-      const {current,byId}=scope.sessions.list.getSnapshot();
+      const {byId}=scope.sessions.list.getSnapshot();
+      // The open session is the one the main view retains (the snapshot has no `current` since DSH 0.1.6).
+      const current=Object.values(byId).find(session => (session.retainedBy.mainView ?? 0) > 0)?.id;
       for (const id of known.keys()) if (!(id in byId)) known.delete(id);
       for (const id of fetched) if (known.get(id) === 'dsh' && id !== current) fetched.delete(id);
       schedule();
@@ -937,5 +962,7 @@ export async function apply(ctx: Context): Promise<void> {
       guide: [{ id: 'open', order: 40, title: () => t('subagents'), description: () => t('subagentsDescription') }] }), 'harness: subagents tab type');
     scope.effect(() => scope.slots.inject('sidebar.right.pane.tab', () => scope.slots.register({ name: 'sidebar.right.pane.tab', key: id, locale: 'harness',
       inject: sessionId => ({ load: () => value(scope.remote.harness.subagents({ sessionId })) }) }, SubagentsTab)), 'harness: subagents tab');
+    scope.effect(() => scope.slots.inject('sidebar.right.tab.guide.entry', () => scope.slots.register({ name: 'sidebar.right.tab.guide.entry', key: id, locale: 'harness' },
+      GuideEntry)), 'harness: subagents guide card');
   });
 }

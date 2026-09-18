@@ -64,3 +64,54 @@ test('the DSH / command source keeps only file, goal, plan and compact in Harnes
  for(const dispose of disposers)dispose?.();
  assert.equal(Object.hasOwn(commandUi,'candidates'),false);assert.equal(Object.hasOwn(commandUi,'matchEnter'),false);
 });
+
+test('the model seat follows the Harness of the main-view session', async () => {
+ const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
+  MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){}});
+ // DSH 0.1.6 snapshots carry no `current`; the open session is the one retained by the main view.
+ const snapshot={ids:['draft','other'],byId:{draft:{id:'draft',retainedBy:{mainView:1}},other:{id:'other',retainedBy:{}}}};
+ const seats=new Map();let api;
+ const slots={
+  inject(_name,register){return register();},
+  register(options){if(options.name==='conversation.input.left')api=options.inject();seats.set(options.name,(seats.get(options.name)??0)+1);return ()=>seats.set(options.name,seats.get(options.name)-1);},
+ };
+ const remote={harness:{}};
+ const ctx={
+  remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
+  inject(keys,apply){if(keys.includes('sessions'))apply({sessions:{list:{getSnapshot:()=>snapshot,subscribe:()=>()=>{}}},slots,remote,on(){},effect(fn){fn();}});},
+ };
+ await module.exports.apply(ctx);
+ api.changed('other','claude-code');
+ assert.equal(seats.get('conversation.input.model')??0,0,'a Harness on a background session leaves the DSH model seat');
+ api.changed('draft','claude-code');
+ assert.equal(seats.get('conversation.input.model'),1,'the Harness model seat replaces the DSH one');
+ api.changed('draft','dsh');
+ assert.equal(seats.get('conversation.input.model'),0,'switching back to DSH restores its model seat');
+});
+
+test('the subagents guide card names the plugin that provides it and opens the tab in place', async () => {
+ const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ const React=require('react'), {renderToStaticMarkup}=require('react-dom/server');
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
+ const cards=[];
+ const slots={inject(_name,register){return register();},register(options,component){if(options.name==='sidebar.right.tab.guide.entry')cards.push({key:options.key,component});return ()=>{};}};
+ const ctx={
+  remote:{async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
+  inject(keys,apply){if(keys.includes('sidebarRightTabs'))apply({sidebarRightTabs:{register:()=>()=>{}},slots,remote:{harness:{}},effect(fn){fn();}});},
+ };
+ await module.exports.apply(ctx);
+ assert.deepEqual(cards.map(card=>card.key),['dsh-harness-provider/subagents'],'only the plugin\'s own tab gets the card');
+ const opened=[];
+ const t=key=>({providedBy:'由 dsh-harness-provider 插件提供'})[key]??key;
+ const props={kind:'harness-subagents',title:'子代理',useTabInfo:()=>({tab:{actions:{openTab:(...args)=>opened.push(args)}}}),t};
+ const html=renderToStaticMarkup(React.createElement(cards[0].component,props));
+ assert.match(html,/子代理/);assert.match(html,/由 dsh-harness-provider 插件提供/);
+ assert.match(renderToStaticMarkup(React.createElement(cards[0].component,{...props,description:'查看子代理'})),/查看子代理/,'a description still shows while the host lists one');
+ cards[0].component(props).props.onClick();
+ assert.deepEqual(JSON.parse(JSON.stringify(opened)),[['harness-subagents',{replaceTab:true}]]);
+});

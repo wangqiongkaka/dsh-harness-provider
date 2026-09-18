@@ -21,7 +21,7 @@
 ## 前置条件
 
 - Node.js 22 或更高版本。
-- 已安装 DSH，并使用 Web Profile。
+- 已安装 DSH 0.1.6-alpha.2 或更高版本，并使用 Web Profile。更早的版本中，Harness 会话的模型选择器和右侧栏“子代理”卡片的插件来源说明无法正常显示。
 - 已安装并完成登录或环境配置的 [Codex CLI](https://developers.openai.com/codex/cli/) 或 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)。
 
 ## 安装
@@ -29,7 +29,7 @@
 将发布包加入 DSH Profile，然后启动 DSH：
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.1.5.tgz
+dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.1.6.tgz
 dsh --profile web
 ```
 
