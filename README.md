@@ -31,7 +31,7 @@
 将发布包加入 DSH Profile，然后启动 DSH：
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.1.6.tgz
+dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.1.7.tgz
 dsh --profile web
 ```
 
