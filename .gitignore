@@ -3,3 +3,4 @@ node_modules/
 .cache/
 *.tgz
 
+pnpm-lock.yaml
