@@ -511,7 +511,7 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
   // dependencies: a switch re-reads at once, while the interval still covers a window moving on its own.
   const provider = useModelProvider(modelProvider, sessionId);
   const quotaView = usePolled(() => quota(sessionId), 60_000, [sessionId, state?.harness, summary?.running, provider]);
-  useViewing(viewing, sessionId, state !== undefined && state.harness !== 'dsh');
+  useViewing(viewing, sessionId, state !== undefined && state.harness !== 'dsh' && (summary?.retainedBy.mainView ?? 0) > 0);
   async function choose(next: State['harness']) {
     const version = generation.current; setBusy(true); setError(undefined); setOpen(false);
     try {

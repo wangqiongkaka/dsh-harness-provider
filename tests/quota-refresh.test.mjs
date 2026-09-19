@@ -60,7 +60,7 @@ test('switching the session model provider re-reads account quota immediately', 
 });
 
 // The host closes an idle Harness process unless a client keeps reporting its session on screen; a hidden page stops.
-test('an external Harness session on a visible page reports itself viewed; a hidden page does not', async () => {
+test('only the visible main-view Harness session reports itself viewed', async () => {
  const script = await clientBundle();
  const browser = await chromium.launch({ headless: true });
  try {
@@ -69,17 +69,22 @@ test('an external Harness session on a visible page reports itself viewed; a hid
   await page.addScriptTag({ content: script });
   await page.evaluate(() => {
    const { createElement, createRoot, HarnessSelect } = window.HarnessProvider;
-   let hidden = false;
+   let hidden = false, current = true;
    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => hidden ? 'hidden' : 'visible' });
    const state = { harness: 'codex', locked: false, model: null, thinking: null, permission: null, configs: {}, recoveryRequired: false, editableTurns: [] };
    const seat = {
-    sessionId: 's1', useSessions: selector => selector({ byId: {} }), read: async () => state,
+    sessionId: 's1', useSessions: selector => selector({ byId: { s1: { retainedBy: { mainView: current ? 1 : 0 } } } }), read: async () => state,
     select: async () => state, changed: () => {}, t: key => key,
     secretStatus: async () => null, answerSecret: async () => ({ accepted: true }), recover: async () => state,
     quota: async () => null, modelProvider: () => null, viewed: [], viewing: async id => { seat.viewed.push(id); return null; },
    };
-   window.__view = { seat, hide: value => { hidden = value; document.dispatchEvent(new Event('visibilitychange')); } };
-   createRoot(document.getElementById('root')).render(createElement(HarnessSelect, seat));
+   const root = createRoot(document.getElementById('root'));
+   window.__view = {
+    seat,
+    hide: value => { hidden = value; document.dispatchEvent(new Event('visibilitychange')); },
+    current: value => { current = value; root.render(createElement(HarnessSelect, { ...seat })); },
+   };
+   root.render(createElement(HarnessSelect, seat));
   });
   await page.waitForFunction(() => window.__view.seat.viewed.length >= 1, undefined, { timeout: 10_000 });
   assert.deepEqual(await page.evaluate(() => window.__view.seat.viewed), ['s1']);
@@ -87,6 +92,9 @@ test('an external Harness session on a visible page reports itself viewed; a hid
   assert.equal(await page.evaluate(() => window.__view.seat.viewed.length), 1);
   // Coming back reports at once instead of waiting for the next interval.
   await page.evaluate(() => window.__view.hide(false));
+  assert.equal(await page.evaluate(() => window.__view.seat.viewed.length), 2);
+  // The host may retain an old conversation component; once it leaves mainView it must stop keeping its process alive.
+  await page.evaluate(async () => { window.__view.current(false); await new Promise(requestAnimationFrame); document.dispatchEvent(new Event('visibilitychange')); });
   assert.equal(await page.evaluate(() => window.__view.seat.viewed.length), 2);
  } finally { await browser.close(); }
 });
