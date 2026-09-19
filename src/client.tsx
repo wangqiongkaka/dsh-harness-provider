@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ComponentType, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
 import type {} from '@deepseek-ai/dsh-api-remotes/client';
@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-api-session-controller/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client';
+import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client';
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client';
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client';
@@ -40,7 +41,7 @@ type Api = {
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
   plugins(request: {sessionId: string}): Promise<RemoteResult<Plugin[]>>;
   edit(request: {sessionId: string; seq: number; text: string; requestId: string}): Promise<RemoteResult<State>>;
-  delegateFromUser(request: {sessionId: string; requestId: string; harness: State['harness']; prompt: string; reportBack: boolean; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId: string; harness: State['harness']; accepted: true}>>;
+  delegateFromUser(request: {sessionId: string; requestId: string; harness: State['harness']; prompt: string; reportBack: boolean; worktree: boolean; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId: string; harness: State['harness']; accepted: true}>>;
   startDiscussionFromUser(request: {sessionId: string; requestId: string; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
 };
 const zh = {
@@ -67,6 +68,7 @@ const zh = {
   edit: '编辑', editCancel: '取消', editSend: '发送', editHint: '发送后从这条消息重新执行，之后的原生上下文会撤销；工作区文件不会还原。',
   delegate: '委派', delegateDescription: '创建独立会话执行任务', delegateTask: '任务', delegateCreated: '已创建委派会话', commands: '指令',
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
+  worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code',
   discuss: '讨论', discussDescription: '由主 Agent 分配一个或多个会话并汇总', discussTask: '讨论任务', discussStarted: '已开始讨论',
   discussHint: '主 Agent 自动选择 1–4 个会话；多个会话完成后互评一轮', discussExit: '退出讨论模式',
 };
@@ -94,6 +96,7 @@ const en: Record<keyof typeof zh,string> = {
   edit:'Edit', editCancel:'Cancel', editSend:'Send', editHint:'Sending reruns from this message and drops the native context after it; workspace files are not restored.',
   delegate:'Delegate', delegateDescription:'Create an independent session for this task', delegateTask:'Task', delegateCreated:'Delegation session created', commands:'Commands',
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
+  worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex and Claude Code only',
   discuss:'Discuss', discussDescription:'Let the main agent assign one or more sessions and synthesize', discussTask:'Discussion task', discussStarted:'Discussion started',
   discussHint:'The main agent selects 1–4 sessions; multiple sessions peer-review once', discussExit:'Exit discussion mode',
 };
@@ -123,10 +126,18 @@ interface Injected {
   selectConfig(id: string, configId: string, value: string | boolean): Promise<State>;
   usage(id: string): Promise<Usage>;
   quota(id: string): Promise<Quota>;
+  /**
+   * The model route this session will use next, as the host's own directory sees it, so account quota can follow a
+   * provider switch immediately. Null when the host exposes no directory (an older build), which falls back to the
+   * quota interval alone.
+   */
+  modelProvider(id: string): ModelProvider | null;
   changed(id: string, harness: State['harness']): void;
   /** Fires after any selection made in a sibling seat; seats reload their state on it. */
   subscribe(listener: () => void): () => void;
 }
+/** Live read of one session's routed provider; both the /model popup and the composer seat write the same selection. */
+type ModelProvider = { get(): string | null; subscribe(onChange: () => void): () => void };
 type T = (key: Key, params?: Record<string, unknown>) => string;
 type LeftProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'harness'> & InjectFace<Injected>;
 type ModelProps = PropsRuntime<'conversation.input.model'> & PropsLocale<'harness'> & InjectFace<Injected>;
@@ -217,14 +228,26 @@ function usePolled<V>(load: () => Promise<V>, everyMs: number, deps: unknown[]):
   return state;
 }
 
-type DelegationOptions = { harness: State['harness']; reportBack: boolean };
+/**
+ * The session's routed model provider, re-read whenever the host's directory publishes a new selection. It stays null
+ * while the host has no directory to read, so quota keeps polling on its interval instead of failing.
+ */
+function useModelProvider(modelProvider: Injected['modelProvider'], sessionId: string): string | null {
+  const handle = modelProvider(sessionId);
+  const subscribe = useCallback((onChange: () => void) => handle?.subscribe(onChange) ?? (() => {}), [handle]);
+  const getSnapshot = useCallback(() => handle?.get() ?? null, [handle]);
+  // A third, server-side reader keeps the seat renderable outside a browser (where no host directory exists).
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+type DelegationOptions = { harness: State['harness']; reportBack: boolean; worktree: boolean };
 const delegationOptions = new Map<string, DelegationOptions>();
-const optionsFor = (sessionId: string) => delegationOptions.get(sessionId) ?? { harness: 'codex' as const, reportBack: false };
+const optionsFor = (sessionId: string) => delegationOptions.get(sessionId) ?? { harness: 'codex' as const, reportBack: false, worktree: false };
 let delegationRequestSequence = 0;
 const delegationRequestId = () => globalThis.crypto?.randomUUID?.() ?? `delegate-${Date.now()}-${++delegationRequestSequence}`;
 const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
   const requestId = delegationRequestId();
-  delegationOptions.set(session.sessionId, { harness: 'codex', reportBack: false });
+  delegationOptions.set(session.sessionId, { harness: 'codex', reportBack: false, worktree: false });
   return {
     name: 'delegate', token: '/delegate ', hint: t('delegateTask'), attachments: true,
     async submit(prompt, _actx, attachments) {
@@ -254,8 +277,12 @@ function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationD
     <strong>{t('delegate')}</strong>
     <div className="hp-delegate-harness" role="radiogroup" aria-label={t('harness')}>
       {(Object.keys(names) as State['harness'][]).map(harness => <button key={harness} type="button" role="radio" aria-checked={options.harness === harness}
-        onClick={() => update({ ...options, harness })}>{names[harness]}</button>)}
+        onClick={() => update({ ...options, harness, worktree: harness !== 'dsh' && options.worktree })}>{names[harness]}</button>)}
     </div>
+    <label className="hp-delegate-report" title={options.harness === 'dsh' ? t('worktreeNative') : t('worktreeHint')}>
+      <input type="checkbox" checked={options.worktree} disabled={options.harness === 'dsh'} onChange={event => update({ ...options, worktree: event.target.checked })} />
+      <span>{t('worktree')}</span>
+    </label>
     <label className="hp-delegate-report" title={!options.reportBack ? t('reportBackOff') : undefined}>
       <input type="checkbox" checked={options.reportBack} onChange={event => update({ ...options, reportBack: event.target.checked })} />
       <span>{t('reportBack')}</span>
@@ -430,7 +457,7 @@ export function SecretPanel({ sessionId, read, answer }: { sessionId: string; re
 
 // ---- left slot: Harness chip + quota chip ----
 const names: Record<State['harness'], string> = { dsh: '', codex: 'Codex', 'claude-code': 'Claude Code' };
-export function HarnessSelect({ sessionId, useSessions, read, select, quota, changed, secretStatus, answerSecret, recover, t }: LeftProps) {
+export function HarnessSelect({ sessionId, useSessions, read, select, quota, modelProvider, changed, secretStatus, answerSecret, recover, t }: LeftProps) {
   const [state,setState] = useState<State>();
   const [error,setError] = useState<string>();
   const [busy,setBusy] = useState(false);
@@ -447,7 +474,10 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, cha
       .catch(error => { if (generation.current === version) setError(error instanceof Error ? error.message : String(error)); });
     return () => { generation.current++; };
   }, [sessionId,summary?.running,read,changed]);
-  const quotaView = usePolled(() => quota(sessionId), 60_000, [sessionId, state?.harness, summary?.running]);
+  // Switching the session's model provider changes whose account the quota describes, so the provider joins the
+  // dependencies: a switch re-reads at once, while the interval still covers a window moving on its own.
+  const provider = useModelProvider(modelProvider, sessionId);
+  const quotaView = usePolled(() => quota(sessionId), 60_000, [sessionId, state?.harness, summary?.running, provider]);
   async function choose(next: State['harness']) {
     const version = generation.current; setBusy(true); setError(undefined); setOpen(false);
     try {
@@ -794,6 +824,7 @@ const styles = `
 .hp-delegate-harness button[aria-checked=true]{background:var(--dsw-specific-menu);color:var(--dsw-alias-label-primary)}
 .hp-delegate-harness button:focus-visible,.hp-delegate-exit:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px}
 .hp-delegate-report{display:flex;align-items:center;gap:6px;margin-left:auto;white-space:nowrap;cursor:pointer}.hp-delegate-report input{margin:0}
+.hp-delegate-report+.hp-delegate-report{margin-left:0}.hp-delegate-report:has(input:disabled){opacity:.5;cursor:not-allowed}
 .hp-discuss-hint{flex:1;min-width:0;color:var(--dsw-alias-label-tertiary)}
 .hp-delegate-exit{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:18px;cursor:pointer}.hp-delegate-exit:hover{background:var(--dsw-alias-interactive-bg-hover)}
 @media(max-width:600px){.hp-delegate{flex-wrap:wrap}.hp-delegate-report{margin-left:0}.hp-delegate-exit{margin-left:auto}}
@@ -934,6 +965,24 @@ export async function apply(ctx: Context): Promise<void> {
     }
     const schedule = () => { if (!frame) frame=requestAnimationFrame(paint); };
     const listeners = new Set<() => void>();
+    // The host's per-session model directory is the one shared, durable view of "which provider this session is on":
+    // both the /model popup and the composer seat write it, so the quota chip follows a switch without waiting a poll.
+    // Handles are cached per session so React keeps one subscription across renders; a missing service (older host)
+    // returns null and leaves the interval as the only refresh.
+    const providers = new Map<string, ModelProvider>();
+    const modelProvider: Injected['modelProvider'] = id => {
+      const cached = providers.get(id);
+      if (cached) return cached;
+      const directories = scope.get('modelDirectories');
+      if (!directories) return null;
+      let handle: ModelProvider;
+      try {
+        const { store } = directories.directoryFor(id as never);
+        handle = { get: () => store.getSnapshot().current?.provider ?? null, subscribe: onChange => store.subscribe(onChange) };
+      } catch { return null; }
+      providers.set(id, handle);
+      return handle;
+    };
     // `/plan` in a Harness session switches its permission or collaboration mode; the seats re-read it.
     scope.on('command/executed', (_sessionId, name) => { if (name === 'plan') for (const listener of listeners) listener(); });
     const api: Injected = {
@@ -949,6 +998,7 @@ export async function apply(ctx: Context): Promise<void> {
       selectConfig:(id,configId,value_)=>value(scope.remote.harness.selectConfig({sessionId:id,configId,value:value_})),
       usage:id=>value(scope.remote.harness.usage({sessionId:id})),
       quota:id=>value(scope.remote.harness.quota({sessionId:id})),
+      modelProvider,
       changed:(id,harness)=>{known.set(id,harness);harnesses.set(id,Promise.resolve(harness));syncModel();schedule();for (const listener of listeners) listener();},
       subscribe:listener=>{listeners.add(listener);return ()=>{listeners.delete(listener);};},
     };

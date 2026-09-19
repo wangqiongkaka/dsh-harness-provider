@@ -8,6 +8,7 @@
 - 任务复用原输入框，支持文本、图片和文件；新会话与来源会话在左侧列表中同层展示。
 - 完成回传是每次委派的显式开关，默认关闭；关闭时不唤醒来源会话。
 - 任何会话，包括委派会话，都可以由用户继续明确委派新会话。下文更早的“自动委派/自动唤醒/禁止嵌套委派”仅为历史记录，不代表当前行为。
+- 委派可选独立 worktree（仅 Codex / Claude Code，默认关闭）：代码创建含未提交改动的快照 worktree；每轮结束有改动时在委派会话中询问合并（三方合并为未提交修改）、放弃或暂不处理；合并冲突时不应用任何改动。讨论模式暂不使用 worktree。
 - 讨论只能由用户通过 `/discuss` 明确开启；主 Agent 随后可按任务并发性选择 1–4 个 DSH 原生、Codex 或 Claude Code 同级会话并分工。
 - 一个参与者直接执行；多个参与者先独立执行，再在原会话中互评一轮，最后由主 Agent 汇总。任务支持文本、图片和文件。
 - 讨论授权只在当前来源轮次内单次有效；重复调用必须保持相同分工并复用同一结果，普通委派权限不因此开放。
@@ -170,3 +171,43 @@ Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工
 - 当前会话是 Harness 时，插件以更高优先级接管 `conversation.chat.node` 的 `user` 渲染器，包装宿主原气泡并在操作行末尾加铅笔按钮；DSH 原生会话继续使用宿主渲染器。原生轮次边界已知（`binding.turns` 中存在该轮）、没有进行中的请求、也没有未确认结果时才显示铅笔。
 - 发送后通过 `harness/edit` 把原生上下文分支到该轮之前（与回滚共用 `rewind`），追加“消息已编辑”说明，再按原顺序重新排队该轮开头的消息。宿主日志只能追加，旧记录保留在上方；工作区文件不还原。同一 `requestId` 重试不会重复执行。
 - 验证：`npm run check` 通过 41 项测试；新测试在回退边界被改坏时失败。`DSH_PLUGIN_TAR=.cache/dsh-harness-provider-0.1.5.tgz node experiments/dsh-web-probe.mjs` 在真实浏览器中完成悬停、编辑、Enter 发送，并确认下一次 Codex 请求只包含编辑点之前的上下文和编辑后的文字，已回滚轮次不显示铅笔。模型端只使用本地 fixture。
+
+## 额度探测修复（2026-09-19）
+
+### 问题
+
+- GLM Coding Plan（`llm-pi-ai` 的 `zai-coding-cn`）会话完全不显示额度，5 小时窗口也看不到。
+- DeepSeek 余额有时显示成 `$0.00`，看起来像没取到余额。
+
+### 决定
+
+- 原因一：宿主只把用户写进设置的字段交给插件，而 `zai-coding-cn` 通常只配 `apiKeyEnv`；`nativeRoute` 要求 `baseURL` 与 `apiKeyEnv` 同时存在，缺失时返回 null，整块额度消失。改为按 provider 路由 id 兜底 provider 自带的端点与凭据变量（`zai-coding-cn`、`zai`、`deepseek`、`deepseek-official`），设置里的 `baseURL` 仍然优先；来源是 `@earendil-works/pi-ai` 的 provider 目录和 `@deepseek-ai/dsh-llm-deepseek` 的默认值，`DEEPSEEK_BASE_URL` 的优先级不变。
+- 原因二：`balance_infos[]` 是账户的多个币种钱包，顺序不稳定——实测同一账户在 `[CNY, USD]` 与 `[USD, CNY]` 之间交替，取第一项会把 ¥17.11 显示成 USD 0.00。改为人民币优先，其次任何有余额的钱包，全为零才退回第一项。
+- 合并设置与 provider 默认值的逻辑放在 `nativeQuotaRoute`，与 `fetchNativeQuota` 的兜底互补，使“只配 `apiKeyEnv`”这条链路可测。
+
+### 验证
+
+- 真实接口探测：`open.bigmodel.cn/api/monitor/usage/quota/limit` 对该 key 返回 `unit 3/number 5` 的 5 小时窗口与 `unit 6/number 1` 的周窗口；`api.deepseek.com/user/balance` 连续采样中出现两种钱包顺序。
+- 新增测试在改动前的代码上失败：旧实现对 USD 在前的响应返回 `0.00`，对只配 `apiKeyEnv` 的 provider 返回 `null`。
+- 用真实凭据跑通 `nativeQuotaRoute` + `fetchNativeQuota`：GLM 返回 `five_hour` 与 `seven_day` 两个窗口，DeepSeek 连续多次都给出 CNY 余额。
+- `npm run check` 通过（48 项测试，含类型检查与构建）。
+
+## 切换模型厂商即刷新额度（2026-09-19）
+
+### 问题
+
+- DSH 原生会话里把模型换到另一家厂商（例如 DeepSeek → GLM）后，额度 chip 最长 60 秒才换成新厂商的用量，期间显示的是上一家的账户。
+
+### 决定
+
+- 额度描述的是“当前路由到哪家厂商的账户”，所以刷新信号取宿主自己的 per-session 模型目录：`ctx.modelDirectories.directoryFor(sessionId).store`。`/model` 弹窗与输入栏模型座位写的是同一份投影，因此选择一变客户端就能读到。
+- 座位用 `useSyncExternalStore` 订阅该 store，把 provider 放进 `usePolled` 的依赖：切换立即重取，60 秒间隔只负责 5 小时/周窗口自身推进。
+- 宿主没有 `modelDirectories` 服务（较旧构建）、会话作用域缺失或目录尚未就绪时，`modelProvider` 返回 null 并退回纯轮询，不影响额度显示；handle 按会话缓存，保证 React 跨渲染只保留一个订阅。
+- 服务端缓存按 `provider` 分键（`native\0${source}\0${baseURL}`），所以切回上一家直接命中缓存，不会重复探测。
+
+### 验证
+
+- 新增 `tests/quota-refresh.test.mjs`：用 esbuild 打包真实 `HarnessSelect`、在 Chromium 中渲染，并用一个镜像宿主 store 的假目录发布新 provider；断言发布后立刻产生一次新 provider 的额度请求。回退实现（把 provider 移出依赖）后该测试 5 秒超时失败，确认回归辨识力。
+- `npm run check` 通过（49 项测试，含类型检查与构建）。
+
+

@@ -35,9 +35,10 @@ import { Bindings, type Binding } from './bindings.js';
 import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT } from './acp-adapter.js';
 import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
-import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
+import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest } from './delegation.js';
+import { createWorktree, mergeWorktree, removeWorktree, worktreeChanged } from './worktree.js';
 
 /** DSH commands a Harness session keeps: the row stays DSH's, the work runs on the Harness's own command or mode. */
 const HARNESS_COMMANDS = new Set(['goal', 'plan', 'compact']);
@@ -125,8 +126,10 @@ export class HarnessService extends TypertRemoteService {
   private readonly quotas = new Map<string, { until: number; work: Promise<Quota> }>();
   // One user-authorized discussion per source turn; retries share the same work instead of spawning more sessions.
   private readonly discussions = new Map<string, { requestId: string; content: ContentBlock[]; inputHash?: string; work?: Promise<DiscussionResult> }>();
+  private readonly worktrees: string;
   constructor(ctx: Context, root: string, private readonly adapters: Record<Binding['harness'], HarnessAdapter>) {
     super(ctx, 'harness');
+    this.worktrees = resolve(root, 'worktrees');
     this.bindings = new Bindings(root);
     this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : method === 'discuss' ? this.discuss(source, input) : this.readDelegation(source, input));
     this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation);
@@ -151,7 +154,11 @@ export class HarnessService extends TypertRemoteService {
     });
     ctx.on('agent/inbox/inserted', ({ agent }) => { this.runner.drainSteering(agent); });
     ctx.on('session/event', (session, event) => {
-      if (event.type === 'turn/end') { this.discussions.delete(session.id); void this.notifyDelegation(session.id).catch(() => {}); }
+      if (event.type === 'turn/end') {
+        this.discussions.delete(session.id);
+        void this.notifyDelegation(session.id).catch(() => {});
+        void this.offerWorktreeMerge(session.id).catch(() => {});
+      }
     });
     ctx.on('agent/created', async ({ agent }) => { void agent.whenIdle().then(() => this.notifyDelegation(agent.id)).catch(() => {}); });
     ctx.inject(['tools'], scope => {
@@ -391,7 +398,7 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /** Creates an ordinary DSH session, with a stable identity for admission retries. */
-  async delegate(source: string, raw: unknown, admitted?: { content: ContentBlock[]; requestHash: string }) {
+  async delegate(source: string, raw: unknown, admitted?: { content: ContentBlock[]; requestHash: string; worktree?: boolean }) {
     const request = delegationRequest.parse(raw);
     const parent = await this.agent(source);
     const cwd = parent.session.header.cwd;
@@ -432,6 +439,7 @@ export class HarnessService extends TypertRemoteService {
             preset = current && presets.names.includes(current) ? current : presets.names.find(name => presets.resolve(name).sandbox === sandbox);
             if (!preset) throw new Error('DSH 原生不支持来源会话的权限模式');
           }
+          if (admitted?.worktree && request.harness === 'dsh') throw new Error('独立 worktree 仅支持 Codex / Claude Code');
           if (request.harness !== 'dsh') {
             const inspection = await this.inspection({ version: 1, sessionId, harness: request.harness, cwd, locked: false });
             if ('error' in inspection) throw new Error(inspection.error);
@@ -443,6 +451,8 @@ export class HarnessService extends TypertRemoteService {
             if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
             external = { inspection, ...(permission ? { permission } : {}) };
           }
+          // Made before the session so a non-git directory leaves nothing behind; the DSH session stays in the source workspace.
+          const worktree = admitted?.worktree ? await createWorktree(cwd, resolve(this.worktrees, sessionId)) : undefined;
           const workspace = this.ctx.get('workspaceRegistry')?.list().find(workspace => workspace.sessionIds.includes(parent.id));
           // Hold the same lock as state/select/prompt so the UI cannot auto-bind the new session to its remembered Harness.
           await this.bindings.serial(sessionId, async () => {
@@ -453,7 +463,9 @@ export class HarnessService extends TypertRemoteService {
             if (request.harness === 'dsh') await this.bindings.writeDelegated({ version: 1, sessionId, harness: 'dsh', cwd, locked: false, delegation: { parentSessionId: source, requestHash, reportBack: request.reportBack } });
             else await this.bind(child, sessionId, request.harness, {
               permission: external?.permission ? harnessPermissionModeIdSchema.parse(external.permission) : external?.inspection.permissionModes?.defaultModeId,
-              delegation: { parentSessionId: source, requestHash, reportBack: request.reportBack },
+              delegation: { parentSessionId: source, requestHash, reportBack: request.reportBack,
+                ...(worktree ? { worktree: { repo: worktree.repo, path: worktree.path, base: worktree.base } } : {}) },
+              ...(worktree ? { cwd: worktree.cwd } : {}),
             });
             if (this.ctx.get('sessionTitle')) await this.ctx.sessionController.rename({ sessionId,
               title: request.title ?? `${request.harness === 'dsh' ? 'DSH 原生' : request.harness === 'codex' ? 'Codex' : 'Claude Code'} · ${request.prompt.split('\n').find(line => line.trim())!.trim().slice(0, 40)}` });
@@ -486,7 +498,7 @@ export class HarnessService extends TypertRemoteService {
       const result = await this.delegate(request.sessionId, {
         requestId: request.requestId, harness: request.harness, reportBack: request.reportBack,
         prompt: request.prompt.trim() || '处理附件任务', ...(request.title ? { title: request.title } : {}),
-      }, { content, requestHash });
+      }, { content, requestHash, worktree: request.worktree });
       binding?.commit();
       return result;
     } finally { binding?.[Symbol.dispose](); }
@@ -635,6 +647,40 @@ export class HarnessService extends TypertRemoteService {
     });
   }
 
+  /** After a worktree delegation's turn, asks in that session whether to merge its changes back and remove the worktree. */
+  private async offerWorktreeMerge(id: string): Promise<void> {
+    // ponytail: a question left open when the host stops is not restored; the next finished turn asks again.
+    await this.bindings.serial(`worktree:${id}`, async () => {
+      const worktree = (await this.bindings.read(id))?.delegation?.worktree;
+      if (!worktree || worktree.removed || !await worktreeChanged(worktree)) return;
+      const agent = await this.agent(id);
+      const [merge, discard, later] = ['合并并删除 worktree', '放弃改动并删除 worktree', '暂不处理'];
+      const answer = await this.ctx.userQuestions.ask({ agent, questions: [{ id: 'worktree', question: '委派任务在独立 worktree 中有未合并的改动，如何处理？',
+        detail: `worktree：${worktree.path}\n合并会把改动作为未提交修改应用到 ${worktree.repo}，不会创建提交；有冲突时不应用任何改动。`,
+        options: [{ label: merge, description: '三方合并到主目录后删除 worktree' }, { label: discard, description: '丢弃全部改动' }, { label: later, description: '保留 worktree，下一轮结束时再问' }] }] });
+      const choice = answer.answers.find(entry => entry.id === 'worktree')?.selected[0];
+      if (choice !== merge && choice !== discard) return;
+      if (choice === merge) {
+        const conflicts = await mergeWorktree(worktree);
+        if (conflicts.length) {
+          await this.notice(agent, 'worktree 合并冲突', `合并冲突，未应用任何改动，worktree 已保留：\n${conflicts.map(path => `- ${path}`).join('\n')}\n请处理冲突后在下一轮结束时再合并，或选择放弃。`);
+          return;
+        }
+      }
+      const live = this.runner.live.get(id);
+      if (live) { await live.session.close(); this.runner.live.delete(id); }
+      await removeWorktree(worktree);
+      await this.bindings.serial(id, async () => {
+        const binding = await this.bindings.read(id);
+        if (!binding?.delegation?.worktree) return;
+        binding.delegation.worktree.removed = true;
+        await this.bindings.write(binding);
+      });
+      await this.notice(agent, choice === merge ? 'worktree 已合并' : 'worktree 已删除', choice === merge
+        ? `改动已作为未提交修改应用到 ${worktree.repo}，worktree 已删除。` : '已放弃 worktree 中的改动并删除 worktree。');
+    });
+  }
+
   async select(raw: unknown) {
     const request = selectRequest.parse(raw);
     return this.bindings.serial(request.sessionId, async () => {
@@ -660,7 +706,7 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /** Bind a fresh session to a Harness, seeding permission from the native sandbox and model / thinking from the last pick. */
-  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation'>> = {}): Promise<Binding> {
+  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation' | 'cwd'>> = {}): Promise<Binding> {
     const cwd = agent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
     const binding: Binding = { version: 1, sessionId, harness, cwd, locked: false };
@@ -937,20 +983,19 @@ export class HarnessService extends TypertRemoteService {
       ?? ctx.get('agentDefaultModel')?.currentSelection().provider;
     const settings = ctx.get('settings');
     if (!provider || !settings) return null;
-    let baseURL: string | undefined, apiKeyEnv: string | undefined;
-    if (provider === 'deepseek-official') {
-      const section = (settings.get('llm-deepseek') ?? {}) as { baseURL?: string; apiKeyEnv?: string };
-      baseURL = section.baseURL ?? process.env.DEEPSEEK_BASE_URL ?? 'https://api.deepseek.com';
-      apiKeyEnv = section.apiKeyEnv ?? 'DEEPSEEK_API_KEY';
-    } else {
-      const section = (settings.get('llm-pi-ai') ?? {}) as { providers?: Record<string, { baseURL?: string; apiKeyEnv?: string }> };
-      baseURL = section.providers?.[provider]?.baseURL;
-      apiKeyEnv = section.providers?.[provider]?.apiKeyEnv;
-    }
-    if (!baseURL || !apiKeyEnv) return null;
+    // Settings only carry what the user wrote; a provider configured with just `apiKeyEnv` keeps the endpoint and
+    // credential variable it ships with, and dropping them would hide the whole quota chip.
+    const section = provider === 'deepseek-official'
+      ? (settings.get('llm-deepseek') ?? undefined) as { baseURL?: string; apiKeyEnv?: string } | undefined
+      : ((settings.get('llm-pi-ai') ?? {}) as { providers?: Record<string, { baseURL?: string; apiKeyEnv?: string }> }).providers?.[provider];
+    const route = nativeQuotaRoute(provider, section);
+    // llm-deepseek also accepts DEEPSEEK_BASE_URL, below its own settings section but above the shipped default.
+    if (provider === 'deepseek-official' && !section?.baseURL) route.baseURL = process.env.DEEPSEEK_BASE_URL ?? route.baseURL;
+    const { baseURL, apiKeyEnv } = route;
+    if (!apiKeyEnv) return null;
     const stored = await ctx.get('credentials')?.resolve(apiKeyEnv as never);
     const apiKey = stored?.value ?? process.env[apiKeyEnv];
-    return apiKey ? { baseURL, apiKey, source: provider } : null;
+    return apiKey ? { provider, baseURL, apiKey, source: provider } : null;
   }
 
   private view(binding?: Binding, nativeLocked = false) {

@@ -1,0 +1,332 @@
+<div id="delegation-command-design" aria-label="DSH 委派指令交互设计">
+  <div class="dsh-window">
+    <aside class="dsh-sidebar" aria-label="会话列表">
+      <div class="dsh-brand"><i data-lucide="panel-left" aria-hidden="true"></i><span>DSH</span></div>
+      <button class="dsh-new cursor-interaction" type="button"><i data-lucide="square-pen" aria-hidden="true"></i>新会话</button>
+      <div class="dsh-side-label">今天</div>
+      <button class="dsh-session is-active cursor-interaction" type="button">
+        <span class="dsh-session-icon"><i data-lucide="message-square" aria-hidden="true"></i></span>
+        <span><strong>优化委派功能</strong><small>正在设计委派指令</small></span>
+      </button>
+      <button class="dsh-session dsh-created cursor-interaction" type="button" hidden>
+        <span class="dsh-session-icon dsh-codex"><i data-lucide="terminal-square" aria-hidden="true"></i></span>
+        <span><strong>实现委派功能</strong><small><span class="dsh-running-dot"></span>Codex 执行中</small></span>
+      </button>
+    </aside>
+
+    <main class="dsh-main">
+      <header class="dsh-header">
+        <div><strong>优化委派功能</strong><span>工作区 · dsh-harness-provider</span></div>
+        <button class="dsh-icon-button cursor-interaction" type="button" aria-label="更多选项"><i data-lucide="ellipsis" aria-hidden="true"></i></button>
+      </header>
+
+      <div class="dsh-thread" aria-hidden="true">
+        <div class="dsh-user-bubble">委派必须由用户明确发出指令，subagent 不需要人工确认。</div>
+        <div class="dsh-answer">已将委派会话和 subagent 区分为两种能力。委派由宿主处理明确的用户指令，模型不能自行创建新会话。</div>
+      </div>
+
+      <div class="dsh-command-menu" aria-label="添加菜单">
+        <div class="dsh-menu-title">添加</div>
+        <button class="dsh-menu-row cursor-interaction" type="button"><i data-lucide="paperclip" aria-hidden="true"></i><span>文件 <small>file</small></span></button>
+        <button class="dsh-menu-row cursor-interaction" type="button"><i data-lucide="target" aria-hidden="true"></i><span>目标 <small>goal</small></span><em>设置或查看长期任务目标</em></button>
+        <button class="dsh-menu-row cursor-interaction" type="button"><i data-lucide="notebook-pen" aria-hidden="true"></i><span>计划 <small>plan</small></span><em>进入或退出计划模式</em></button>
+        <div class="dsh-menu-section">指令</div>
+        <button class="dsh-menu-row dsh-delegate-row cursor-interaction" type="button" id="dsh-open-delegate">
+          <i data-lucide="send" aria-hidden="true"></i><span>委派 <small>delegate</small></span><em>创建独立会话执行任务</em>
+        </button>
+        <button class="dsh-menu-row cursor-interaction" type="button"><i data-lucide="circle-dashed" aria-hidden="true"></i><span>压缩 <small>compact</small></span><em>压缩以上对话内容</em></button>
+      </div>
+
+      <div class="dsh-composer">
+        <textarea aria-label="消息输入" placeholder="发消息或创建任务、调用指令、@ 文件或对话"></textarea>
+        <div class="dsh-composer-actions">
+          <button class="dsh-add-button cursor-interaction" type="button" aria-label="添加"><i data-lucide="plus" aria-hidden="true"></i></button>
+          <span>Agent</span>
+          <button class="dsh-send-button cursor-interaction" type="button" aria-label="发送"><i data-lucide="arrow-up" aria-hidden="true"></i></button>
+        </div>
+      </div>
+
+      <div class="dsh-toast" role="status" aria-live="polite" hidden>
+        <i data-lucide="check-circle-2" aria-hidden="true"></i>
+        <span><strong>已创建 Codex 委派会话</strong><small>任务正在独立执行</small></span>
+        <button class="cursor-interaction" type="button">打开</button>
+      </div>
+    </main>
+
+    <div class="dsh-scrim"></div>
+    <section class="dsh-dialog" role="dialog" aria-modal="true" aria-labelledby="dsh-dialog-title">
+      <div class="dsh-dialog-header">
+        <div>
+          <h2 id="dsh-dialog-title">委派任务</h2>
+          <p>创建同级独立会话，立即执行下面的任务</p>
+        </div>
+        <button class="dsh-close cursor-interaction" type="button" id="dsh-close-dialog" aria-label="关闭"><i data-lucide="x" aria-hidden="true"></i></button>
+      </div>
+
+      <fieldset class="dsh-fieldset">
+        <legend>执行者</legend>
+        <div class="dsh-harness-options">
+          <button class="dsh-harness cursor-interaction" type="button" data-harness="dsh" aria-pressed="false">
+            <span class="dsh-harness-icon"><i data-lucide="sparkles" aria-hidden="true"></i></span>
+            <span><strong>DSH 原生</strong><small>当前默认 Agent</small></span>
+          </button>
+          <button class="dsh-harness is-selected cursor-interaction" type="button" data-harness="codex" aria-pressed="true">
+            <span class="dsh-harness-icon"><i data-lucide="terminal-square" aria-hidden="true"></i></span>
+            <span><strong>Codex</strong><small>独立编码会话</small></span>
+          </button>
+          <button class="dsh-harness cursor-interaction" type="button" data-harness="claude-code" aria-pressed="false">
+            <span class="dsh-harness-icon"><i data-lucide="bot" aria-hidden="true"></i></span>
+            <span><strong>Claude Code</strong><small>独立编码会话</small></span>
+          </button>
+        </div>
+      </fieldset>
+
+      <label class="dsh-task-label" for="dsh-task">任务</label>
+      <textarea class="dsh-task" id="dsh-task" rows="4">实现委派功能：只有用户通过指令才能创建新会话；委派会话保持同级，subagent 不受限制。</textarea>
+
+      <label class="dsh-report-row cursor-interaction" for="dsh-report-back">
+        <span class="dsh-report-copy"><strong>完成后回传到当前会话</strong><small id="dsh-report-help">结果仅保留在新会话，不唤醒当前会话</small></span>
+        <span class="dsh-switch"><input id="dsh-report-back" type="checkbox"><span aria-hidden="true"></span></span>
+      </label>
+
+      <div class="dsh-dialog-actions">
+        <button class="dsh-button dsh-button-secondary cursor-interaction" type="button" id="dsh-cancel">取消</button>
+        <button class="dsh-button dsh-button-primary cursor-interaction" type="button" id="dsh-submit"><i data-lucide="send" aria-hidden="true"></i>开始委派</button>
+      </div>
+    </section>
+  </div>
+</div>
+
+<style>
+  #delegation-command-design {
+    color-scheme: light dark;
+    --dsh-bg: light-dark(#f4f4f5, #171719);
+    --dsh-sidebar: light-dark(#e9e9eb, #202023);
+    --dsh-panel: light-dark(#ffffff, #2c2c2f);
+    --dsh-panel-strong: light-dark(#f5f5f6, #353538);
+    --dsh-input: light-dark(#f7f7f8, #242427);
+    --dsh-text: light-dark(#202124, #f2f2f3);
+    --dsh-muted: light-dark(#70737a, #a7a7ad);
+    --dsh-border: light-dark(#d7d7da, #45454a);
+    --dsh-hover: light-dark(#dedee1, #3b3b3f);
+    --dsh-selected: light-dark(#202124, #f2f2f3);
+    --dsh-selected-text: light-dark(#ffffff, #202124);
+    --dsh-scrim: light-dark(rgba(20, 20, 22, .36), rgba(0, 0, 0, .58));
+    --dsh-success: light-dark(#16794c, #58c991);
+    width: 100%;
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #delegation-command-design * { box-sizing: border-box; }
+  #delegation-command-design [hidden] { display: none !important; }
+  #delegation-command-design button,
+  #delegation-command-design textarea { font: inherit; }
+  #delegation-command-design .dsh-window {
+    position: relative;
+    display: grid;
+    grid-template-columns: 224px minmax(0, 1fr);
+    min-height: 690px;
+    overflow: hidden;
+    border: 1px solid var(--dsh-border);
+    border-radius: 18px;
+    background: var(--dsh-bg);
+    color: var(--dsh-text);
+  }
+  #delegation-command-design .dsh-sidebar {
+    padding: 18px 12px;
+    background: var(--dsh-sidebar);
+    border-right: 1px solid var(--dsh-border);
+  }
+  #delegation-command-design .dsh-brand { display: flex; align-items: center; gap: 9px; padding: 0 9px 18px; font-weight: 500; }
+  #delegation-command-design .dsh-brand svg { width: 18px; }
+  #delegation-command-design .dsh-new,
+  #delegation-command-design .dsh-session {
+    width: 100%; border: 0; color: var(--dsh-text); background: transparent; text-align: left;
+  }
+  #delegation-command-design .dsh-new { display: flex; gap: 8px; align-items: center; padding: 9px; border-radius: 9px; }
+  #delegation-command-design .dsh-new:hover { background: var(--dsh-hover); }
+  #delegation-command-design .dsh-new svg { width: 17px; }
+  #delegation-command-design .dsh-side-label { padding: 26px 9px 8px; color: var(--dsh-muted); font-size: 12px; }
+  #delegation-command-design .dsh-session { display: flex; align-items: center; gap: 9px; padding: 9px; border-radius: 10px; }
+  #delegation-command-design .dsh-session.is-active { background: var(--dsh-panel-strong); }
+  #delegation-command-design .dsh-session-icon { display: grid; place-items: center; flex: 0 0 30px; height: 30px; border-radius: 8px; background: var(--dsh-panel); }
+  #delegation-command-design .dsh-session-icon svg { width: 15px; }
+  #delegation-command-design .dsh-session > span:last-child { min-width: 0; display: grid; gap: 2px; }
+  #delegation-command-design .dsh-session strong,
+  #delegation-command-design .dsh-session small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #delegation-command-design .dsh-session strong { font-size: 13px; font-weight: 500; }
+  #delegation-command-design .dsh-session small { color: var(--dsh-muted); font-size: 11px; }
+  #delegation-command-design .dsh-running-dot { display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: var(--dsh-success); }
+  #delegation-command-design .dsh-main { position: relative; display: flex; min-width: 0; flex-direction: column; }
+  #delegation-command-design .dsh-header { display: flex; justify-content: space-between; align-items: center; height: 58px; padding: 0 18px; border-bottom: 1px solid var(--dsh-border); }
+  #delegation-command-design .dsh-header > div { display: grid; gap: 1px; }
+  #delegation-command-design .dsh-header strong { font-size: 14px; font-weight: 500; }
+  #delegation-command-design .dsh-header span { color: var(--dsh-muted); font-size: 11px; }
+  #delegation-command-design .dsh-icon-button,
+  #delegation-command-design .dsh-add-button,
+  #delegation-command-design .dsh-send-button,
+  #delegation-command-design .dsh-close { display: grid; place-items: center; border: 0; color: var(--dsh-muted); background: transparent; }
+  #delegation-command-design .dsh-icon-button { width: 34px; height: 34px; }
+  #delegation-command-design .dsh-thread { display: grid; flex: 1; align-content: start; gap: 16px; max-width: 650px; width: 100%; margin: 0 auto; padding: 44px 28px 180px; }
+  #delegation-command-design .dsh-user-bubble { justify-self: end; max-width: 520px; padding: 12px 14px; border-radius: 16px 16px 4px 16px; background: var(--dsh-panel-strong); }
+  #delegation-command-design .dsh-answer { max-width: 570px; color: var(--dsh-muted); }
+  #delegation-command-design .dsh-composer { position: absolute; right: 28px; bottom: 20px; left: 28px; min-height: 106px; padding: 13px; border: 1px solid var(--dsh-border); border-radius: 16px; background: var(--dsh-panel); }
+  #delegation-command-design .dsh-composer textarea { width: 100%; height: 46px; resize: none; border: 0; outline: 0; color: var(--dsh-text); background: transparent; }
+  #delegation-command-design .dsh-composer textarea::placeholder { color: var(--dsh-muted); }
+  #delegation-command-design .dsh-composer-actions { display: flex; align-items: center; gap: 8px; color: var(--dsh-muted); }
+  #delegation-command-design .dsh-add-button,
+  #delegation-command-design .dsh-send-button { width: 30px; height: 30px; border-radius: 50%; }
+  #delegation-command-design .dsh-composer-actions span { font-size: 12px; }
+  #delegation-command-design .dsh-send-button { margin-left: auto; color: var(--dsh-selected-text); background: var(--dsh-selected); }
+  #delegation-command-design .dsh-command-menu { position: absolute; z-index: 3; right: 28px; bottom: 135px; left: 28px; padding: 10px; border: 1px solid var(--dsh-border); border-radius: 16px; background: var(--dsh-panel); box-shadow: 0 18px 45px rgba(0,0,0,.2); }
+  #delegation-command-design .dsh-menu-title,
+  #delegation-command-design .dsh-menu-section { padding: 6px 8px; color: var(--dsh-muted); font-size: 12px; font-weight: 500; }
+  #delegation-command-design .dsh-menu-section { padding-top: 12px; }
+  #delegation-command-design .dsh-menu-row { display: grid; grid-template-columns: 26px auto 1fr; align-items: center; width: 100%; min-height: 42px; padding: 0 9px; border: 0; border-radius: 9px; color: var(--dsh-text); background: transparent; text-align: left; }
+  #delegation-command-design .dsh-menu-row:hover,
+  #delegation-command-design .dsh-delegate-row { background: var(--dsh-hover); }
+  #delegation-command-design .dsh-menu-row svg { width: 17px; color: var(--dsh-muted); }
+  #delegation-command-design .dsh-menu-row span { font-weight: 500; }
+  #delegation-command-design .dsh-menu-row small { margin-left: 5px; color: var(--dsh-muted); font-size: 12px; font-weight: 400; }
+  #delegation-command-design .dsh-menu-row em { justify-self: end; color: var(--dsh-muted); font-size: 12px; font-style: normal; }
+  #delegation-command-design .dsh-scrim { position: absolute; z-index: 5; inset: 0; background: var(--dsh-scrim); }
+  #delegation-command-design .dsh-dialog { position: absolute; z-index: 6; top: 50%; left: 50%; width: min(590px, calc(100% - 36px)); transform: translate(-50%, -50%); padding: 22px; border: 1px solid var(--dsh-border); border-radius: 18px; background: var(--dsh-panel); box-shadow: 0 24px 80px rgba(0,0,0,.35); }
+  #delegation-command-design .dsh-dialog-header { display: flex; justify-content: space-between; gap: 20px; }
+  #delegation-command-design .dsh-dialog h2 { margin: 0; font-size: 18px; font-weight: 500; }
+  #delegation-command-design .dsh-dialog p { margin: 5px 0 0; color: var(--dsh-muted); font-size: 13px; }
+  #delegation-command-design .dsh-close { flex: 0 0 34px; height: 34px; border-radius: 8px; }
+  #delegation-command-design .dsh-close:hover { background: var(--dsh-hover); }
+  #delegation-command-design .dsh-fieldset { margin: 23px 0 18px; padding: 0; border: 0; }
+  #delegation-command-design .dsh-fieldset legend,
+  #delegation-command-design .dsh-task-label { display: block; margin-bottom: 8px; font-size: 13px; font-weight: 500; }
+  #delegation-command-design .dsh-harness-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #delegation-command-design .dsh-harness { display: flex; min-width: 0; align-items: center; gap: 8px; padding: 10px; border: 1px solid var(--dsh-border); border-radius: 11px; color: var(--dsh-text); background: var(--dsh-input); text-align: left; }
+  #delegation-command-design .dsh-harness:hover { background: var(--dsh-hover); }
+  #delegation-command-design .dsh-harness.is-selected { border-color: var(--dsh-selected); box-shadow: inset 0 0 0 1px var(--dsh-selected); }
+  #delegation-command-design .dsh-harness-icon { display: grid; place-items: center; flex: 0 0 29px; height: 29px; border-radius: 8px; background: var(--dsh-panel-strong); }
+  #delegation-command-design .dsh-harness-icon svg { width: 15px; }
+  #delegation-command-design .dsh-harness > span:last-child { display: grid; min-width: 0; gap: 2px; }
+  #delegation-command-design .dsh-harness strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; font-weight: 500; }
+  #delegation-command-design .dsh-harness small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--dsh-muted); font-size: 10px; }
+  #delegation-command-design .dsh-task { width: 100%; min-height: 98px; resize: vertical; padding: 11px 12px; border: 1px solid var(--dsh-border); border-radius: 11px; outline: 0; color: var(--dsh-text); background: var(--dsh-input); }
+  #delegation-command-design .dsh-task:focus { border-color: var(--dsh-selected); box-shadow: 0 0 0 2px color-mix(in srgb, var(--dsh-selected) 18%, transparent); }
+  #delegation-command-design .dsh-report-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 16px; padding: 13px 14px; border-radius: 11px; background: var(--dsh-panel-strong); }
+  #delegation-command-design .dsh-report-copy { display: grid; gap: 3px; }
+  #delegation-command-design .dsh-report-copy strong { font-size: 13px; font-weight: 500; }
+  #delegation-command-design .dsh-report-copy small { color: var(--dsh-muted); font-size: 11px; }
+  #delegation-command-design .dsh-switch { position: relative; flex: 0 0 38px; height: 22px; }
+  #delegation-command-design .dsh-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  #delegation-command-design .dsh-switch span { position: absolute; inset: 0; border-radius: 11px; background: var(--dsh-border); transition: background .16s ease; }
+  #delegation-command-design .dsh-switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--dsh-panel); transition: transform .16s ease; }
+  #delegation-command-design .dsh-switch input:focus-visible + span { outline: 2px solid var(--dsh-selected); outline-offset: 2px; }
+  #delegation-command-design .dsh-switch input:checked + span { background: var(--dsh-selected); }
+  #delegation-command-design .dsh-switch input:checked + span::after { transform: translateX(16px); }
+  #delegation-command-design .dsh-dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 22px; }
+  #delegation-command-design .dsh-button { display: inline-flex; min-height: 38px; align-items: center; justify-content: center; gap: 7px; padding: 0 15px; border-radius: 9px; }
+  #delegation-command-design .dsh-button svg { width: 15px; }
+  #delegation-command-design .dsh-button-secondary { border: 1px solid var(--dsh-border); color: var(--dsh-text); background: transparent; }
+  #delegation-command-design .dsh-button-primary { border: 1px solid var(--dsh-selected); color: var(--dsh-selected-text); background: var(--dsh-selected); }
+  #delegation-command-design .dsh-toast { position: absolute; z-index: 8; top: 72px; right: 18px; display: flex; width: 300px; align-items: center; gap: 10px; padding: 12px; border: 1px solid var(--dsh-border); border-radius: 12px; background: var(--dsh-panel); box-shadow: 0 12px 35px rgba(0,0,0,.24); }
+  #delegation-command-design .dsh-toast > svg { width: 18px; color: var(--dsh-success); }
+  #delegation-command-design .dsh-toast > span { display: grid; gap: 2px; }
+  #delegation-command-design .dsh-toast strong { font-size: 12px; font-weight: 500; }
+  #delegation-command-design .dsh-toast small { color: var(--dsh-muted); font-size: 11px; }
+  #delegation-command-design .dsh-toast button { margin-left: auto; border: 0; color: var(--dsh-text); background: transparent; font-size: 12px; font-weight: 500; }
+  @media (max-width: 720px) {
+    #delegation-command-design .dsh-window { grid-template-columns: 1fr; min-height: 760px; }
+    #delegation-command-design .dsh-sidebar { display: none; }
+    #delegation-command-design .dsh-harness-options { grid-template-columns: 1fr; }
+    #delegation-command-design .dsh-menu-row em { display: none; }
+    #delegation-command-design .dsh-dialog { top: 48%; padding: 18px; }
+  }
+</style>
+
+<script>
+  (() => {
+    const root = document.getElementById('delegation-command-design');
+    const dialog = root.querySelector('.dsh-dialog');
+    const scrim = root.querySelector('.dsh-scrim');
+    const menu = root.querySelector('.dsh-command-menu');
+    const report = root.querySelector('#dsh-report-back');
+    const reportHelp = root.querySelector('#dsh-report-help');
+    const task = root.querySelector('#dsh-task');
+    const toast = root.querySelector('.dsh-toast');
+    const created = root.querySelector('.dsh-created');
+    const saved = window.openai?.widgetState;
+    const state = {
+      harness: saved?.modelContent?.harness || 'codex',
+      reportBack: saved?.modelContent?.reportBack === true,
+      dialogOpen: saved?.privateContent?.dialogOpen !== false,
+      task: saved?.privateContent?.task || task.value
+    };
+
+    function save() {
+      const pending = window.openai?.setWidgetState?.({
+        modelContent: { harness: state.harness, reportBack: state.reportBack },
+        privateContent: { dialogOpen: state.dialogOpen, task: state.task }
+      });
+      pending?.catch(() => {});
+    }
+
+    function render() {
+      dialog.hidden = !state.dialogOpen;
+      scrim.hidden = !state.dialogOpen;
+      menu.hidden = state.dialogOpen;
+      task.value = state.task;
+      report.checked = state.reportBack;
+      reportHelp.textContent = state.reportBack
+        ? '完成初始任务后，向当前会话回传一次'
+        : '结果仅保留在新会话，不唤醒当前会话';
+      root.querySelectorAll('.dsh-harness').forEach(button => {
+        const selected = button.dataset.harness === state.harness;
+        button.classList.toggle('is-selected', selected);
+        button.setAttribute('aria-pressed', String(selected));
+      });
+    }
+
+    root.querySelector('#dsh-open-delegate').addEventListener('click', () => {
+      state.dialogOpen = true;
+      toast.hidden = true;
+      render();
+      save();
+    });
+    [root.querySelector('#dsh-close-dialog'), root.querySelector('#dsh-cancel')].forEach(button => button.addEventListener('click', () => {
+      state.dialogOpen = false;
+      render();
+      save();
+    }));
+    root.querySelectorAll('.dsh-harness').forEach(button => button.addEventListener('click', () => {
+      state.harness = button.dataset.harness;
+      render();
+      save();
+    }));
+    report.addEventListener('change', () => {
+      state.reportBack = report.checked;
+      render();
+      save();
+    });
+    task.addEventListener('input', () => { state.task = task.value; });
+    task.addEventListener('change', save);
+    root.querySelector('#dsh-submit').addEventListener('click', () => {
+      state.task = task.value.trim();
+      if (!state.task) { task.focus(); return; }
+      state.dialogOpen = false;
+      dialog.hidden = true;
+      scrim.hidden = true;
+      menu.hidden = true;
+      created.hidden = false;
+      const label = state.harness === 'dsh' ? 'DSH 原生' : state.harness === 'codex' ? 'Codex' : 'Claude Code';
+      toast.querySelector('strong').textContent = `已创建 ${label} 委派会话`;
+      toast.hidden = false;
+      save();
+    });
+
+    render();
+    if (globalThis.Tweak) {
+      const tweak = new Tweak({ container: dialog, onChange: () => { render(); save(); } });
+      tweak.addSelect(state, 'harness', { label: '默认执行者', options: [
+        { label: 'DSH 原生', value: 'dsh' }, { label: 'Codex', value: 'codex' }, { label: 'Claude Code', value: 'claude-code' }
+      ], reference: 'delegate.harness' });
+      tweak.addToggle(state, 'reportBack', { label: '默认回传', reference: 'delegate.reportBack' });
+    }
+  })();
+</script>

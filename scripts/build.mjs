@@ -21,7 +21,7 @@ const quietBypassNotice = {
   },
 };
 await build({
-  entryPoints: ['src/media.ts', 'src/secret-questions.ts', 'src/dsh-output.ts', 'src/contracts.ts', 'src/codex-rpc.ts', 'src/acp-adapter.ts', 'src/acp-profiles.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts'],
+  entryPoints: ['src/media.ts', 'src/secret-questions.ts', 'src/dsh-output.ts', 'src/contracts.ts', 'src/codex-rpc.ts', 'src/acp-adapter.ts', 'src/acp-profiles.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts', 'src/worktree.ts'],
   external: ['@deepseek-ai/*'],
   outdir: 'dist',
   bundle: true,

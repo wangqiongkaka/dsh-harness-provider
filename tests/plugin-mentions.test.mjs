@@ -79,7 +79,7 @@ test('the DSH / command source keeps file, goal, plan and compact beside delegat
  const image={type:'image',mediaType:'image/png',data:'AA=='};
  assert.deepEqual(JSON.parse(JSON.stringify(await delegated.claim.submit('处理图片',{},[image]))),{kind:'success',text:'已创建委派会话'});
  const submitted=JSON.parse(JSON.stringify(delegations[0]));delete submitted.requestId;
- assert.deepEqual(submitted,{sessionId:'codex',harness:'codex',prompt:'处理图片',attachments:[image],reportBack:false});
+ assert.deepEqual(submitted,{sessionId:'codex',harness:'codex',prompt:'处理图片',attachments:[image],reportBack:false,worktree:false});
  const discussCandidate=(await commandUi.candidates(session,{query:'dis'}))[0];
  const discussed=commandUi.dispatch({candidate:discussCandidate,session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
  assert.equal(discussed.claim.attachments,true);

@@ -78,7 +78,10 @@ export class DshRunner {
   async run(payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, binding: Binding): Promise<void> {
     const { agent, messages, turn, step, signal } = payload;
     signal.throwIfAborted();
-    if (binding.cwd !== agent.session.header.cwd) throw new Error('Harness workspace identity mismatch');
+    const worktree = binding.delegation?.worktree;
+    if (worktree?.removed) throw new Error('该委派会话的独立 worktree 已合并或删除，无法继续对话；如需继续，请在来源会话重新委派。');
+    // A worktree delegation keeps its DSH session in the source workspace while the Harness works in the checkout.
+    if (binding.cwd !== agent.session.header.cwd && !worktree) throw new Error('Harness workspace identity mismatch');
     if (binding.pending) throw new Error('上次 Harness 请求的结果尚未确认；为避免重复执行，本会话暂停发送。');
     const input = await harnessInput(this.ctx, messages, signal);
     if (!input.length) throw new Error('Harness prompt is empty');

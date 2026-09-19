@@ -49,8 +49,9 @@ const delegationAttachmentSchema = z.discriminatedUnion('type', [
 ]);
 export const delegateFromUserRequest = address.extend({
   requestId: z.string().min(1).max(128), harness: selection, prompt: z.string().max(64_000), title: z.string().trim().min(1).max(80).optional(),
-  reportBack: z.boolean().default(false), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
-}).refine(request => request.prompt.trim() || request.attachments.length, { message: '请输入任务或上传附件' });
+  reportBack: z.boolean().default(false), worktree: z.boolean().default(false), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
+}).refine(request => request.prompt.trim() || request.attachments.length, { message: '请输入任务或上传附件' })
+  .refine(request => !request.worktree || request.harness !== 'dsh', { message: '独立 worktree 仅支持 Codex / Claude Code' });
 export const startDiscussionFromUserRequest = address.extend({
   requestId: z.string().min(1).max(128), prompt: z.string().max(64_000), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
 }).refine(request => request.prompt.trim() || request.attachments.length, { message: '请输入讨论任务或上传附件' });
