@@ -14,6 +14,24 @@ test('task mode dock follows the composer card width axis', async () => {
  assert.match(rule,/margin:0 auto/);
 });
 
+test('delegation mode blocks keys that would edit the hidden token or send an empty task', async () => {
+ const source=await readFile('src/client.tsx','utf8');
+ const bundle=await build({stdin:{contents:source+'\nexport {guardDelegateToken};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require:createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'))});
+ const guard=(key,start,{collapsed=true,empty=false,...keys}={})=>module.exports.guardDelegateToken({key,shiftKey:false,metaKey:false,isComposing:false,...keys},start,collapsed,empty,'/delegate ');
+ assert.equal(guard('Backspace',10),true,'the caret right after the token');
+ assert.equal(guard('Backspace',9),true,'a bare /delegate still holds the mode');
+ assert.equal(guard('Backspace',11),false);
+ assert.equal(guard('Backspace',14,{metaKey:true}),true,'deleting to the line start');
+ assert.equal(guard('Backspace',undefined),false,'a later paragraph');
+ assert.equal(guard('Backspace',5,{collapsed:false}),true,'a selection covering the token');
+ assert.equal(guard('Delete',9),true);assert.equal(guard('Delete',10),false);
+ assert.equal(guard('Backspace',10,{isComposing:true}),false,'IME composition owns its keys');
+ assert.equal(guard('Enter',10,{empty:true}),true);assert.equal(guard('Enter',10,{empty:true,shiftKey:true}),false);assert.equal(guard('Enter',12),false);
+ assert.equal(guard('ArrowLeft',10,{empty:true}),false);
+});
+
 // Runs the real client entry with only the `@` source's services present.
 test('the @ plugin source lists Harness plugins after files and inserts the native mention text', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));

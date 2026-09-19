@@ -264,6 +264,24 @@ function useModelProvider(modelProvider: Injected['modelProvider'], sessionId: s
 type DelegationOptions = { harness: State['harness']; reportBack: boolean; worktree: boolean };
 const delegationOptions = new Map<string, DelegationOptions>();
 const optionsFor = (sessionId: string) => delegationOptions.get(sessionId) ?? { harness: 'codex' as const, reportBack: false, worktree: false };
+// The host keeps delegation mode only while the draft starts with the hidden `/delegate ` token (or is `/delegate`), so no
+// edit may reach into it, and an empty task has nothing to send. `start` is the selection's offset in the first paragraph.
+function guardDelegateToken(event: Pick<KeyboardEvent, 'key' | 'shiftKey' | 'metaKey' | 'isComposing'>, start: number | undefined, collapsed: boolean, emptyTask: boolean, token: string): boolean {
+  if (event.isComposing) return false;
+  if (event.key === 'Enter') return !event.shiftKey && emptyTask;
+  if ((event.key !== 'Backspace' && event.key !== 'Delete') || start === undefined) return false;
+  // ponytail: Cmd+Backspace is blocked anywhere in the first paragraph, even on a wrapped line that would leave the token.
+  return start < token.length || (event.key === 'Backspace' && collapsed && (start === token.length || event.metaKey));
+}
+// Text offset of a DOM point within `paragraph`; undefined when the point lies after it.
+function paragraphOffset(paragraph: Element, node: Node, offset: number): number | undefined {
+  const range = document.createRange();
+  range.selectNodeContents(paragraph);
+  const side = range.comparePoint(node, offset);
+  if (side !== 0) return side < 0 ? 0 : undefined;
+  range.setEnd(node, offset);
+  return range.toString().length;
+}
 // Sessions whose `/` menu currently sits after a `/delegate ` token: it offers only this session's skills, which run here before handing off.
 const delegateSkillMenus = new Set<string>();
 let delegationRequestSequence = 0;
@@ -294,9 +312,66 @@ const discussionClaim = (remote: Api, session: ClientSessionContext, t: T): Comm
 
 function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationDockProps) {
   const [options, setOptions] = useState(() => optionsFor(sessionId));
+  const dock = useRef<HTMLDivElement>(null);
+  const token = input.claim?.token;
+  const attachments = input.attachmentIds.length;
+  useEffect(() => {
+    if (!token) return;
+    const seat=dock.current?.closest<HTMLElement>('[data-composer-seat]');
+    if (!seat) return;
+    // Held keys repeat faster than the draft prop re-renders, so both listeners read the editor's live DOM. Lexical deletes
+    // on keydown without checking defaultPrevented, so a guarded key also stops before reaching the editor.
+    const onKeyDown=(event: KeyboardEvent) => {
+      const editor=(event.target as Element | null)?.closest?.<HTMLElement>('[contenteditable]'), paragraph=editor?.firstElementChild, selection=document.getSelection();
+      if (!editor || !paragraph) return;
+      const range=selection?.rangeCount ? selection.getRangeAt(0) : undefined;
+      const start=range && paragraphOffset(paragraph,range.startContainer,range.startOffset);
+      const emptyTask=attachments === 0 && editor.innerText.replace(/\u00a0/g,' ').replace(/\u200b/g,'').slice(token.length).trim() === '';
+      if (guardDelegateToken(event,start,range?.collapsed ?? true,emptyTask,token)) { event.preventDefault(); event.stopPropagation(); }
+    };
+    // The draft's first text node, while it still starts with the token.
+    const tokenText=() => {
+      const paragraph=seat.querySelector('[contenteditable]')?.firstElementChild;
+      const text=paragraph && document.createTreeWalker(paragraph,NodeFilter.SHOW_TEXT).nextNode() as Text | null;
+      return paragraph && text?.data.startsWith(token.trimEnd()) ? { paragraph, text } : undefined;
+    };
+    // The caret and selections stay after the token, so select-all, Home or a click before the task never cover it.
+    const onSelection=() => {
+      const selection=document.getSelection(), found=tokenText();
+      if (!found || !selection?.anchorNode || !selection.focusNode || !seat.contains(selection.anchorNode)) return;
+      const { paragraph, text }=found, end=Math.min(token.length,text.length);
+      const clamp=(node: Node, offset: number): [Node, number] => (paragraphOffset(paragraph,node,offset) ?? end) < end ? [text,end] : [node,offset];
+      const [anchorNode,anchorOffset]=clamp(selection.anchorNode,selection.anchorOffset), [focusNode,focusOffset]=clamp(selection.focusNode,selection.focusOffset);
+      if (anchorNode !== selection.anchorNode || anchorOffset !== selection.anchorOffset || focusNode !== selection.focusNode || focusOffset !== selection.focusOffset)
+        selection.setBaseAndExtent(anchorNode,anchorOffset,focusNode,focusOffset);
+    };
+    // An IME can compose into the token's own text node (Lexical composes in place when the selection carries the token's
+    // style, and skips the host's splitting transform while composing), so the hidden box widens to show the text after it.
+    const reveal=() => {
+      const text=tokenText()?.text;
+      let rest=0;
+      if (text && text.length > token.length) {
+        const range=document.createRange();
+        range.setStart(text,token.length); range.setEnd(text,text.length);
+        rest=range.getBoundingClientRect().width;
+      }
+      dock.current?.toggleAttribute('data-hp-merged',rest > 0);
+      seat.style.setProperty('--hp-token-rest',`${rest}px`);
+    };
+    const observer=new MutationObserver(reveal);
+    observer.observe(seat,{subtree:true,childList:true,characterData:true});
+    reveal();
+    seat.addEventListener('keydown',onKeyDown,true);
+    document.addEventListener('selectionchange',onSelection);
+    return () => {
+      observer.disconnect(); seat.style.removeProperty('--hp-token-rest');
+      seat.removeEventListener('keydown',onKeyDown,true); document.removeEventListener('selectionchange',onSelection);
+    };
+  }, [token,attachments]);
   const update = (next: DelegationOptions) => { delegationOptions.set(sessionId, next); setOptions(next); };
   const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code' };
-  return <div className="hp-delegate" data-hp-mode="delegate" aria-label={t('delegateMode')}>
+  const emptyTask = attachments === 0 && input.draft.slice(token?.length).trim() === '';
+  return <div ref={dock} className="hp-delegate" data-hp-mode="delegate" data-hp-empty={emptyTask ? '' : undefined} aria-label={t('delegateMode')}>
     <strong>{t('delegateMode')}</strong>
     <div className="hp-delegate-harness" role="radiogroup" aria-label={t('harness')}>
       {(Object.keys(names) as State['harness'][]).map(harness => <button key={harness} type="button" role="radio" aria-checked={options.harness === harness}
@@ -867,7 +942,12 @@ ${nativeContextColors}
 [data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]) [data-composer-card]{--dsw-elevation-stroke-color:var(--dsw-alias-state-warn-label);box-shadow:0 0 0 1.5px var(--dsw-alias-state-warn-label),var(--dsw-elevation-soft,0 0 #0000)}
 /* The dock names the mode, so the composer hides the /delegate token; the draft (and the submitted command) keeps it.
    A zero-width box whose text overflows to the left keeps the caret, at the token's end, where the task starts. */
-[data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]) [data-composer-card] [contenteditable] p:first-child>span:first-child[style*="--dsw-alias-state-warn-label"]{display:inline-flex;width:0;justify-content:flex-end;white-space:pre;color:transparent!important;vertical-align:top}
+[data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]) [data-composer-card] [contenteditable] p:first-child>span:first-child[style*="--dsw-alias-state-warn-label"]{display:inline-flex;width:var(--hp-token-rest,0px);justify-content:flex-end;white-space:pre;color:transparent!important;vertical-align:top}
+/* Text composed into the token's node shows after the clipped token; the clip margin keeps the caret at its end visible. */
+[data-composer-seat]:has(.hp-delegate[data-hp-merged]) [data-composer-card] [contenteditable] p:first-child>span:first-child[style*="--dsw-alias-state-warn-label"]{overflow:clip;overflow-clip-margin:2px;color:inherit!important}
+/* The host only sees the hidden token, so an empty delegation task would still look sendable; its send button greys out
+   like the host's disabled one (the keydown guard blocks Enter). */
+[data-composer-seat]:has(.hp-delegate[data-hp-empty]) [data-composer-card] button[class$="_primary"]{opacity:.4;cursor:default;pointer-events:none}
 .hp-delegate-harness{display:flex;padding:2px;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover)}
 .hp-delegate-harness button{height:26px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer}
 .hp-delegate-harness button[aria-checked=true]{background:var(--dsw-specific-menu);color:var(--dsw-alias-label-primary)}

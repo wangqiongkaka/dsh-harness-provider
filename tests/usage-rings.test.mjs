@@ -71,3 +71,77 @@ test('delegation mode rings only its own composer card in orange', async () => {
   assert.notEqual((await token('discussing')).width,0);assert.equal((await token('discussing')).color,'rgb(255, 128, 0)');
  } finally {await browser.close();}
 });
+
+// The host composer is Lexical with plain-text bindings, which deletes on keydown itself.
+test('delegation mode keeps the hidden token and blocks empty sends in a Lexical editor', async () => {
+ const source=await readFile('src/client.tsx','utf8');
+ const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ const conversation=resolve('node_modules/@deepseek-ai/dsh-client-ui-conversation'), lexical=name=>resolve(conversation,'node_modules',name);
+ const bundle=await build({stdin:{contents:source+`\nimport {createRoot} from 'react-dom/client';
+import {createEditor,$getRoot,$getSelection,$createParagraphNode,$createTextNode,KEY_ENTER_COMMAND,COMMAND_PRIORITY_CRITICAL} from 'lexical';
+import {registerPlainText} from '@lexical/plain-text';
+import {registerClaimDecoration} from '${conversation}/src/client/input/editor/claim-decor.ts';
+document.head.append(Object.assign(document.createElement('style'),{textContent:styles}));
+const editor=createEditor({namespace:'composer',onError(error){throw error;}});
+editor.setRootElement(document.querySelector('[contenteditable]'));
+registerPlainText(editor);registerClaimDecoration(editor,()=>'/delegate ');
+editor.registerCommand(KEY_ENTER_COMMAND,event=>{event?.preventDefault();document.body.dataset.sent=String(Number(document.body.dataset.sent??0)+1);return true;},COMMAND_PRIORITY_CRITICAL);
+const root=createRoot(document.querySelector('#dock'));
+window.reset=task=>{
+ delete document.body.dataset.sent;
+ const input={phase:'claimed',claim:{name:'delegate',token:'/delegate '},draft:'/delegate '+task,attachmentIds:[],draftRev:1,occurrences:[],queue:[]};
+ root.render(<DelegationDock sessionId="s" input={input} inputActions={{setDraft(){}}} t={key=>key} />);
+ editor.update(()=>{const paragraph=$createParagraphNode().append($createTextNode('/delegate ').setStyle('color: var(--dsw-alias-state-warn-label)'));if(task)paragraph.append($createTextNode(task));$getRoot().clear().append(paragraph);paragraph.selectEnd();},{discrete:true});
+ editor.focus();
+};
+// Safari composes without a keydown first; with the token's style on the selection, Lexical composes inside the token's node.
+window.inheritTokenStyle=()=>editor.update(()=>$getSelection().setStyle('color: var(--dsw-alias-state-warn-label)'),{discrete:true});`,resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'browser',format:'iife',jsx:'automatic',
+  alias:{react:require.resolve('react'),'react/jsx-runtime':require.resolve('react/jsx-runtime'),'react-dom/client':require.resolve('react-dom/client'),lexical:lexical('lexical'),'@lexical/plain-text':lexical('@lexical/plain-text')}});
+ const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage();
+  await page.setContent('<div data-composer-seat><div id="dock"></div><div data-composer-card><div contenteditable style="white-space:pre-wrap"></div><button class="RVCQnG_primary">send</button></div></div>');
+  await page.addScriptTag({content:bundle.outputFiles[0].text});
+  const text=()=>page.locator('[contenteditable]').innerText();
+  const settle=()=>page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,50)));
+  const reset=async task=>{await page.evaluate(task=>window.reset(task),task);await page.locator('.hp-delegate[data-hp-mode=delegate]').waitFor();await settle();};
+  await reset('ab');
+  for(let i=0;i<5;i++)await page.keyboard.press('Backspace');
+  assert.equal(await text(),'/delegate ','held Backspace stops at the token');
+  await reset('ab');
+  await page.keyboard.press('Home');await settle();await page.keyboard.press('Backspace');await page.keyboard.press('Delete');
+  assert.equal(await text(),'/delegate b','the caret never enters the token');
+  await reset('ab');
+  for(let i=0;i<4;i++)await page.keyboard.press('ArrowLeft');
+  await settle();await page.keyboard.press('Backspace');
+  assert.equal(await text(),'/delegate ab');
+  await reset('ab');
+  await page.keyboard.press('ControlOrMeta+a');await settle();await page.keyboard.press('Backspace');
+  assert.equal(await text(),'/delegate ','select-all clears only the task');
+  await reset('ab');
+  await page.keyboard.press('Meta+Backspace');
+  assert.equal(await text(),'/delegate ab');
+  await reset('');
+  assert.equal(await page.locator('[data-composer-card] button').evaluate(node=>getComputedStyle(node).pointerEvents),'none','an empty task greys out send');
+  await page.keyboard.press('Enter');
+  assert.equal(await page.evaluate(()=>document.body.dataset.sent),undefined,'Enter does not send an empty task');
+  await reset('ab');
+  assert.equal(await page.locator('[data-composer-card] button').evaluate(node=>getComputedStyle(node).pointerEvents),'auto');
+  await page.keyboard.press('Enter');
+  assert.equal(await page.evaluate(()=>document.body.dataset.sent),'1');
+  await reset('');
+  await page.evaluate(()=>window.inheritTokenStyle());
+  const cdp=await page.context().newCDPSession(page);
+  for(const text of ['w','wo'])await cdp.send('Input.imeSetComposition',{text,selectionStart:text.length,selectionEnd:text.length});
+  await cdp.send('Input.insertText',{text:'我'});await settle();
+  const composed=await page.locator('[contenteditable] p>span').first().evaluate(span=>{
+   const text=span.firstChild,range=document.createRange();range.setStart(text,'/delegate '.length);range.setEnd(text,text.length);
+   const box=span.getBoundingClientRect(),rest=range.getBoundingClientRect(),style=getComputedStyle(span);
+   return {text:span.textContent.replace(/\u200b/g,''),width:Math.round(box.width),rest:Math.round(rest.width),left:box.left===span.closest('[contenteditable]').getBoundingClientRect().left,color:style.color,overflow:style.overflow};
+  });
+  assert.equal(composed.text,'/delegate 我','the IME composed inside the token node');
+  assert.ok(composed.rest>0);
+  assert.deepEqual({width:composed.width,left:composed.left,overflow:composed.overflow},{width:composed.rest,left:true,overflow:'clip'},'only the composed text shows, from the start of the line');
+  assert.notEqual(composed.color,'rgba(0, 0, 0, 0)');
+ } finally {await browser.close();}
+});
