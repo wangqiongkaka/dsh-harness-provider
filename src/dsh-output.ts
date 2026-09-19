@@ -24,9 +24,8 @@ export class DshOutput {
   }>();
   /** The last agent message waits for the turn's usage so the native stats fold sees tokens on the message that produced them. */
   private deferred?: { data: SessionEventMap['assistant/message']; attemptId: ReturnType<typeof LlmAttemptId>; index: number };
-  /** Whether the open step already holds an assistant message, whether one of them is prose, and its calls still awaiting results. */
+  /** Whether the open step already holds an assistant message, and its calls still awaiting results. */
   private stepMessages = false;
-  private stepProse = false;
   private openCalls = 0;
   constructor(private readonly ctx: Context, private readonly agent: Agent,
     private position: { turn: number; step: number },
@@ -40,7 +39,7 @@ export class DshOutput {
     if (this.active.has(item.itemId)) throw new Error('Duplicate Harness item');
     this.flush();
     const prose = item.type === 'agentMessage' || item.type === 'reasoning';
-    if (prose || (item.type !== 'contextCompaction' && item.type !== 'subagentDelegation')) this.enter(prose);
+    if (prose) this.enter();
     const entry = { item: structuredClone(item), stream: new AssistantStreamAccumulator(),
       attemptId: LlmAttemptId(`harness:${randomUUID()}`), index: 0, position: this.position };
     this.active.set(item.itemId, entry);
@@ -49,12 +48,7 @@ export class DshOutput {
       this.push(item.itemId, { type: 'block-start', index: 0, blockType: item.type === 'reasoning' ? 'reasoning' : 'text' });
       if (item.text) this.push(item.itemId, { type: item.type === 'reasoning' ? 'reasoning-delta' : 'text-delta', index: 0, text: item.text });
     } else if (item.type !== 'contextCompaction' && item.type !== 'subagentDelegation') {
-      const call = toolCall(item);
-      this.agent.session.append('assistant/message', { ...this.position,
-        message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [], usage: ZERO,
-      }, { surfaceOp: 'append' });
-      this.agent.session.append('tool/call', { ...this.position, callId: call.id, name: call.name, arguments: call.arguments });
-      this.openCalls++;
+      this.call(toolCall(item));
     }
   }
 
@@ -110,11 +104,8 @@ export class DshOutput {
   /** A Harness question as DSH's native `ask_user_question` row: waiting while the user answers, then the answers or the verdict. */
   async question<T extends { answers: readonly unknown[] }>(id: string, questions: readonly unknown[], ask: () => Promise<T>): Promise<T> {
     this.flush();
-    this.enter(false);
     const call = { type: 'tool-call' as const, id: ToolCallId(`question:${id}`), name: 'ask_user_question', arguments: JSON.stringify({ questions }) };
-    this.agent.session.append('assistant/message', { ...this.position, message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [], usage: ZERO }, { surfaceOp: 'append' });
-    this.agent.session.append('tool/call', { ...this.position, callId: call.id, name: call.name, arguments: call.arguments });
-    this.openCalls++;
+    this.call(call);
     const position = this.position;
     const result = (text: string, error?: { name: string; code: string }) => (this.openCalls--, this.agent.session.append('tool/result', { ...position,
       message: createToolResultMessage({ callId: call.id, content: [{ type: 'text', text }], isError: !!error }), ...(error ? { error } : {}) }, { surfaceOp: 'append' }));
@@ -154,19 +145,30 @@ export class DshOutput {
       outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } });
   }
   /**
-   * DSH shows a step's latest assistant message only, so prose and whatever follows prose each open a new step once every
-   * call of the current step has its result (a step closes with no call pending); consecutive calls share one step.
+   * The host footer counts a turn's usage only when each step holds exactly one assistant message, and a call's result must
+   * land in the call's step. So every message opens a new step once the current one has no call pending (DSH also shows a
+   * step's latest assistant message only), and a call started while others still run joins their step with its
+   * `tool/call` alone: Codex runs calls in parallel, and the step's message already stands for them.
    */
-  private enter(prose: boolean): void {
-    if (this.stepMessages && (prose || this.stepProse) && this.openCalls === 0) this.next();
+  private enter(): void {
+    if (this.stepMessages && this.openCalls === 0) this.next();
     this.stepMessages = true;
-    this.stepProse ||= prose;
+  }
+  private call(call: ReturnType<typeof toolCall>): void {
+    if (!this.stepMessages || this.openCalls === 0) {
+      this.enter();
+      this.agent.session.append('assistant/message', { ...this.position,
+        message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [], usage: ZERO,
+      }, { surfaceOp: 'append' });
+    }
+    this.agent.session.append('tool/call', { ...this.position, callId: call.id, name: call.name, arguments: call.arguments });
+    this.openCalls++;
   }
   private next(): void {
     this.agent.session.append('step/end', this.position);
     this.position = { ...this.position, step: this.position.step + 1 };
     this.agent.session.append('step/start', this.position);
-    this.stepMessages = this.stepProse = false;
+    this.stepMessages = false;
   }
   private push(id: string, chunk: StreamChunk): void {
     const entry = this.active.get(id)!;

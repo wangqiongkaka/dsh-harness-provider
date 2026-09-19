@@ -43,6 +43,17 @@ function fakeAdapter(log,native) {
      assert.equal(command.type,'turn.start');active=command.turnId;(native.inputs??=[]).push(command.input);
      emit({type:'turn.started',turnId:active});
      const text=command.input.map(p=>p.text).join('|');
+     if(text==='tools'){
+      // Two calls one after another, then two Codex runs in parallel.
+      const cmd=(id,command)=>({type:'commandExecution',itemId:id,command,description:command});
+      const done=(id,command)=>emit({type:'item.completed',turnId:active,snapshot:{item:{...cmd(id,command),output:'ok',exitCode:0},outcome:{status:'succeeded'}}});
+      for(const [id,command] of [['a','ls'],['b','pwd']]){emit({type:'item.started',turnId:active,item:cmd(id,command)});done(id,command);}
+      emit({type:'item.started',turnId:active,item:cmd('c','cat a')});emit({type:'item.started',turnId:active,item:cmd('d','cat b')});done('c','cat a');done('d','cat b');
+      emit({type:'item.completed',turnId:active,snapshot:{item:{type:'agentMessage',itemId:'final',text:'done'},outcome:{status:'succeeded'}}});
+      const turns=++native.turns;emit({type:'session.usage.changed',usage:{inputTokens:1000*turns,cachedInputTokens:100*turns,outputTokens:50*turns}});
+      emit({type:'turn.completed',turnId:active,outcome:{status:'succeeded'}});
+      active=undefined;return {ok:true,value:{turnId:command.turnId}};
+     }
      if(text==='broken'){emit({type:'item.completed',turnId:active,snapshot:{item:{type:'agentMessage',itemId:'answer',text:'reply:broken'},outcome:{status:'succeeded'}}});emit({type:'item.updated',turnId:active,itemId:'unknown-item',update:{type:'text.append',text:'invalid'}});return {ok:true,value:{turnId:active}};}
      emit({type:'item.started',turnId:active,item:{type:'reasoning',itemId:'reasoning',text:''}});
      emit({type:'item.updated',turnId:active,itemId:'reasoning',update:{type:'text.append',text:'Checking the workspace'}});
@@ -116,6 +127,12 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   assert.deepEqual(frames.filter(f=>f.type==='chunk' && f.chunk.type==='reasoning-delta').map(f=>f.chunk.text),['Checking the workspace','Checking the workspace']);
   assert.deepEqual(agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='reasoning').map(e=>e.data.message.content[0].text),['Checking the workspace','Checking the workspace']);
   assert.equal((await bindings.read(id)).pending,undefined);
+  // The footer needs exactly one assistant message per step: sequential calls take a step each, parallel calls share one.
+  await prompt(agent,'tools');
+  const callTurn=agent.session.snapshotEvents().filter(e=>e.data?.turn===3);
+  assert.deepEqual(callTurn.filter(e=>e.type==="assistant/message").map(e=>e.data.step),[1,2,3,4],'one assistant message per step');
+  assert.deepEqual(callTurn.filter(e=>e.type==="tool/call").map(e=>[e.data.step,JSON.parse(e.data.arguments).command]),[[1,'ls'],[2,'pwd'],[3,'cat a'],[3,'cat b']]);
+  assert.equal(turnUsage(agent.session.snapshotEvents(),3)?.totalTokens,1050,'a turn with parallel calls shows its usage');
   validateStoredEvents(agent.session.header,structuredClone(agent.session.snapshotEvents()));
   await first.ctx.fiber.dispose();await first.adapter.close();
   const second=await mount();
@@ -123,7 +140,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   await prompt(resumed.agent,'three');
   assert.equal(logs.length,2);
   assert.equal(logs[1].kind,'resume');assert.equal(logs[1].nativeRef.nativeSessionId,'native-fixed');
-  assert.equal(resumed.agent.session.snapshotEvents().filter(e=>e.type==='user/message' && e.data.source.kind==='user').length,3);
+  assert.equal(resumed.agent.session.snapshotEvents().filter(e=>e.type==='user/message' && e.data.source.kind==='user').length,4);
   // A turn that ends without an agent message still records its usage on a surface-less attempt;
   // the baseline is restored from the binding, so the thread's pre-restart totals are not counted again.
   const attempt=resumed.agent.session.snapshotEvents().filter(e=>e.type==='assistant/attempt').at(-1);
