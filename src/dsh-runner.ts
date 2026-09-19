@@ -1,8 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
+import { SessionId } from '@deepseek-ai/dsh-session';
 import type { UserMessage, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
-import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HostInteraction, HostInteractionResponse, HarnessSessionState, HostUsage } from './contracts.js';
+import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostUsage } from './contracts.js';
 import { hostTurnIdSchema } from './contracts.js';
 import { Bindings, type Binding } from './bindings.js';
 import { SecretQuestions } from './secret-questions.js';
@@ -14,7 +15,14 @@ export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
 }
-type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; queue: HarnessOutput[]; ended: boolean; wake: () => void; turnId?: import('./contracts.js').HostTurnId; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
+type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; turnId?: import('./contracts.js').HostTurnId; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
+/**
+ * How long an external Harness session may sit idle — no turn, and off screen — before its process is closed; the next
+ * turn resumes it from its binding. Clients report a shown session every 15 seconds, well inside this window.
+ */
+const IDLE_CLOSE_MS = 60_000;
+/** How often the idle reclaimer looks for sessions to close; short idle windows (tests) sweep proportionally faster. */
+const idleSweepMs = (idleCloseMs: number) => Math.min(60_000, Math.max(5, Math.floor(idleCloseMs / 4)));
 /** Drains the native session continuously: usage readings land as they arrive (also between turns), everything else queues for the turn loop. */
 function pump(live: Live): void {
   void (async () => {
@@ -51,8 +59,45 @@ async function take(live: Live): Promise<HarnessOutput | undefined> {
 }
 export class DshRunner {
   readonly live = new Map<string, Live>();
+  /** Subagents of sessions whose process was reclaimed, so the card keeps showing them until the session resumes. */
+  readonly retainedSubagents = new Map<string, HarnessSubagent[]>();
+  /** When a client last reported each session on screen. */
+  private readonly viewedAt = new Map<string, number>();
   constructor(private readonly ctx: Context, private readonly bindings: Bindings,
-    private readonly adapters: Record<Binding['harness'], HarnessAdapter>, private readonly delegation?: DelegationBridge, readonly secrets = new SecretQuestions()) {}
+    private readonly adapters: Record<Binding['harness'], HarnessAdapter>, private readonly delegation?: DelegationBridge, readonly secrets = new SecretQuestions(),
+    private readonly idleCloseMs = IDLE_CLOSE_MS) {
+    // A Harness process holds the native conversation, so it lives as long as the session does; idling that long
+    // buys nothing and keeps a CLI process (and its memory) resident, so it is closed and resumed on the next turn.
+    ctx.effect(() => {
+      const timer = setInterval(() => { void this.reclaimIdle().catch(() => {}); }, idleSweepMs(idleCloseMs));
+      timer.unref();
+      return () => clearInterval(timer);
+    }, 'harness: idle session reclamation');
+  }
+
+  /** A client shows this session; its process stays open while it is on screen and for the idle window after. */
+  viewed(id: string): void { this.viewedAt.set(id, Date.now()); }
+
+  /** Closes every Harness session whose process has been idle past the window; the binding keeps it resumable. */
+  private async reclaimIdle(): Promise<void> {
+    const now = Date.now();
+    for (const [id, at] of this.viewedAt) if (now - at >= this.idleCloseMs) this.viewedAt.delete(id);
+    for (const [id, live] of [...this.live]) {
+      if (live.turnId) continue;
+      // A backgrounded shell dies with the process; the idle window restarts once the last one ends.
+      if (live.session.hasBackgroundTasks?.()) { live.activeAt = now; continue; }
+      if (now - Math.max(live.activeAt, this.viewedAt.get(id) ?? -Infinity) < this.idleCloseMs) continue;
+      const agent = this.ctx.agents.get(SessionId(id));
+      if (!agent || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) continue;
+      // A session awaiting result confirmation stays open: the user is about to reconcile it against the native record.
+      const binding = await this.bindings.read(id);
+      if (!binding || binding.pending) continue;
+      if (this.live.get(id) !== live || live.turnId) continue; // a turn started while the binding was read
+      const subagents = live.session.subagents?.();
+      if (subagents?.length) this.retainedSubagents.set(id, subagents);
+      try { await live.session.close(); } finally { if (this.live.get(id) === live) this.live.delete(id); }
+    }
+  }
 
   pendingSteering(id: string): readonly UserMessage[] { return this.live.get(id)?.steerMessages ?? []; }
 
@@ -96,11 +141,13 @@ export class DshRunner {
       const session = unwrap(await this.adapters[binding.harness].open(binding.nativeRef
         ? { kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef, ...hints }
         : { kind: 'create', cwd: binding.cwd, ...hints }));
-      live = { session, revision: 0, usage: session.initialUsage, queue: [], ended: false, wake: () => {} };
+      live = { session, revision: 0, usage: session.initialUsage, queue: [], ended: false, wake: () => {}, activeAt: Date.now() };
       pump(live);
       this.live.set(agent.id, live);
+      this.retainedSubagents.delete(agent.id);
       const owned = live;
       agent.ctx.effect(() => async () => {
+        this.retainedSubagents.delete(agent.id);
         try { await session.close(); } finally { if (this.live.get(agent.id) === owned) this.live.delete(agent.id); }
       }, 'harness: native session');
       try { await this.saveState(binding, session.initialState); }
@@ -133,6 +180,7 @@ export class DshRunner {
     };
     agent.session.append('step/start', { turn, step });
     for (const message of messages) agent.session.append('user/message', message, { surfaceOp: 'append' });
+    live.activeAt = Date.now();
     try {
       await this.ctx.sessions.flush(agent.session);
       signal.throwIfAborted();
@@ -202,6 +250,7 @@ export class DshRunner {
       throw error;
     } finally {
       current.turnId = undefined;
+      current.activeAt = Date.now();
       await current.steering;
       signal.removeEventListener('abort', cancel);
       turnAbort.abort();

@@ -57,7 +57,7 @@ export const startDiscussionFromUserRequest = address.extend({
 }).refine(request => request.prompt.trim() || request.attachments.length, { message: '请输入讨论任务或上传附件' });
 export const delegationAcceptedSchema = z.object({ sessionId: z.string(), harness: selection, accepted: z.literal(true) });
 export const discussionAcceptedSchema = z.object({ accepted: z.literal(true) });
-/** Harness-internal subagents of the live native session, oldest first; empty while no native session runs in this process. */
+/** Harness-internal subagents of the native session, oldest first: live, else as last seen before its idle process was reclaimed. */
 export const subagentsSchema = z.array(z.object({
   id: z.string(), parentId: z.string().nullable(), name: z.string(), task: z.string().nullable(), status: z.enum(['running', 'completed', 'failed', 'cancelled']),
   entries: z.array(z.discriminatedUnion('kind', [
@@ -85,7 +85,7 @@ export const descriptors: InvocationDescriptor[] = [
   ['usage', address, usageSchema], ['harnesses', harnessesRequest, harnessesSchema], ['quota', address, quotaSchema],
   ['delegateFromUser', delegateFromUserRequest, delegationAcceptedSchema],
   ['startDiscussionFromUser', startDiscussionFromUserRequest, discussionAcceptedSchema],
-  ['subagents', address, subagentsSchema], ['plugins', address, pluginsSchema],
+  ['subagents', address, subagentsSchema], ['plugins', address, pluginsSchema], ['viewing', address, z.null()],
 ].map(([method, request, result]) => ({
   id: `dsh-harness-provider#harness/${method}`, service: 'harness', namespace: 'harness', method: method as string,
   invocation: { kind: 'direct' },

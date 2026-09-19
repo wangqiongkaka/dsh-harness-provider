@@ -58,6 +58,8 @@ function fakeAdapter(log,native) {
      active=undefined;return {ok:true,value:{turnId:command.turnId}};
     },
     async steer(input){log.push({kind:'steer',input});return {ok:true,value:{accepted:true}};},
+    hasBackgroundTasks:()=>!!native.background,
+    subagents:()=>native.subagents??[],
     async close(){if(active) await session.execute({type:'turn.cancel',turnId:active});channel.end();},
    };
    sessions.push(session);return {ok:true,value:session};
@@ -207,4 +209,88 @@ test('delegation instructions go to the adapter, not the user input, so a leadin
   assert.match(opened[0].instructions,/^\n\n\[DSH 会话能力，由宿主提供\]/);
   await adapter.close();
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});
+
+test('an idle Harness session is closed after the idle window and the next turn resumes it', {timeout:15000}, async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-idle-'));
+ const logs=[],native={turns:0};
+ const bindings=new Bindings(join(root,'bindings'));
+ const id=SessionId('idle-session');
+ const ctx=new Context();
+ for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+ await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+ const adapter=fakeAdapter(logs,native);
+ // A 120ms idle window stands in for the 1 minute default; the sweeper scales with it.
+ const runner=new DshRunner(ctx,bindings,{codex:adapter},undefined,undefined,120);
+ ctx.on('agent/inbox/inserted',({agent})=>runner.drainSteering(agent));
+ ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+ try {
+  await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
+  await ctx.plugin(Loop,{agents:[]});
+  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  agent.followup(createUserMessage({content:[{type:'text',text:'one'}],source:{kind:'user'}}));
+  await agent.whenIdle();
+  assert.deepEqual(logs.filter(entry=>entry.kind==='create'||entry.kind==='resume').map(entry=>entry.kind),['create']);
+  assert.equal(runner.live.has(id),true);
+  // Idling past the window closes the process on its own, with no prompt to trigger it.
+  await new Promise(resolve=>setTimeout(resolve,700));
+  assert.equal(runner.live.has(id),false);
+  // The next turn resumes the native session instead of creating a new one, keeping the same identity.
+  agent.followup(createUserMessage({content:[{type:'text',text:'two'}],source:{kind:'user'}}));
+  await agent.whenIdle();
+  assert.deepEqual(logs.filter(entry=>entry.kind==='create'||entry.kind==='resume').map(entry=>entry.kind),['create','resume']);
+  assert.equal((await bindings.read(id)).nativeRef.nativeSessionId,'native-fixed');
+  validateStoredEvents(agent.session.header,structuredClone(agent.session.snapshotEvents()));
+  // A turn in flight is never reclaimed, however long the session stays open.
+  agent.followup(createUserMessage({content:[{type:'text',text:'wait'}],source:{kind:'user'}}));
+  for(let i=0;i<100 && !runner.live.get(id)?.turnId;i++) await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok(runner.live.get(id)?.turnId,'the turn is in flight');
+  await new Promise(resolve=>setTimeout(resolve,400));
+  assert.equal(runner.live.has(id),true);
+  agent.cancel({kind:'user'});
+  await new Promise(resolve=>setTimeout(resolve,50));
+ } finally {await ctx.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('a Harness process stays open while its session is on screen or runs background tasks, and keeps its subagents once reclaimed', {timeout:15000}, async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-viewed-'));
+ const logs=[],native={turns:0,subagents:[{id:'s1',parentId:null,name:'explorer',task:'map',status:'completed',entries:[]}]};
+ const bindings=new Bindings(join(root,'bindings'));
+ const id=SessionId('viewed-session');
+ const ctx=new Context();
+ for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+ await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+ const adapter=fakeAdapter(logs,native);
+ // A 120ms idle window stands in for the 1 minute default.
+ const runner=new DshRunner(ctx,bindings,{codex:adapter},undefined,undefined,120);
+ ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+ try {
+  await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
+  await ctx.plugin(Loop,{agents:[]});
+  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  agent.followup(createUserMessage({content:[{type:'text',text:'one'}],source:{kind:'user'}}));
+  await agent.whenIdle();
+  // On screen: reported every 50ms for well past the idle window, the process stays open.
+  for(let i=0;i<12;i++){runner.viewed(id);await sleep(50);}
+  assert.equal(runner.live.has(id),true);
+  // Left the screen: closed once the idle window passes, keeping the subagent list it last had.
+  await sleep(400);
+  assert.equal(runner.live.has(id),false);
+  assert.deepEqual(runner.retainedSubagents.get(id),native.subagents);
+  // The next turn resumes it; a backgrounded task then holds it open with nobody watching.
+  agent.followup(createUserMessage({content:[{type:'text',text:'two'}],source:{kind:'user'}}));
+  await agent.whenIdle();
+  assert.equal(runner.retainedSubagents.has(id),false);
+  native.background=true;
+  await sleep(600);
+  assert.equal(runner.live.has(id),true);
+  // Once the task ends the idle window starts over instead of closing at once.
+  native.background=false;
+  await sleep(60);
+  assert.equal(runner.live.has(id),true);
+  await sleep(500);
+  assert.equal(runner.live.has(id),false);
+  assert.deepEqual(logs.filter(entry=>entry.kind==='create'||entry.kind==='resume').map(entry=>entry.kind),['create','resume']);
+ } finally {await ctx.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true});}
 });

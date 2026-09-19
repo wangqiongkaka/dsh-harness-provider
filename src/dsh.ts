@@ -124,6 +124,8 @@ export class HarnessService extends TypertRemoteService {
   private readonly pluginCatalogs = new Map<string, { until: number; plugins: Promise<HarnessPlugin[]> }>();
   // ponytail: per-source quota cache; account probes are rate-limited upstream and identical across sessions.
   private readonly quotas = new Map<string, { until: number; work: Promise<Quota> }>();
+  // External Harness account quota, one per harness: probing spawns a throwaway CLI process, so it goes stale-while-revalidate.
+  private readonly harnessQuotas = new Map<Binding['harness'], HarnessQuotaCache>();
   // One user-authorized discussion per source turn; retries share the same work instead of spawning more sessions.
   private readonly discussions = new Map<string, { requestId: string; content: ContentBlock[]; inputHash?: string; work?: Promise<DiscussionResult> }>();
   private readonly worktrees: string;
@@ -158,6 +160,7 @@ export class HarnessService extends TypertRemoteService {
         this.discussions.delete(session.id);
         void this.notifyDelegation(session.id).catch(() => {});
         void this.offerWorktreeMerge(session.id).catch(() => {});
+        void this.refreshHarnessQuota(session.id).catch(() => {});
       }
     });
     ctx.on('agent/created', async ({ agent }) => { void agent.whenIdle().then(() => this.notifyDelegation(agent.id)).catch(() => {}); });
@@ -932,8 +935,19 @@ export class HarnessService extends TypertRemoteService {
   async subagents(raw: unknown): Promise<HarnessSubagent[]> {
     const { sessionId } = address.parse(raw);
     await this.agent(sessionId);
-    if (await this.bindings.read(sessionId)) return this.runner.live.get(sessionId)?.session.subagents?.() ?? [];
+    if (await this.bindings.read(sessionId)) {
+      const live = this.runner.live.get(sessionId);
+      return (live ? live.session.subagents?.() : this.runner.retainedSubagents.get(sessionId)) ?? [];
+    }
     return this.nativeSubagents(sessionId);
+  }
+
+  /** A client shows this session; its Harness process is not reclaimed while it stays on screen. */
+  async viewing(raw: unknown): Promise<null> {
+    const { sessionId } = address.parse(raw);
+    await this.agent(sessionId);
+    this.runner.viewed(sessionId);
+    return null;
   }
 
   /** DSH's own subagents: the durable descendant tree, each child's log observed read-only (its parent owns the child Agent). */
@@ -958,13 +972,28 @@ export class HarnessService extends TypertRemoteService {
     const agent = await this.agent(sessionId);
     const binding = await this.bindings.read(sessionId);
     if (binding) {
-      const adapter = this.adapters[binding.harness];
-      if (!adapter.inspectAccount) return null;
-      return this.cachedQuota(binding.harness, async () => accountQuota(await adapter.inspectAccount!(), binding.harness));
+      // An external Harness probe spawns a throwaway CLI process, so reads answer the cached snapshot and only a
+      // missing or reset snapshot, or a finished turn (in the background), starts a probe.
+      return this.harnessQuota(binding.harness)?.read() ?? null;
     }
     const route = await this.nativeRoute(agent);
     if (!route) return null;
     return this.cachedQuota(`native\0${route.source}\0${route.baseURL}`, () => fetchNativeQuota(route));
+  }
+
+  /** A finished turn is the moment an external Harness's account usage actually changed; refresh its cached quota. */
+  private async refreshHarnessQuota(sessionId: string): Promise<void> {
+    const harness = (await this.bindings.read(sessionId))?.harness;
+    if (harness) this.harnessQuota(harness)?.invalidate();
+  }
+
+  /** The shared quota cache of one external Harness; undefined when its adapter cannot inspect the account. */
+  private harnessQuota(harness: Binding['harness']): HarnessQuotaCache | undefined {
+    const adapter = this.adapters[harness];
+    if (!adapter.inspectAccount) return undefined;
+    let cache = this.harnessQuotas.get(harness);
+    if (!cache) this.harnessQuotas.set(harness, cache = new HarnessQuotaCache(() => adapter.inspectAccount!().then(snapshot => accountQuota(snapshot, harness))));
+    return cache;
   }
 
   private cachedQuota(key: string, probe: () => Promise<Quota>): Promise<Quota> {
@@ -1119,4 +1148,41 @@ export function accountQuota(snapshot: HarnessAccountSnapshot | null, source: st
     windows.push({ id: `product:${product.product}`, label: product.product, usedPercent: product.usagePercent, resetsAt: product.resetsAt ?? null });
   }
   return { kind: 'windows', source, plan: snapshot.plan ?? null, windows };
+}
+
+/** When a cached quota stops describing the account: the earliest window reset; balances and unknowns never expire. */
+const quotaExpiry = (quota: Quota) => Math.min(Infinity,
+  ...(quota?.kind === 'windows' ? quota.windows.map(window => window.resetsAt ? Date.parse(window.resetsAt) : NaN).filter(at => !Number.isNaN(at)) : []));
+
+/**
+ * Account quota of an external Harness. Every probe spawns a throwaway CLI process (codex app-server or a Claude SDK
+ * query), so a probe runs only when a read finds no value (the first one of a run) or a window has reset since, and
+ * after each finished turn in the background — when usage actually changed. Switching sessions and the client's
+ * polling interval otherwise only read the cache. A failed probe is remembered as "no data" until the next turn.
+ */
+export class HarnessQuotaCache {
+  #entry?: { value: Quota; expiresAt: number };
+  #refreshing?: Promise<Quota>;
+  constructor(private readonly probe: () => Promise<Quota>, private readonly now: () => number = () => Date.now()) {}
+
+  /** The cached quota; with none, or once a window reset, waits for one probe that concurrent reads share. */
+  read(): Promise<Quota> {
+    const entry = this.#entry;
+    if (entry && this.now() < entry.expiresAt) return Promise.resolve(entry.value);
+    return this.#refreshing ?? this.#refresh();
+  }
+
+  /** A finished turn changed the account; re-probe in the background while reads keep answering the old value. */
+  invalidate(): void {
+    if (!this.#refreshing) void this.#refresh();
+  }
+
+  #refresh(): Promise<Quota> {
+    const refreshing = this.probe().then(value => { this.#entry = { value, expiresAt: quotaExpiry(value) }; }, () => {
+      // Keep a still-valid value; otherwise record "no data" so failures do not re-probe on every read.
+      const entry = this.#entry;
+      if (!entry || this.now() >= entry.expiresAt) this.#entry = { value: null, expiresAt: Infinity };
+    }).then(() => this.#entry!.value).finally(() => { if (this.#refreshing === refreshing) this.#refreshing = undefined; });
+    return this.#refreshing = refreshing;
+  }
 }

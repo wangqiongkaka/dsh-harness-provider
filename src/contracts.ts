@@ -193,6 +193,8 @@ export interface HarnessSession {
   readSnapshot?(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>>;
   /** Subagents the Harness ran in this session (live and replayed), oldest first, with what each one said and did. */
   subagents?(): HarnessSubagent[];
+  /** Whether work the agent backgrounded (a shell) still runs after its turn; closing the process would kill it. */
+  hasBackgroundTasks?(): boolean;
   execute(command: TurnStartCommand): Promise<HarnessResult<TurnStartAccepted>>;
   execute(command: TurnCancelCommand): Promise<HarnessResult<TurnCancelAccepted>>;
   execute(command: InteractionRespondCommand): Promise<HarnessResult<InteractionRespondAccepted>>;

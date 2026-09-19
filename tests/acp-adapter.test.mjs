@@ -149,6 +149,16 @@ const app = agent({ name: 'peer' })
       await update({ sessionUpdate: 'subagent_state_update', subagentSessionId: 'child-1', state: 'completed' });
       await reply('child-permission:' + (answer.outcome.optionId ?? answer.outcome.outcome)); return end();
     }
+    if (text === 'background') {
+      // An AIR async task: a backgrounded shell that keeps running after the turn ends.
+      await update({ sessionUpdate: 'async_task_spawned', asyncTaskId: 'task-1', name: 'npm run dev', taskType: 'shell', canStop: true });
+      await update({ sessionUpdate: 'async_task_progress', asyncTaskId: 'task-1', outputFilePath: '/tmp/out' });
+      await reply('started'); return end();
+    }
+    if (text === 'background-done') {
+      await update({ sessionUpdate: 'async_task_state_update', asyncTaskId: 'task-1', state: 'completed' });
+      await reply('done'); return end();
+    }
     if (text === 'fail') {
       await update({ sessionUpdate: 'session_info_update', _meta: { codex: { error: { message: 'Reconnecting... 1/5', willRetry: true } } } });
       return { stopReason: 'end_turn', _meta: { jetbrains: { air: { version: 1, sessionFailure: { id: 'x', revision: 1, category: 'limit', severity: 'error', title: 'Usage limit reached', actions: [] } } } } };
@@ -397,7 +407,7 @@ test('Harness subagents leave the main transcript for the sidebar: Claude Code t
     ref = session.initialState.nativeRef;
     const initialize = (await f.notes()).find(note => note.initialize).initialize;
     assert.equal(initialize._meta['subagent-transcript'], true);
-    assert.deepEqual(initialize._meta.jetbrains.air.capabilities, ['sessionFailure', 'recommendedValue']);
+    assert.deepEqual(initialize._meta.jetbrains.air.capabilities, ['sessionFailure', 'recommendedValue', 'asyncTasks']);
     const output = session.outputs[Symbol.asyncIterator]();
     value(await session.execute({ type: 'turn.start', turnId: 'host-sub', input: [{ type: 'text', text: 'claude-subagent' }] }));
     const completed = events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item);
@@ -417,7 +427,7 @@ test('Harness subagents leave the main transcript for the sidebar: Claude Code t
   adapter = new AcpAdapter({ profile: { ...g.profile, nativeSubagents: true }, environment: {} });
   try {
     const session = value(await adapter.open({ kind: 'create', cwd: g.root }));
-    assert.deepEqual((await g.notes()).find(note => note.initialize).initialize._meta.jetbrains.air.capabilities, ['sessionFailure', 'recommendedValue', 'nativeSubagentSessions']);
+    assert.deepEqual((await g.notes()).find(note => note.initialize).initialize._meta.jetbrains.air.capabilities, ['sessionFailure', 'recommendedValue', 'asyncTasks', 'nativeSubagentSessions']);
     const output = session.outputs[Symbol.asyncIterator]();
     value(await session.execute({ type: 'turn.start', turnId: 'host-codex-sub', input: [{ type: 'text', text: 'codex-subagent' }] }));
     const pending = await interaction(output);
@@ -619,4 +629,22 @@ for await (const line of createInterface({ input: process.stdin })) {
       { name: 'sentry', displayName: 'sentry', description: null, mention: '[@sentry](plugin://sentry@openai-curated)' },
     ]);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('background tasks the agent announces keep the session busy until they end, and stay out of the transcript', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  const adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    assert.equal(session.hasBackgroundTasks(), false);
+    value(await session.execute({ type: 'turn.start', turnId: 'host-bg', input: [{ type: 'text', text: 'background' }] }));
+    const seen = await until(output, 'turn.completed');
+    assert.deepEqual(events(seen, 'item.completed').map(event => [event.snapshot.item.type, event.snapshot.item.text]), [['agentMessage', 'started']]);
+    assert.equal(session.hasBackgroundTasks(), true);
+    value(await session.execute({ type: 'turn.start', turnId: 'host-bg-done', input: [{ type: 'text', text: 'background-done' }] }));
+    await until(output, 'turn.completed');
+    assert.equal(session.hasBackgroundTasks(), false);
+    await session.close();
+  } finally { await adapter.close(); await f.close(); }
 });

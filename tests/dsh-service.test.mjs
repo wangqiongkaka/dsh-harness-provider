@@ -105,12 +105,19 @@ test('thinking selection validates against the catalog, persists, and quota read
   await h.quota({sessionId:'bound'});
   assert.equal(accounts,1);
   assert.equal(await h.usage({sessionId:'bound'}),null);
-  // The subagents tab reads the live native session only; without one it is empty.
+  // The subagents tab reads the live native session; without one, the list kept when its idle process was reclaimed.
   assert.deepEqual(await h.subagents({sessionId:'bound'}),[]);
   const harnessSubagent={id:'a',parentId:null,name:'explorer',task:null,status:'running',entries:[{kind:'message',text:'hi'}]};
   h.runner.live.set('bound',{session:{subagents:()=>[harnessSubagent]}});
   assert.deepEqual(await h.subagents({sessionId:'bound'}),[harnessSubagent]);
   h.runner.live.delete('bound');
+  const kept={...harnessSubagent,status:'completed'};
+  h.runner.retainedSubagents.set('bound',[kept]);
+  assert.deepEqual(await h.subagents({sessionId:'bound'}),[kept]);
+  // A client reporting the session on screen reaches the runner.
+  const viewed=[];h.runner.viewed=id=>viewed.push(id);
+  assert.equal(await h.viewing({sessionId:'bound'}),null);
+  assert.deepEqual(viewed,['bound']);
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });
 
@@ -135,5 +142,55 @@ test('catalog probes are shared while running and a failed probe is not repeated
   assert.ok(lists.every(list=>list.error==='Codex is not installed'));
   assert.equal((await h.models({sessionId:'bound'})).error,'Codex is not installed');
   assert.equal(inspections,1);
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});
+
+test('a finished turn re-probes the harness account in the background while quota reads answer the old value first',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-quota-swr-'));
+ const ctx=new Context();
+ const agent={id:'bound',status:'idle',inbox:{nextTurn:[],nextStep:[]},session:{header:{cwd:root},snapshotEvents:()=>[],requestHeader:()=>undefined}};
+ class NativeCommands extends Service {
+  constructor(ctx){super(ctx,'sessionController');}
+  async resolveAgent(id){return {agent:{bound:agent}[id]};}
+  async prompt(){return {accepted:true};} async fork(){return {};} async selectModel(){return {};} updateQueue(){return {};}
+ }
+ let accounts=0,percent=40;
+ const adapter={
+  async inspect(){return {status:'ready',capabilities:{},catalog:{
+   models:[{ref:{id:'m1'},label:'One',supportedThinkingOptionIds:['low']}],
+   thinkingOptions:[{id:'low',label:'Low'}],defaultModel:{id:'m1'},defaultThinkingOptionId:'low',configOptions:[],
+   permissionModes:{modes:[{id:'default',label:'Default'}],defaultModeId:'default'}}};},
+  async inspectAccount(){accounts++;return {plan:'pro',credits:{usedPercent:percent,periodType:'five_hour'}};},
+  async close(){},
+ };
+ try{
+  await ctx.plugin(Typert);await ctx.plugin(NativeCommands);
+  ctx.provide('agents',{get:()=>agent});ctx.provide('sessions',{});ctx.provide('userQuestions',{});
+  ctx.provide('sessionProjections',{stateOf:(session,key)=>key==='permissions'?{sandbox:'danger-full-access'}:undefined});
+  ctx.provide('attachments',{});ctx.provide('fileUploads',{});
+  ctx.provide('subagents',{listDescendants:async()=>[]});ctx.provide('sessionQuery',{observeSession:async()=>({events:[],[Symbol.dispose](){}})});
+  await ctx.plugin({inject,apply(scope){new HarnessService(scope,root,{codex:adapter,'claude-code':adapter});}});
+  const h=ctx.harness;
+  await h.select({sessionId:'bound',harness:'codex'});
+  // A turn ending before any quota read (a delegated session nobody opened) still probes; reads then hit the cache.
+  ctx.emit('session/event',{id:'bound'},{type:'turn/end',data:{reason:{kind:'completed'}}});
+  await new Promise(resolve=>setTimeout(resolve,25));
+  assert.equal(accounts,1);
+  assert.equal((await h.quota({sessionId:'bound'})).windows[0].usedPercent,40);
+  await h.quota({sessionId:'bound'});
+  assert.equal(accounts,1);
+  // A finished turn refreshes in the background on its own: no read is needed to start the probe.
+  percent=55;
+  ctx.emit('session/event',{id:'bound'},{type:'turn/end',data:{reason:{kind:'completed'}}});
+  await new Promise(resolve=>setTimeout(resolve,25));
+  assert.equal(accounts,2);
+  assert.equal((await h.quota({sessionId:'bound'})).windows[0].usedPercent,55);
+  await h.quota({sessionId:'bound'});
+  assert.equal(accounts,2);
+  // A DSH-native turn never touches the harness cache.
+  await h.select({sessionId:'bound',harness:'dsh'});
+  ctx.emit('session/event',{id:'bound'},{type:'turn/end',data:{reason:{kind:'completed'}}});
+  await new Promise(resolve=>setTimeout(resolve,25));
+  assert.equal(accounts,2);
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });

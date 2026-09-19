@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parseZaiQuota, parseDeepSeekBalance, fetchNativeQuota, nativeQuotaRoute } from '../dist/native-quota.js';
 import { codexAccountSnapshot as accountSnapshot } from '../dist/acp-profiles.js';
-import { accountQuota } from '../dist/dsh.js';
+import { accountQuota, HarnessQuotaCache } from '../dist/dsh.js';
 
 test('智谱 Coding Plan limits[] 映射为 5 小时与周窗口，忽略 MCP TIME_LIMIT', () => {
  const quota = parseZaiQuota({ success: true, data: { limits: [
@@ -91,4 +91,74 @@ test('Codex 限速快照与账户快照展开为额度窗口', () => {
   ['five_hour', 'five_hour', 62, '2026-09-15T06:30:00.000Z'], ['product:7-day window', '7-day window', 31, null], ['product:Opus · 7-day', 'Opus · 7-day', 54, '2026-09-21T00:00:00.000Z'],
  ]);
  assert.equal(accountQuota(null, 'codex'), null);
+});
+
+test('外部 Harness 额度缓存：只在无缓存、窗口已重置或回合结束时探测', async () => {
+ let clock = Date.parse('2026-09-19T00:00:00.000Z'), probes = 0, settle;
+ const probe = () => { probes++; return new Promise(resolve => { settle = resolve; }); };
+ const cache = new HarnessQuotaCache(probe, () => clock);
+ const windows = (usedPercent, resetsAt) => ({ kind: 'windows', source: 'codex', plan: null, windows: [
+  { id: 'five_hour', label: 'five_hour', usedPercent, resetsAt }, { id: 'seven_day', label: 'seven_day', usedPercent: 10, resetsAt: '2026-09-25T00:00:00.000Z' }] });
+ const drain = () => new Promise(resolve => setImmediate(() => setImmediate(resolve)));
+ // 首次没有缓存：并发读取共用一次探测并等待结果。
+ const first = cache.read(), again = cache.read();
+ settle(windows(40, '2026-09-19T05:00:00.000Z'));
+ assert.equal((await first).windows[0].usedPercent, 40);
+ assert.equal((await again).windows[0].usedPercent, 40);
+ assert.equal(probes, 1);
+ // 窗口重置前，无论闲置多久（切换会话、轮询）都只读缓存。
+ clock = Date.parse('2026-09-19T04:59:59.999Z');
+ assert.equal((await cache.read()).windows[0].usedPercent, 40);
+ assert.equal(probes, 1);
+ // 回合结束后台探测；完成前读取拿旧值。
+ cache.invalidate();
+ assert.equal(probes, 2);
+ assert.equal((await cache.read()).windows[0].usedPercent, 40);
+ settle(windows(90, '2026-09-19T05:00:00.000Z'));
+ await drain();
+ assert.equal((await cache.read()).windows[0].usedPercent, 90);
+ // 过了最早的重置时间：读取探测一次并等待新值，之后不再重复探测。
+ clock = Date.parse('2026-09-19T05:00:00.000Z');
+ const reset = cache.read();
+ assert.equal(probes, 3);
+ settle(windows(0, '2026-09-19T10:00:00.000Z'));
+ assert.equal((await reset).windows[0].usedPercent, 0);
+ clock = Date.parse('2026-09-19T09:00:00.000Z');
+ assert.equal((await cache.read()).windows[0].usedPercent, 0);
+ assert.equal(probes, 3);
+});
+
+test('外部 Harness 额度缓存：从未读取过也在回合结束时探测，之后读取直接命中', async () => {
+ let probes = 0;
+ const cache = new HarnessQuotaCache(() => { probes++; return Promise.resolve({ kind: 'balance', source: 'codex', currency: 'CNY', total: '7', granted: '0', toppedUp: '7' }); }, () => 0);
+ cache.invalidate();
+ assert.equal(probes, 1);
+ assert.equal((await cache.read()).total, '7');
+ assert.equal(probes, 1);
+});
+
+test('外部 Harness 额度缓存：探测失败记为无数据直到下一回合，未过期旧值保留', async () => {
+ let clock = 0, probes = 0, settle, failing = true;
+ const probe = () => { probes++; return failing ? Promise.reject(new Error('offline')) : new Promise(resolve => { settle = resolve; }); };
+ const cache = new HarnessQuotaCache(probe, () => clock);
+ const wallet = total => ({ kind: 'balance', source: 'codex', currency: 'CNY', total, granted: '0', toppedUp: total });
+ const drain = () => new Promise(resolve => setImmediate(() => setImmediate(resolve)));
+ // 首次失败：返回 null，之后的读取不再探测。
+ assert.equal(await cache.read(), null);
+ clock = 60 * 60_000;
+ assert.equal(await cache.read(), null);
+ assert.equal(probes, 1);
+ // 下一回合结束才重试。
+ failing = false;
+ cache.invalidate();
+ assert.equal(probes, 2);
+ settle(wallet('5'));
+ await drain();
+ assert.equal((await cache.read()).total, '5');
+ // 后台探测失败：保留仍有效的旧值，也不会每次读取都重试。
+ failing = true;
+ cache.invalidate();
+ await drain();
+ assert.equal((await cache.read()).total, '5');
+ assert.equal(probes, 3);
 });

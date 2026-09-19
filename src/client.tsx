@@ -38,6 +38,7 @@ type Api = {
   usage(request: {sessionId: string}): Promise<RemoteResult<Usage>>;
   harnesses(request: {sessionIds: string[]}): Promise<RemoteResult<Record<string, {harness: State['harness']; delegated: boolean}>>>;
   quota(request: {sessionId: string}): Promise<RemoteResult<Quota>>;
+  viewing(request: {sessionId: string}): Promise<RemoteResult<null>>;
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
   plugins(request: {sessionId: string}): Promise<RemoteResult<Plugin[]>>;
   edit(request: {sessionId: string; seq: number; text: string; requestId: string}): Promise<RemoteResult<State>>;
@@ -57,7 +58,8 @@ const zh = {
   'mode.agent-full-access': '完全权限', 'mode.agent': '自动审批', 'mode.read-only': '逐项审批',
   contextAria: '上下文', contextUsed: '上下文已用', contextWindow: '模型窗口', sessionTotal: '本会话累计',
   quotaAria: '额度', quotaUsed: '已用', quotaLeft: '剩余', quotaReset: '{time} 重置', balance: '余额', balanceTotal: '账户余额',
-  balanceTopped: '充值余额', balanceGranted: '赠送余额', quotaSource: '额度由 {source} 提供 · 每 60 秒同步',
+  balanceTopped: '充值余额', balanceGranted: '赠送余额', quotaSource: '额度由 {source} 提供 · {sync}',
+  'sync.poll': '每 60 秒同步', 'sync.turn': '对话一轮后同步',
   'window.five_hour': '5 小时', 'window.seven_day': '本周', 'window.weekly': '本周', 'window.monthly': '本月', 'window.unknown': '额度',
   'window.5-hour window': '5 小时', 'window.7-day window': '本周', 'window.Opus · 7-day': 'Opus 本周', 'window.Sonnet · 7-day': 'Sonnet 本周',
   'window.OAuth apps · 7-day': 'OAuth 应用本周',
@@ -85,7 +87,8 @@ const en: Record<keyof typeof zh,string> = {
   'mode.agent-full-access':'Full access', 'mode.agent':'Approve for me', 'mode.read-only':'Ask for approval',
   contextAria:'Context', contextUsed:'Context used', contextWindow:'Model window', sessionTotal:'Session total',
   quotaAria:'Quota', quotaUsed:'Used', quotaLeft:'Left', quotaReset:'Resets {time}', balance:'Balance', balanceTotal:'Account balance',
-  balanceTopped:'Topped up', balanceGranted:'Granted', quotaSource:'Quota from {source} · refreshed every 60s',
+  balanceTopped:'Topped up', balanceGranted:'Granted', quotaSource:'Quota from {source} · {sync}',
+  'sync.poll':'refreshed every 60s', 'sync.turn':'refreshed after each turn',
   'window.five_hour':'5-hour', 'window.seven_day':'Weekly', 'window.weekly':'Weekly', 'window.monthly':'Monthly', 'window.unknown':'Quota',
   'window.5-hour window':'5-hour', 'window.7-day window':'Weekly', 'window.Opus · 7-day':'Opus weekly', 'window.Sonnet · 7-day':'Sonnet weekly',
   'window.OAuth apps · 7-day':'OAuth apps weekly',
@@ -126,6 +129,8 @@ interface Injected {
   selectConfig(id: string, configId: string, value: string | boolean): Promise<State>;
   usage(id: string): Promise<Usage>;
   quota(id: string): Promise<Quota>;
+  /** Reports the session on screen, so the host keeps its Harness process open. */
+  viewing(id: string): Promise<null>;
   /**
    * The model route this session will use next, as the host's own directory sees it, so account quota can follow a
    * provider switch immediately. Null when the host exposes no directory (an older build), which falls back to the
@@ -226,6 +231,21 @@ function usePolled<V>(load: () => Promise<V>, everyMs: number, deps: unknown[]):
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
   return state;
+}
+
+/**
+ * Reports an external Harness session as on screen while the page is visible, so the host keeps its process open; a
+ * hidden or closed page just stops reporting and the host reclaims the process after its idle window.
+ */
+function useViewing(viewing: Injected['viewing'], sessionId: string, external: boolean): void {
+  useEffect(() => {
+    if (!external) return;
+    const tick = () => { if (document.visibilityState === 'visible') void viewing(sessionId).catch(() => {}); };
+    tick();
+    const timer = setInterval(tick, 15_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', tick); };
+  }, [viewing, sessionId, external]);
 }
 
 /**
@@ -355,7 +375,9 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
     </button>
     {open && <div className="hp-panel hp-panel-left" role="dialog" aria-label={t('quotaAria')}>
       {panel}
-      <div className="hp-foot">{t('quotaSource', { source: quota.kind === 'windows' && quota.plan ? `${quota.source} · ${quota.plan}` : quota.source })}</div>
+      {/* External Harness quota is served stale-while-revalidate (a probe spawns a CLI process): it follows turns, not the poll. */}
+      <div className="hp-foot">{t('quotaSource', { source: quota.kind === 'windows' && quota.plan ? `${quota.source} · ${quota.plan}` : quota.source,
+        sync: quota.source === 'codex' || quota.source === 'claude-code' ? t('sync.turn') : t('sync.poll') })}</div>
     </div>}
   </div>;
 }
@@ -457,7 +479,7 @@ export function SecretPanel({ sessionId, read, answer }: { sessionId: string; re
 
 // ---- left slot: Harness chip + quota chip ----
 const names: Record<State['harness'], string> = { dsh: '', codex: 'Codex', 'claude-code': 'Claude Code' };
-export function HarnessSelect({ sessionId, useSessions, read, select, quota, modelProvider, changed, secretStatus, answerSecret, recover, t }: LeftProps) {
+export function HarnessSelect({ sessionId, useSessions, read, select, quota, viewing, modelProvider, changed, secretStatus, answerSecret, recover, t }: LeftProps) {
   const [state,setState] = useState<State>();
   const [error,setError] = useState<string>();
   const [busy,setBusy] = useState(false);
@@ -478,6 +500,7 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, mod
   // dependencies: a switch re-reads at once, while the interval still covers a window moving on its own.
   const provider = useModelProvider(modelProvider, sessionId);
   const quotaView = usePolled(() => quota(sessionId), 60_000, [sessionId, state?.harness, summary?.running, provider]);
+  useViewing(viewing, sessionId, state !== undefined && state.harness !== 'dsh');
   async function choose(next: State['harness']) {
     const version = generation.current; setBusy(true); setError(undefined); setOpen(false);
     try {
@@ -998,6 +1021,7 @@ export async function apply(ctx: Context): Promise<void> {
       selectConfig:(id,configId,value_)=>value(scope.remote.harness.selectConfig({sessionId:id,configId,value:value_})),
       usage:id=>value(scope.remote.harness.usage({sessionId:id})),
       quota:id=>value(scope.remote.harness.quota({sessionId:id})),
+      viewing:id=>value(scope.remote.harness.viewing({sessionId:id})),
       modelProvider,
       changed:(id,harness)=>{known.set(id,harness);harnesses.set(id,Promise.resolve(harness));syncModel();schedule();for (const listener of listeners) listener();},
       subscribe:listener=>{listeners.add(listener);return ()=>{listeners.delete(listener);};},

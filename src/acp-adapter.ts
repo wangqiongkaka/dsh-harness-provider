@@ -63,12 +63,15 @@ const clientCapabilities = (profile: AcpProfile): acp.ClientCapabilities => ({
   session: { compaction: {}, configOptions: { boolean: {} } }, elicitation: { form: {}, url: {} }, plan: {},
   // `subagent-transcript`: Claude Code forwards a tagged subagent's text and reasoning too, not only its tool calls.
   _meta: { steering: { supported: true }, 'subagent-transcript': true,
-    jetbrains: { air: { version: 1, capabilities: ['sessionFailure', 'recommendedValue', ...(profile.nativeSubagents ? ['nativeSubagentSessions'] : [])] } } },
+    // `asyncTasks`: both agents then announce backgrounded shells, which outlive the turn and die with the process.
+    jetbrains: { air: { version: 1, capabilities: ['sessionFailure', 'recommendedValue', 'asyncTasks', ...(profile.nativeSubagents ? ['nativeSubagentSessions'] : [])] } } },
 });
-/** Subagent lifecycle updates the ACP SDK's schema does not know yet; they are renamed on the wire so its validation lets them through. */
-const SUBAGENT_LIFECYCLE = new Set(['subagent_spawned', 'subagent_state_update']);
+/** Subagent and background-task updates the ACP SDK's schema does not know yet; they are renamed on the wire so its validation lets them through. */
+const SUBAGENT_LIFECYCLE = new Set(['subagent_spawned', 'subagent_state_update', 'async_task_spawned', 'async_task_progress', 'async_task_state_update']);
 const SUBAGENT_UPDATE = '_dsh/subagent_update';
 type SubagentLifecycle = { sessionUpdate: 'subagent_spawned'; subagentSessionId: string; name?: unknown; task?: unknown } | { sessionUpdate: 'subagent_state_update'; subagentSessionId: string; state: unknown };
+/** AIR async task lifecycle (claude-agent-acp dist/async-tasks.js, codex-acp CodexBackgroundTerminalTasks); only liveness is kept. */
+type AsyncTaskUpdate = { sessionUpdate: 'async_task_spawned' | 'async_task_progress'; asyncTaskId: string } | { sessionUpdate: 'async_task_state_update'; asyncTaskId: string; state: unknown };
 const REQUEST_TIMEOUT_MS = 60_000;
 const CLOSE_TIMEOUT_MS = 5_000;
 const TITLE_TIMEOUT_MS = 30_000;
@@ -505,6 +508,8 @@ class AcpSession implements HarnessSession {
   readonly outputs = this.#channel.outputs;
   readonly #transcript = new Transcript();
   readonly #subagents = new Subagents();
+  /** Background tasks (backgrounded shells) still running; they keep going after the turn ends. */
+  readonly #backgroundTasks = new Set<string>();
   readonly #process: AcpProcess;
   readonly #sessionId: string;
   readonly #cwd: string;
@@ -573,7 +578,7 @@ class AcpSession implements HarnessSession {
       const skills = (await waitFor(() => commands, 3_000)) ?? [];
       session = new AcpSession(options, process_, sessionId, opened, catalogs, skillsOf(profile, skills));
       session.#rawCommands = skills;
-      for (const { sessionId: owner, update } of replay) if (!session.#routeSubagent(owner, update)) session.#transcript.replay(update);
+      for (const { sessionId: owner, update } of replay) if (!session.#trackTask(update) && !session.#routeSubagent(owner, update)) session.#transcript.replay(update);
       await session.#applyHints(input);
       return session;
     } catch (cause) { await process_.close(); throw cause; }
@@ -598,6 +603,7 @@ class AcpSession implements HarnessSession {
 
   async listSkills(): Promise<HarnessSkill[]> { return this.#commands; }
   subagents(): HarnessSubagent[] { return this.#subagents.list(); }
+  hasBackgroundTasks(): boolean { return this.#backgroundTasks.size > 0; }
 
   async readSnapshot(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>> {
     if (this.#fault) return { ok: false, error: this.#fault };
@@ -769,7 +775,16 @@ class AcpSession implements HarnessSession {
   // ── session/update ────────────────────────────────────────────────────────────────────────────────────────────────
 
   #notify(notification: acp.SessionNotification): void {
-    if (!this.#routeSubagent(notification.sessionId, notification.update)) this.#update(notification.update);
+    if (!this.#trackTask(notification.update) && !this.#routeSubagent(notification.sessionId, notification.update)) this.#update(notification.update);
+  }
+  /** Takes background-task lifecycle updates (from any session of the tree); they only decide whether the process may be closed. */
+  #trackTask(update: acp.SessionUpdate): boolean {
+    const task = update as unknown as AsyncTaskUpdate;
+    if (task.sessionUpdate === 'async_task_spawned') this.#backgroundTasks.add(task.asyncTaskId);
+    else if (task.sessionUpdate === 'async_task_state_update') {
+      if (task.state === 'running' || task.state === 'paused') this.#backgroundTasks.add(task.asyncTaskId); else this.#backgroundTasks.delete(task.asyncTaskId);
+    } else if (task.sessionUpdate !== 'async_task_progress') return false;
+    return true;
   }
   /** The main session or one of its Codex subagent sessions; their approvals and questions reach the user alike. */
   #owns(sessionId: string): boolean { return sessionId === this.#sessionId || this.#subagents.has(sessionId); }
