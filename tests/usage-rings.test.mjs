@@ -56,7 +56,7 @@ test('delegation mode rings only its own composer card in orange', async () => {
  const browser=await chromium.launch({headless:true});
  try {
   const page=await browser.newPage();
-  const seat=(dock,id)=>`<div data-composer-seat><div>${dock}</div><div><div data-composer-card id="${id}"></div></div></div>`;
+  const seat=(dock,id)=>`<div data-composer-seat><div>${dock}</div><div><div data-composer-card id="${id}"><div contenteditable><p><span style="color: var(--dsw-alias-state-warn-label);">/delegate </span><span>实现登录</span></p></div></div></div></div>`;
   await page.setContent(`<style>:root{--dsw-alias-state-warn-label:rgb(255, 128, 0)}${module.exports.styles}</style>`
    +seat('<div class="hp-delegate" data-hp-mode="delegate"><strong>委派模式</strong></div>','delegating')
    +seat('<div class="hp-delegate"><strong>讨论</strong></div>','discussing')+seat('','plain'));
@@ -64,5 +64,10 @@ test('delegation mode rings only its own composer card in orange', async () => {
   assert.match(await shadow('delegating'),/rgb\(255, 128, 0\)/);
   assert.equal(await shadow('discussing'),'none');assert.equal(await shadow('plain'),'none');
   assert.equal(await page.locator('.hp-delegate[data-hp-mode=delegate]>strong').evaluate(node=>getComputedStyle(node).color),'rgb(255, 128, 0)');
+  // The /delegate token stays in the draft (and the submitted command) but is not shown in delegation mode.
+  const token=id=>page.locator(`#${id} p>span`).first().evaluate(node=>({width:node.getBoundingClientRect().width,color:getComputedStyle(node).color}));
+  assert.deepEqual(await token('delegating'),{width:0,color:'rgba(0, 0, 0, 0)'});
+  assert.equal(await page.locator('#delegating [contenteditable]').innerText(),'/delegate 实现登录');
+  assert.notEqual((await token('discussing')).width,0);assert.equal((await token('discussing')).color,'rgb(255, 128, 0)');
  } finally {await browser.close();}
 });

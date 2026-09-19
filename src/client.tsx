@@ -865,6 +865,9 @@ ${nativeContextColors}
 .hp-delegate[data-hp-mode=delegate]>strong{color:var(--dsw-alias-state-warn-label);white-space:nowrap}
 /* Delegation mode rings the composer card of the same seat in the orange of the /delegate token. */
 [data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]) [data-composer-card]{--dsw-elevation-stroke-color:var(--dsw-alias-state-warn-label);box-shadow:0 0 0 1.5px var(--dsw-alias-state-warn-label),var(--dsw-elevation-soft,0 0 #0000)}
+/* The dock names the mode, so the composer hides the /delegate token; the draft (and the submitted command) keeps it.
+   A zero-width box whose text overflows to the left keeps the caret, at the token's end, where the task starts. */
+[data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]) [data-composer-card] [contenteditable] p:first-child>span:first-child[style*="--dsw-alias-state-warn-label"]{display:inline-flex;width:0;justify-content:flex-end;white-space:pre;color:transparent!important;vertical-align:top}
 .hp-delegate-harness{display:flex;padding:2px;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover)}
 .hp-delegate-harness button{height:26px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer}
 .hp-delegate-harness button[aria-checked=true]{background:var(--dsw-specific-menu);color:var(--dsw-alias-label-primary)}
