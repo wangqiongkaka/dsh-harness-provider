@@ -178,27 +178,36 @@ test('the model seat follows the Harness of the main-view session and task modes
  assert.equal(seats.get('conversation.composer.dock'),0,'a DSH session keeps the host context meter');
 });
 
-test('sidebar marks turn gray when a session closes and colored again when it runs', async () => {
+test('sidebar marks active turns as breathing, completed sessions as static, and closed sessions as gray', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}},row={dataset:{},'__reactFiber$x':{memoizedProps:{node:{id:'s'}}}},styles=[];
- let refresh,running=true;
+ let refresh,processRunning=true;
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,
   document:{createElement:()=>({remove(){}}),head:{append(style){styles.push(style.textContent);}},body:{},querySelectorAll:()=>[row]},
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:fn=>{queueMicrotask(fn);return 1;},cancelAnimationFrame(){},
   setInterval:fn=>{refresh=fn;return 1;},clearInterval(){}});
- const snapshot={ids:['s'],byId:{s:{id:'s',retainedBy:{}}}};
- const remote={harness:{harnesses:async()=>({ok:true,value:{s:{harness:'codex',delegated:true,running}}})}};
+ const summary={id:'s',retainedBy:{},running:false};
+ const snapshot={ids:['s'],byId:{s:summary}};
+ const remote={harness:{harnesses:async()=>({ok:true,value:{s:{harness:'codex',delegated:true,running:processRunning}}})}};
  const slots={inject(){},register(){return ()=>{};}};
  await module.exports.apply({remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
   inject(keys,apply){if(keys.includes('sessions')&&!keys.includes('inputTriggers'))apply({sessions:{list:{getSnapshot:()=>snapshot,subscribe:()=>()=>{}}},slots,remote,on(){},effect(fn){fn();}});}});
  const settle=()=>new Promise(resolve=>setTimeout(resolve,10));
  await settle();
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
- assert.match(styles.join('\n'),/data-hp-harness="codex"[^}]+width:14px;height:14px;background:linear-gradient\(145deg,#b6a4ff 0%,#6078ff 48%,#3725ff 100%\)[^}]+mask:url/);
- running=false;refresh();await settle();
+ const css=styles.join('\n');
+ assert.match(css,/data-hp-harness="codex"[^}]+width:14px;height:14px;background:linear-gradient\(145deg,#b6a4ff 0%,#6078ff 48%,#3725ff 100%\)[^}]+mask:url/);
+ assert.match(css,/\[data-hp-running\]>span:first-child>\*\{display:none\}/,'the breathing Harness logo replaces native running dots');
+ assert.match(css,/\[data-hp-running\]>span:first-child::before\{animation:hp-logo-breathe 1\.4s ease-in-out infinite\}/);
+ assert.match(css,/@media \(prefers-reduced-motion:reduce\)\{\[data-hp-running\][^}]+animation:none/);
+ summary.running=true;refresh();await settle();
+ assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:'',hpRunning:''});
+ summary.running=false;refresh();await settle();
+ assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
+ processRunning=false;refresh();await settle();
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:'',hpClosed:''});
- running=true;refresh();await settle();
+ processRunning=true;refresh();await settle();
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
 });
 

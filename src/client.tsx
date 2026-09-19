@@ -947,7 +947,12 @@ const logos: Record<State['harness'], { mask: string; color: string }> = {
 };
 const delegatedMask = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><mask id="m"><circle cx="5" cy="5" r="5" fill="#fff"/><path d="M3 3l4 4M7 4v3H4" stroke="#000" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="5" cy="5" r="5" mask="url(#m)"/></svg>')}")`;
 const markStyles = Object.entries(logos).map(([harness, { mask, color }]) =>
-  `[data-hp-harness="${harness}"]>span:first-child:empty::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`).join('\n')
+  `[data-hp-harness="${harness}"]>span:first-child:empty::before,[data-hp-harness="${harness}"]:not([data-hp-closed])>span:first-child::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`).join('\n')
+  // A running turn replaces the host's status dots with its breathing brand mark; an idle live Harness stays static.
+  + `\n[data-hp-running]>span:first-child>*{display:none}`
+  + `\n[data-hp-running]>span:first-child::before{animation:hp-logo-breathe 1.4s ease-in-out infinite}`
+  + `\n@keyframes hp-logo-breathe{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.06)}}`
+  + `\n@media (prefers-reduced-motion:reduce){[data-hp-running]>span:first-child::before{animation:none}}`
   // Delegated sessions: a solid badge with a cut-out arrow on the logo's bottom-right corner, in the logo's state color.
   + `\n[data-hp-delegated]>span:first-child:empty{position:relative}[data-hp-delegated]>span:first-child:empty::after{content:"";position:absolute;right:-2px;bottom:0;width:9px;height:9px;background:#4D6BFE;-webkit-mask:${delegatedMask} center/contain no-repeat;mask:${delegatedMask} center/contain no-repeat}`
   // Closed sessions (no live Harness process, or an unloaded DSH agent) show the logo and badge in gray.
@@ -1000,10 +1005,13 @@ export async function apply(ctx: Context): Promise<void> {
       const missing: string[] = [];
       for (const row of document.querySelectorAll<HTMLElement>('[role="treeitem"]')) {
         const id=rowSessionId(row);
-        if (!id || !(id in byId)) continue;
+        if (!id) continue;
+        const summary=byId[id as keyof typeof byId];
+        if (!summary) continue;
         const harness=known.get(id);
         if (harness && row.dataset.hpHarness !== harness) row.dataset.hpHarness=harness;
         if (delegated.has(id) && row.dataset.hpDelegated === undefined) row.dataset.hpDelegated='';
+        if (summary.running === (row.dataset.hpRunning === undefined)) { if (summary.running) row.dataset.hpRunning=''; else delete row.dataset.hpRunning; }
         if (harness && running.has(id) === (row.dataset.hpClosed !== undefined)) { if (running.has(id)) delete row.dataset.hpClosed; else row.dataset.hpClosed=''; }
         if (!fetched.has(id)) missing.push(id);
       }
@@ -1101,7 +1109,7 @@ export async function apply(ctx: Context): Promise<void> {
       // Processes start with a turn and are reclaimed when idle, so every visible row is re-read periodically.
       // ponytail: polls all visible rows every 5s; push process start/exit events if the sidebar grows large.
       const refresh=setInterval(()=>{fetched.clear();schedule();},5_000);
-      return ()=>{observer.disconnect();clearInterval(refresh);cancelAnimationFrame(frame);frame=0;for (const row of document.querySelectorAll<HTMLElement>('[data-hp-harness],[data-hp-delegated],[data-hp-closed]')) { delete row.dataset.hpHarness; delete row.dataset.hpDelegated; delete row.dataset.hpClosed; }};
+      return ()=>{observer.disconnect();clearInterval(refresh);cancelAnimationFrame(frame);frame=0;for (const row of document.querySelectorAll<HTMLElement>('[data-hp-harness],[data-hp-delegated],[data-hp-running],[data-hp-closed]')) { delete row.dataset.hpHarness; delete row.dataset.hpDelegated; delete row.dataset.hpRunning; delete row.dataset.hpClosed; }};
     },'harness: sidebar marks');
     scope.slots.inject('conversation.input.left',()=>scope.slots.register({
       name:'conversation.input.left',id:'harness-selector',order:-100,locale:'harness',inject:()=>api,
