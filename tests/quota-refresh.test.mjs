@@ -16,7 +16,7 @@ async function clientBundle() {
  const source = await readFile('src/client.tsx', 'utf8');
  const bundle = await build({
   stdin: { contents: `${source}\nexport { createRoot } from 'react-dom/client';\nexport { createElement } from 'react';`, resolveDir: resolve('src'), loader: 'tsx' },
-  bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'HarnessProvider', jsx: 'automatic', loader: { '.png': 'dataurl' }, nodePaths, logLevel: 'warning',
+  bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'HarnessProvider', jsx: 'automatic', nodePaths, logLevel: 'warning',
  });
  return bundle.outputFiles[0].text;
 }

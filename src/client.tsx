@@ -15,7 +15,6 @@ import type {} from '@deepseek-ai/dsh-client-ui-commands/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client';
 import { contribution, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema } from './remote.js';
-import CODEX_ICON from './assets/codex-dark-color.png';
 import type { z } from 'zod';
 
 type State = z.infer<typeof stateSchema>;
@@ -917,14 +916,12 @@ const CLAUDE_PATH = 'm4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-
 const svg = (viewBox: string, path: string) => `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}"><path d="${path}"/></svg>`)}")`;
 const logos: Record<State['harness'], { mask: string; color: string }> = {
   dsh: { color: '#4D6BFE', mask: svg('0 0 23.16 17.04', FISH_LOGO_PATH) },
-  codex: { color: 'var(--dsw-alias-label-primary)', mask: svg('0 0 24 24', OPENAI_PATH) },
+  codex: { color: 'linear-gradient(145deg,#b6a4ff 0%,#6078ff 48%,#3725ff 100%)', mask: svg('0 0 24 24', OPENAI_PATH) },
   'claude-code': { color: '#D97757', mask: svg('0 0 24 24', CLAUDE_PATH) },
 };
 const delegatedMask = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><mask id="m"><circle cx="5" cy="5" r="5" fill="#fff"/><path d="M3 3l4 4M7 4v3H4" stroke="#000" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="5" cy="5" r="5" mask="url(#m)"/></svg>')}")`;
 const markStyles = Object.entries(logos).map(([harness, { mask, color }]) =>
   `[data-hp-harness="${harness}"]>span:first-child:empty::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`).join('\n')
-  // The running Codex mark uses the native app icon; a closed session falls back to the monochrome rule above.
-  + `\n[data-hp-harness="codex"]:not([data-hp-closed])>span:first-child:empty::before{width:18px;height:18px;background:url("${CODEX_ICON}") center/contain no-repeat;-webkit-mask:none;mask:none}`
   // Delegated sessions: a solid badge with a cut-out arrow on the logo's bottom-right corner, in the logo's state color.
   + `\n[data-hp-delegated]>span:first-child:empty{position:relative}[data-hp-delegated]>span:first-child:empty::after{content:"";position:absolute;right:-2px;bottom:0;width:9px;height:9px;background:#4D6BFE;-webkit-mask:${delegatedMask} center/contain no-repeat;mask:${delegatedMask} center/contain no-repeat}`
   // Closed sessions (no live Harness process, or an unloaded DSH agent) show the logo and badge in gray.

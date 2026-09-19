@@ -17,7 +17,7 @@ test('task mode dock follows the composer card width axis', async () => {
 // Runs the real client entry with only the `@` source's services present.
 test('the @ plugin source lists Harness plugins after files and inserts the native mention text', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const notion={name:'notion',displayName:'Notion',description:'Notion docs and workflows',mention:'[@notion](plugin://notion@openai-curated)'};
@@ -46,7 +46,7 @@ test('the @ plugin source lists Harness plugins after files and inserts the nati
 
 test('the DSH / command source keeps file, goal, plan and compact beside delegate and discuss in Harness sessions', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const rows=['file','model','goal','plan','compact','export'];
@@ -102,7 +102,7 @@ test('the DSH / command source keeps file, goal, plan and compact beside delegat
 
 test('the model seat follows the Harness of the main-view session and task modes render above the composer', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){},setInterval:()=>1,clearInterval(){}});
@@ -141,7 +141,7 @@ test('the model seat follows the Harness of the main-view session and task modes
 
 test('sidebar marks turn gray when a session closes and colored again when it runs', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}},row={dataset:{},'__reactFiber$x':{memoizedProps:{node:{id:'s'}}}},styles=[];
  let refresh,running=true;
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,
@@ -156,7 +156,7 @@ test('sidebar marks turn gray when a session closes and colored again when it ru
  const settle=()=>new Promise(resolve=>setTimeout(resolve,10));
  await settle();
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
- assert.match(styles.join('\n'),/data-hp-harness="codex"[^}]+:not\(\[data-hp-closed\]\)[^}]+background:url\("data:image\/png;base64,[^}]+center\/contain no-repeat/);
+ assert.match(styles.join('\n'),/data-hp-harness="codex"[^}]+width:14px;height:14px;background:linear-gradient\(145deg,#b6a4ff 0%,#6078ff 48%,#3725ff 100%\)[^}]+mask:url/);
  running=false;refresh();await settle();
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:'',hpClosed:''});
  running=true;refresh();await settle();
@@ -166,7 +166,7 @@ test('sidebar marks turn gray when a session closes and colored again when it ru
 test('the subagents guide card names the plugin that provides it and opens the tab in place', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const React=require('react'), {renderToStaticMarkup}=require('react-dom/server');
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const cards=[];
