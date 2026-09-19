@@ -11,6 +11,12 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { SessionEventMap } from '@deepseek-ai/dsh-session';
 import type { HostItem, HostItemSnapshot, HostItemUpdate } from './contracts.js';
 
+/**
+ * The host footer counts a turn only when every assistant message of it reports usage; the Harness reports one per turn,
+ * so the rows before the last one report zero.
+ */
+const ZERO: TokenUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+
 /** Projects external activities into DSH's existing message/tool/stream contracts. */
 export class DshOutput {
   private readonly active = new Map<string, {
@@ -45,7 +51,7 @@ export class DshOutput {
     } else if (item.type !== 'contextCompaction' && item.type !== 'subagentDelegation') {
       const call = toolCall(item);
       this.agent.session.append('assistant/message', { ...this.position,
-        message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [],
+        message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [], usage: ZERO,
       }, { surfaceOp: 'append' });
       this.agent.session.append('tool/call', { ...this.position, callId: call.id, name: call.name, arguments: call.arguments });
       this.openCalls++;
@@ -106,7 +112,7 @@ export class DshOutput {
     this.flush();
     this.enter(false);
     const call = { type: 'tool-call' as const, id: ToolCallId(`question:${id}`), name: 'ask_user_question', arguments: JSON.stringify({ questions }) };
-    this.agent.session.append('assistant/message', { ...this.position, message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [] }, { surfaceOp: 'append' });
+    this.agent.session.append('assistant/message', { ...this.position, message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [], usage: ZERO }, { surfaceOp: 'append' });
     this.agent.session.append('tool/call', { ...this.position, callId: call.id, name: call.name, arguments: call.arguments });
     this.openCalls++;
     const position = this.position;
@@ -131,12 +137,15 @@ export class DshOutput {
   /** Commit the deferred agent message with the turn's token usage; without one, a surface-less attempt still carries the count. */
   async finish(usage?: TokenUsage): Promise<void> {
     await this.interrupt();
-    if (this.deferred || !usage) return this.flush(usage);
+    if (this.deferred || !usage) return this.flush(usage ?? null);
+    // A message already settled this step, so the count opens its own.
+    if (this.stepMessages) this.next();
     const stream = new AssistantStreamAccumulator();
     stream.push({ time: Date.now(), chunk: { type: 'usage', usage } });
     this.agent.session.append('assistant/attempt', { ...this.position, stream: [...stream.snapshot()] });
   }
-  private flush(usage?: TokenUsage): void {
+  /** `null`: the final message of a turn whose usage the Harness did not report. */
+  private flush(usage: TokenUsage | null = ZERO): void {
     const pending = this.deferred;
     if (!pending) return;
     this.deferred = undefined;
@@ -149,14 +158,15 @@ export class DshOutput {
    * call of the current step has its result (a step closes with no call pending); consecutive calls share one step.
    */
   private enter(prose: boolean): void {
-    if (this.stepMessages && (prose || this.stepProse) && this.openCalls === 0) {
-      this.agent.session.append('step/end', this.position);
-      this.position = { ...this.position, step: this.position.step + 1 };
-      this.agent.session.append('step/start', this.position);
-      this.stepMessages = this.stepProse = false;
-    }
+    if (this.stepMessages && (prose || this.stepProse) && this.openCalls === 0) this.next();
     this.stepMessages = true;
     this.stepProse ||= prose;
+  }
+  private next(): void {
+    this.agent.session.append('step/end', this.position);
+    this.position = { ...this.position, step: this.position.step + 1 };
+    this.agent.session.append('step/start', this.position);
+    this.stepMessages = this.stepProse = false;
   }
   private push(id: string, chunk: StreamChunk): void {
     const entry = this.active.get(id)!;

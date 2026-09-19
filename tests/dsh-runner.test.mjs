@@ -16,6 +16,9 @@ import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence';
 import { HarnessOutputChannel } from '../dist/contracts.js';
 import { Bindings } from '../dist/bindings.js';
 import { DshRunner, usageDelta } from '../dist/dsh-runner.js';
+import { deriveTurnTokenUsage } from '@deepseek-ai/dsh-token-meter/client';
+// The host's per-turn footer ("用量") needs every attempt of the turn to report usage.
+const turnUsage=(events,turn)=>deriveTurnTokenUsage(events.filter(e=>e.data?.turn===turn));
 import { DshOutput } from '../dist/dsh-output.js';
 
 function fakeAdapter(log,native) {
@@ -100,9 +103,11 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   assert.equal(JSON.parse(calls[0].data.arguments).description,'确认工作目录');
   assert.equal(agent.session.snapshotEvents().find(e=>e.type==='assistant/message' && e.data.message.content[0].type==='tool-call').data.message.source.provider,'codex');
   assert.equal(frames.filter(f=>f.type==='chunk' && f.chunk.type==='text-delta').length,4);
-  // The turn's usage delta rides the last agent message; earlier messages of the turn carry none.
+  // The turn's usage delta rides the last agent message; earlier messages of the turn report zero.
+  const zero={inputTokens:0,outputTokens:0,cacheReadTokens:0,cacheWriteTokens:0};
   const answers=agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='text');
-  assert.deepEqual(answers.map(e=>e.data.usage),[undefined,{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0},undefined,{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0}]);
+  assert.deepEqual(answers.map(e=>e.data.usage),[zero,{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0},zero,{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0}]);
+  for(const turn of [1,2]) assert.deepEqual([turnUsage(agent.session.snapshotEvents(),turn)].map(u=>u&&[u.uncachedInputTokens,u.cacheReadTokens,u.outputTokens,u.totalTokens]),[[900,100,50,1050]],`turn ${turn} footer usage`);
   assert.equal(frames.filter(f=>f.type==='end').length,6);
   // DSH's step row shows only a step's latest assistant message, so prose is never followed by another message in its step.
   const messages=agent.session.snapshotEvents().filter(e=>e.type==='assistant/message');
@@ -123,6 +128,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   // the baseline is restored from the binding, so the thread's pre-restart totals are not counted again.
   const attempt=resumed.agent.session.snapshotEvents().filter(e=>e.type==='assistant/attempt').at(-1);
   assert.deepEqual(attempt.data.stream.at(-1).chunk,{type:'usage',usage:{inputTokens:900,outputTokens:50,cacheReadTokens:100,cacheWriteTokens:0}});
+  assert.equal(turnUsage(resumed.agent.session.snapshotEvents(),attempt.data.turn)?.totalTokens,1050,'a turn ending on a tool still shows its usage');
   const started=Promise.withResolvers();
   const dispose=second.ctx.on('agent/assistant-stream',({frame})=>{if(frame.type==='chunk' && frame.chunk.type==='text-delta' && frame.chunk.text==='reply:wait') started.resolve();});
   const waiting=prompt(resumed.agent,'wait');await started.promise;
