@@ -55,7 +55,8 @@ export const delegateFromUserRequest = address.extend({
 export const startDiscussionFromUserRequest = address.extend({
   requestId: z.string().min(1).max(128), prompt: z.string().max(64_000), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
 }).refine(request => request.prompt.trim() || request.attachments.length, { message: '请输入讨论任务或上传附件' });
-export const delegationAcceptedSchema = z.object({ sessionId: z.string(), harness: selection, accepted: z.literal(true) });
+// No sessionId yet when a leading skill of the source session runs first; the delegation starts after that turn.
+export const delegationAcceptedSchema = z.object({ sessionId: z.string().optional(), harness: selection, accepted: z.literal(true) });
 export const discussionAcceptedSchema = z.object({ accepted: z.literal(true) });
 /** Harness-internal subagents of the native session, oldest first: live, else as last seen before its idle process was reclaimed. */
 export const subagentsSchema = z.array(z.object({

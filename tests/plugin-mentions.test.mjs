@@ -27,7 +27,7 @@ test('the @ plugin source lists Harness plugins after files and inserts the nati
  const remote={harness:{async plugins(request){requests.push(request.sessionId);return {ok:true,value:[notion,sentry]};}}};
  const ctx={
   remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>({delegate:'委派',delegateDescription:'创建独立会话执行任务',delegateTask:'任务',delegateCreated:'已创建委派会话'})[key]??key},effect(fn){fn();},
-  inject(keys,apply){if(keys.includes('inputTriggers'))apply({inputTriggers:{registerSource(source){sources.push(source);return ()=>{};}},remote,effect(fn){fn();}});},
+  inject(keys,apply){if(keys.includes('inputTriggers')&&!keys.includes('sessions'))apply({inputTriggers:{registerSource(source){sources.push(source);return ()=>{};}},remote,effect(fn){fn();}});},
  };
  await module.exports.apply(ctx);
  assert.equal(sources.length,1);
@@ -100,6 +100,43 @@ test('the DSH / command source keeps file, goal, plan and compact beside delegat
  for(const key of ['candidates','dispatch','matchSpace','matchEnter'])assert.equal(Object.hasOwn(commandUi,key),false);
 });
 
+test('after /delegate the / menu lists only this session\'s skills and the hand-off waits for them', async () => {
+ const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
+ class CommandUi {
+  async candidates(){return [{name:'compact'}];}
+  dispatch(){return 'handled';} matchSpace(_session,token){return 'handled:'+token;} async matchEnter(){return 'handled';}
+ }
+ class Controller { constructor(){this.guards=[];} track(draft,_caret,guard){this.guards.push(guard.tier);} }
+ const commandUi=new CommandUi(), controllers=new Map(), disposers=[];
+ const inputTriggers={sessionOf(actx){if(!controllers.has(actx.id))controllers.set(actx.id,new Controller());return controllers.get(actx.id);}};
+ const remote={harness:{async state(){return {ok:true,value:{harness:'dsh'}};},async delegateFromUser(request){return {ok:true,value:{harness:request.harness,accepted:true}};}}};
+ const ctx={
+  remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
+  inject(keys,apply){
+   const scope={commandUi,inputTriggers,sessions:{sessionOf:actx=>({sessionId:actx.id})},remote,effect(fn){disposers.push(fn());}};
+   if(keys.includes('commandUi')||(keys.includes('inputTriggers')&&keys.includes('sessions')))apply(scope);
+  },
+ };
+ await module.exports.apply(ctx);
+ const controller=inputTriggers.sessionOf({id:'s1'}),session={sessionId:'s1'};
+ controller.track('/delegate /han',14,{tier:'claimed'},1);
+ assert.equal(controller.guards.at(-1),'plain','/ after the /delegate token opens the menu');
+ assert.deepEqual(Array.from(await commandUi.candidates(session,{query:'han',position:'inline'}),row=>row.name),[],'only skills: no command rows');
+ assert.equal(commandUi.matchSpace(session,'/plan'),undefined,'a space after a skill does not claim a command');
+ controller.track('/delegate task',5,{tier:'claimed'},2);
+ assert.equal(controller.guards.at(-1),'claimed','inside the token / stays suppressed');
+ assert.deepEqual(Array.from(await commandUi.candidates(session,{query:'',position:'inline'}),row=>row.name),['compact']);
+ controller.track('/discuss /x',11,{tier:'claimed'},3);
+ assert.equal(controller.guards.at(-1),'claimed','other claimed commands keep / suppressed');
+ const delegated=commandUi.dispatch({candidate:{name:'delegate'},session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
+ assert.equal((await delegated.claim.submit('/handoff 实现登录',{},[])).text,'delegatePrepared','no session yet while the skill runs here');
+ for(const dispose of disposers)dispose?.();
+ assert.equal(Object.hasOwn(inputTriggers,'sessionOf'),false);assert.equal(Object.hasOwn(controller,'track'),false);
+});
+
 test('the model seat follows the Harness of the main-view session and task modes render above the composer', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
@@ -117,26 +154,28 @@ test('the model seat follows the Harness of the main-view session and task modes
  const ctx={
   remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
   inject(keys,apply){
-   if(keys.includes('sessions'))apply({sessions:{list:{getSnapshot:()=>snapshot,subscribe:()=>()=>{}}},slots,remote,on(){},effect(fn){fn();}});
+   if(keys.includes('sessions')&&!keys.includes('inputTriggers'))apply({sessions:{list:{getSnapshot:()=>snapshot,subscribe:()=>()=>{}}},slots,remote,on(){},effect(fn){fn();}});
    else if(keys.length===1&&keys[0]==='slots')apply({slots,effect(fn){fn();}});
   },
  };
  await module.exports.apply(ctx);
  const React=require('react'),{renderToStaticMarkup}=require('react-dom/server'),Dock=components.get('conversation.input.dock');
  assert.ok(Dock);
- const t=key=>({delegate:'委派',native:'DSH 原生',reportBack:'完成后回传到当前会话',reportBackOff:'结果仅保留在新会话，不唤醒当前会话',delegateExit:'退出委派模式',discuss:'讨论',discussHint:'主 Agent 自动选择 1–4 个会话；多个会话完成后互评一轮',discussExit:'退出讨论模式'})[key]??key;
+ const t=key=>({delegate:'委派',delegateMode:'委派模式',native:'DSH 原生',reportBack:'完成后回传到当前会话',reportBackOff:'结果仅保留在新会话，不唤醒当前会话',delegateExit:'退出委派模式',discuss:'讨论',discussHint:'主 Agent 自动选择 1–4 个会话；多个会话完成后互评一轮',discussExit:'退出讨论模式'})[key]??key;
  const common={sessionId:'draft',inputActions:{setDraft(){}},t};
  assert.equal(renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'plain',draft:'',attachmentIds:[],draftRev:0,occurrences:[],queue:[]}})),'');
  const html=renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'claimed',claim:{name:'delegate',token:'/delegate '},draft:'/delegate task',attachmentIds:[],draftRev:1,occurrences:[],queue:[]}}));
- assert.match(html,/委派/);assert.match(html,/DSH 原生/);assert.match(html,/Codex/);assert.match(html,/Claude Code/);assert.match(html,/完成后回传到当前会话/);assert.match(html,/type="checkbox"/);
+ assert.match(html,/委派模式/);assert.match(html,/data-hp-mode="delegate"/);assert.match(html,/DSH 原生/);assert.match(html,/Codex/);assert.match(html,/Claude Code/);assert.match(html,/完成后回传到当前会话/);assert.match(html,/type="checkbox"/);
  const discussionHtml=renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'claimed',claim:{name:'discuss',token:'/discuss '},draft:'/discuss task',attachmentIds:[],draftRev:1,occurrences:[],queue:[]}}));
  assert.match(discussionHtml,/讨论/);assert.match(discussionHtml,/1–4/);assert.doesNotMatch(discussionHtml,/type="checkbox"/);
  api.changed('other','claude-code');
  assert.equal(seats.get('conversation.input.model')??0,0,'a Harness on a background session leaves the DSH model seat');
  api.changed('draft','claude-code');
  assert.equal(seats.get('conversation.input.model'),1,'the Harness model seat replaces the DSH one');
+ assert.equal(seats.get('conversation.composer.dock'),1,'the Harness context reading joins the dock under the composer');
  api.changed('draft','dsh');
  assert.equal(seats.get('conversation.input.model'),0,'switching back to DSH restores its model seat');
+ assert.equal(seats.get('conversation.composer.dock'),0,'a DSH session keeps the host context meter');
 });
 
 test('sidebar marks turn gray when a session closes and colored again when it runs', async () => {
@@ -152,7 +191,7 @@ test('sidebar marks turn gray when a session closes and colored again when it ru
  const remote={harness:{harnesses:async()=>({ok:true,value:{s:{harness:'codex',delegated:true,running}}})}};
  const slots={inject(){},register(){return ()=>{};}};
  await module.exports.apply({remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
-  inject(keys,apply){if(keys.includes('sessions'))apply({sessions:{list:{getSnapshot:()=>snapshot,subscribe:()=>()=>{}}},slots,remote,on(){},effect(fn){fn();}});}});
+  inject(keys,apply){if(keys.includes('sessions')&&!keys.includes('inputTriggers'))apply({sessions:{list:{getSnapshot:()=>snapshot,subscribe:()=>()=>{}}},slots,remote,on(){},effect(fn){fn();}});}});
  const settle=()=>new Promise(resolve=>setTimeout(resolve,10));
  await settle();
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});

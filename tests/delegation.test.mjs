@@ -64,7 +64,7 @@ test('session CLI creates a visible independent harness session, reads its resul
     channel.emit({kind:'event',event:{type:'turn.completed',turnId:command.turnId,outcome:{status:'succeeded'}}});
     return {ok:true,value:{turnId:command.turnId}};
    }}};
-  }, async close() {},
+  }, async close() {}, async listSkills() { return [{name:'handoff',description:'Write a hand-off',modelInvocable:true}]; },
  });
  try {
   await ctx.plugin(LocalAttachments,{dshHome:root});
@@ -77,7 +77,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   ctx.provide('fileUploads',{
    resolve:(agent,id)=>agent.id==='other'&&id==='receipt-note'?stagedFile:undefined,
    bindPrompt:()=>({commit(){receiptCommitted=true;},[Symbol.dispose](){}}),
-  });ctx.provide('sessionTitle',{});
+  });ctx.provide('sessionTitle',{});ctx.provide('sessionSkillCatalog',{async list(){return {skills:[]};}});
   const permissionPresets={names:['read-only','workspace-write'],current:()=>'read-only',resolve:name=>({sandbox:name}),set:(session,name)=>presetSets.push([session.id,name])};
   let disposePermissionPresets=ctx.provide('permissionPresets',permissionPresets);
   await ctx.plugin({inject,apply(scope){new HarnessService(scope,join(root,'bindings'),{codex:adapter('codex'),'claude-code':adapter('claude-code')});}});
@@ -279,5 +279,26 @@ test('session CLI creates a visible independent harness session, reads its resul
   assert.match(delegationInstructions(),/\/discuss.*1.?4/s);
   assert.match(ctx.tools.get('harness_delegate_read').description,/not-started.*进入目标会话/s);
   assert.match(ctx.tools.get('harness_discussion_dispatch').description,/1.?4/);
+  // `/delegate /handoff task`: the source Harness runs its own skill first; its reply goes to the delegated Harness.
+  await ctx.agents.create({sessionId:'handoff-source',meta:{cwd:root}});workspace.sessionIds.push('handoff-source');
+  await h.bindings.write({version:1,sessionId:'handoff-source',harness:'codex',cwd:root,locked:true,permission:'agent'});
+  reply='Hand-off notes in HANDOFF.md';
+  const turnsBeforeHandoff=turns.length, createdBeforeHandoff=created.length;
+  const handoffRequest={sessionId:'handoff-source',requestId:'handoff-1',harness:'codex',reportBack:false,prompt:'/handoff 实现登录',attachments:[]};
+  const handoff=await h.delegateFromUser(handoffRequest);
+  assert.equal(handoff.sessionId,undefined,'no delegated session until the skill turn ends');
+  // Two turns: the skill in the source session, then the task in the delegated one.
+  for (let i=0;i<200&&turns.length<turnsBeforeHandoff+2;i++) await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(created.length,createdBeforeHandoff+1);
+  assert.deepEqual(turns[turnsBeforeHandoff].input,[{type:'text',text:'/handoff 实现登录'}],'the source session runs the skill');
+  const handoffChild=created.at(-1).sessionId;await ctx.agents.get(handoffChild).whenIdle();
+  assert.equal((await h.bindings.readDelegated(handoffChild)).harness,'codex');
+  const handedOff=ctx.agents.get(handoffChild).session.snapshotEvents().find(event=>event.type==='user/message');
+  assert.deepEqual(handedOff.data.content,[{type:'text',text:'实现登录\n\n[来源会话 /handoff 的结果]\nHand-off notes in HANDOFF.md'}]);
+  await h.delegateFromUser(handoffRequest);await ctx.agents.get('handoff-source').whenIdle();
+  assert.equal(created.length,createdBeforeHandoff+1,'a retried request neither reruns the skill nor delegates twice');
+  assert.equal(turns.length,turnsBeforeHandoff+2);
+  const plainSlash=await h.delegateFromUser({...handoffRequest,requestId:'not-a-skill',prompt:'/tmp/app 修复构建'});
+  assert.ok(plainSlash.sessionId,'a leading path that is no skill is delegated directly');
  } finally { await ctx.fiber.dispose();await rm(root,{recursive:true,force:true}); }
 });

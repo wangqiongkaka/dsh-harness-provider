@@ -63,6 +63,9 @@ export async function apply(ctx: Context, rawConfig: unknown = {}): Promise<void
 type Ready = Extract<HarnessInspection, { status: 'ready' }>;
 type DiscussionResult = { peerReview: boolean; participants: Array<{ sessionId: string; harness: Binding['harness'] | 'dsh'; role?: string; task: string; status: string; text: string }> };
 
+const userMessageAt = (events: readonly SessionEvent[], rpcId: string) => events.findIndex(event =>
+  event.type === 'user/message' && event.data.source.kind === 'user' && 'rpcId' in event.data.source && event.data.source.rpcId === rpcId);
+
 /** Replaces a Service method for the scope's lifetime; a later plugin's replacement is left intact on dispose. */
 function override<T extends object, K extends keyof T>(scope: Context, target: T, key: K, replacement: T[K], label: string): void {
   const descriptor = Object.getOwnPropertyDescriptor(target, key);
@@ -128,6 +131,8 @@ export class HarnessService extends TypertRemoteService {
   private readonly harnessQuotas = new Map<Binding['harness'], HarnessQuotaCache>();
   // One user-authorized discussion per source turn; retries share the same work instead of spawning more sessions.
   private readonly discussions = new Map<string, { requestId: string; content: ContentBlock[]; inputHash?: string; work?: Promise<DiscussionResult> }>();
+  // ponytail: in memory; a restart while the source runs the skill drops the hand-off, and the user delegates again.
+  private readonly handoffs = new Map<string, { request: z.infer<typeof delegateFromUserRequest>; skill: string; content: ContentBlock[] }>();
   private readonly worktrees: string;
   constructor(ctx: Context, root: string, private readonly adapters: Record<Binding['harness'], HarnessAdapter>) {
     super(ctx, 'harness');
@@ -158,6 +163,7 @@ export class HarnessService extends TypertRemoteService {
     ctx.on('session/event', (session, event) => {
       if (event.type === 'turn/end') {
         this.discussions.delete(session.id);
+        void this.finishHandoff(session.id).catch(error => console.error('[harness] delegation after skill failed:', error));
         void this.notifyDelegation(session.id).catch(() => {});
         void this.offerWorktreeMerge(session.id).catch(() => {});
         void this.refreshHarnessQuota(session.id).catch(() => {});
@@ -497,6 +503,8 @@ export class HarnessService extends TypertRemoteService {
 
   async delegateFromUser(raw: unknown) {
     const request = delegateFromUserRequest.parse(raw);
+    const skill = await this.leadingSkill(request.sessionId, request.prompt);
+    if (skill) return this.handOffAfterSkill(request, skill);
     const { content, binding } = await this.admitUserPrompt(request);
     const requestHash = createHash('sha256').update(JSON.stringify(request)).digest('hex');
     try {
@@ -507,6 +515,61 @@ export class HarnessService extends TypertRemoteService {
       binding?.commit();
       return result;
     } finally { binding?.[Symbol.dispose](); }
+  }
+
+  /** The name of the source session's skill that `prompt` starts with, if any. */
+  private async leadingSkill(sessionId: string, prompt: string) {
+    const name = /^\/(\S+)/u.exec(prompt.trim())?.[1];
+    const catalog = this.ctx.get('sessionSkillCatalog');
+    if (!name || !catalog) return undefined;
+    const { skills } = await catalog.list({ sessionId: SessionId(sessionId) }, new AbortController().signal);
+    return skills.some(skill => skill.name === name) ? name : undefined;
+  }
+
+  /** `/delegate /skill task`: the source session runs the skill; its reply goes to the delegated Harness when that turn completes. */
+  private async handOffAfterSkill(request: z.infer<typeof delegateFromUserRequest>, skill: string) {
+    const accepted = { harness: request.harness, accepted: true as const };
+    const source = await this.agent(request.sessionId);
+    if (userMessageAt(source.session.snapshotEvents(), request.requestId) >= 0) return accepted;
+    const pending = this.handoffs.get(request.sessionId);
+    if (pending) {
+      if (pending.request.requestId === request.requestId) return accepted;
+      throw new Error('上一个委派仍在当前会话执行 skill，请等待完成后再委派');
+    }
+    const admitted = await this.admitUserPrompt(request);
+    this.handoffs.set(request.sessionId, { request, skill, content: admitted.content });
+    try {
+      // The skill line leads so every Harness recognizes it; attachments follow.
+      const attachments = admitted.content.slice(0, -1);
+      admitted.source.followup(createUserMessage({ content: [admitted.content.at(-1)!, ...attachments], source: { kind: 'user', rpcId: request.requestId } }));
+      await this.ctx.sessions.flush(admitted.source.session);
+      admitted.binding?.commit();
+      return accepted;
+    } catch (error) {
+      this.handoffs.delete(request.sessionId);
+      throw error;
+    } finally { admitted.binding?.[Symbol.dispose](); }
+  }
+
+  private async finishHandoff(sessionId: string) {
+    const handoff = this.handoffs.get(sessionId);
+    if (!handoff) return;
+    const events = (await this.agent(sessionId)).session.snapshotEvents();
+    const start = userMessageAt(events, handoff.request.requestId);
+    const end = events.findIndex((event, index) => start >= 0 && index > start && event.type === 'turn/end');
+    // An earlier turn ended while the skill line was still queued.
+    if (end < 0) return;
+    this.handoffs.delete(sessionId);
+    const outcome = events[end]!;
+    if (outcome.type !== 'turn/end' || outcome.data.reason.kind !== 'completed') return;
+    const { request, skill, content } = handoff;
+    const reply = events.slice(start, end).flatMap(event => event.type === 'assistant/message'
+      ? event.data.message.content.flatMap(part => part.type === 'text' ? [part.text] : []) : []).join('\n\n').trim();
+    const task = request.prompt.trim().slice(skill.length + 1).trim();
+    const prompt = `${task || `按 /${skill} 的结果继续`}\n\n[来源会话 /${skill} 的结果]\n${reply || '（无文字回复）'}`.slice(0, 64_000);
+    await this.delegate(sessionId, {
+      requestId: request.requestId, harness: request.harness, reportBack: request.reportBack, prompt, ...(request.title ? { title: request.title } : {}),
+    }, { content: [...content.slice(0, -1), { type: 'text', text: prompt }], requestHash: createHash('sha256').update(JSON.stringify(request)).digest('hex'), worktree: request.worktree });
   }
 
   private async admitUserPrompt(request: z.infer<typeof delegateFromUserRequest> | z.infer<typeof startDiscussionFromUserRequest>) {

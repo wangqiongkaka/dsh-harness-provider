@@ -42,7 +42,7 @@ type Api = {
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
   plugins(request: {sessionId: string}): Promise<RemoteResult<Plugin[]>>;
   edit(request: {sessionId: string; seq: number; text: string; requestId: string}): Promise<RemoteResult<State>>;
-  delegateFromUser(request: {sessionId: string; requestId: string; harness: State['harness']; prompt: string; reportBack: boolean; worktree: boolean; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId: string; harness: State['harness']; accepted: true}>>;
+  delegateFromUser(request: {sessionId: string; requestId: string; harness: State['harness']; prompt: string; reportBack: boolean; worktree: boolean; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId?: string; harness: State['harness']; accepted: true}>>;
   startDiscussionFromUser(request: {sessionId: string; requestId: string; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
 };
 const zh = {
@@ -68,7 +68,7 @@ const zh = {
   'subagent.running': '运行中', 'subagent.completed': '已完成', 'subagent.failed': '失败', 'subagent.cancelled': '已取消',
   plugins: '插件',
   edit: '编辑', editCancel: '取消', editSend: '发送', editHint: '发送后从这条消息重新执行，之后的原生上下文会撤销；工作区文件不会还原。',
-  delegate: '委派', delegateDescription: '创建独立会话执行任务', delegateTask: '任务', delegateCreated: '已创建委派会话', commands: '指令',
+  delegate: '委派', delegateMode: '委派模式', delegateDescription: '创建独立会话执行任务', delegateTask: '当前处于委派模式：描述任务，将交给所选 Harness 在新的独立会话中执行；输入 / 可先用当前会话的 skill（如交接）', delegateCreated: '已创建委派会话', delegatePrepared: '正在当前会话执行 skill，完成后自动创建委派会话', commands: '指令',
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
   worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code',
   discuss: '讨论', discussDescription: '由主 Agent 分配一个或多个会话并汇总', discussTask: '讨论任务', discussStarted: '已开始讨论',
@@ -97,7 +97,7 @@ const en: Record<keyof typeof zh,string> = {
   'subagent.running':'Running', 'subagent.completed':'Completed', 'subagent.failed':'Failed', 'subagent.cancelled':'Cancelled',
   plugins:'Plugins',
   edit:'Edit', editCancel:'Cancel', editSend:'Send', editHint:'Sending reruns from this message and drops the native context after it; workspace files are not restored.',
-  delegate:'Delegate', delegateDescription:'Create an independent session for this task', delegateTask:'Task', delegateCreated:'Delegation session created', commands:'Commands',
+  delegate:'Delegate', delegateMode:'Delegation mode', delegateDescription:'Create an independent session for this task', delegateTask:'Delegation mode: describe the task for the selected Harness to run in a new session; type / to run one of this session\'s skills (such as a hand-off) first', delegateCreated:'Delegation session created', delegatePrepared:'Running the skill in this session; the delegation starts when it finishes', commands:'Commands',
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
   worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex and Claude Code only',
   discuss:'Discuss', discussDescription:'Let the main agent assign one or more sessions and synthesize', discussTask:'Discussion task', discussStarted:'Discussion started',
@@ -148,6 +148,7 @@ type LeftProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'harness'
 type ModelProps = PropsRuntime<'conversation.input.model'> & PropsLocale<'harness'> & InjectFace<Injected>;
 type PermissionProps = PropsRuntime<'conversation.input.permission'> & PropsLocale<'harness'> & InjectFace<Injected>;
 type DelegationDockProps = PropsRuntime<'conversation.input.dock'> & PropsLocale<'harness'>;
+type ContextDockProps = PropsRuntime<'conversation.composer.dock'> & PropsLocale<'harness'> & InjectFace<Injected>;
 
 // ---- shared chrome (copies the host's ModelSelect / PermissionSelect / ContextMeter geometry) ----
 const Chevron = ({ open }: { open?: boolean }) => <svg className={`hp-chevron${open ? ' hp-chevron-open' : ''}`} width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
@@ -263,6 +264,8 @@ function useModelProvider(modelProvider: Injected['modelProvider'], sessionId: s
 type DelegationOptions = { harness: State['harness']; reportBack: boolean; worktree: boolean };
 const delegationOptions = new Map<string, DelegationOptions>();
 const optionsFor = (sessionId: string) => delegationOptions.get(sessionId) ?? { harness: 'codex' as const, reportBack: false, worktree: false };
+// Sessions whose `/` menu currently sits after a `/delegate ` token: it offers only this session's skills, which run here before handing off.
+const delegateSkillMenus = new Set<string>();
 let delegationRequestSequence = 0;
 const delegationRequestId = () => globalThis.crypto?.randomUUID?.() ?? `delegate-${Date.now()}-${++delegationRequestSequence}`;
 const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
@@ -272,9 +275,9 @@ const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): Comm
     name: 'delegate', token: '/delegate ', hint: t('delegateTask'), attachments: true,
     async submit(prompt, _actx, attachments) {
       const options = optionsFor(session.sessionId);
-      await value(remote.delegateFromUser({ sessionId: session.sessionId, requestId, prompt, attachments, ...options }));
+      const result = await value(remote.delegateFromUser({ sessionId: session.sessionId, requestId, prompt, attachments, ...options }));
       delegationOptions.delete(session.sessionId);
-      return { kind: 'success', text: t('delegateCreated') };
+      return { kind: 'success', text: t(result.sessionId ? 'delegateCreated' : 'delegatePrepared') };
     },
   };
 };
@@ -293,8 +296,8 @@ function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationD
   const [options, setOptions] = useState(() => optionsFor(sessionId));
   const update = (next: DelegationOptions) => { delegationOptions.set(sessionId, next); setOptions(next); };
   const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code' };
-  return <div className="hp-delegate" aria-label={t('delegate')}>
-    <strong>{t('delegate')}</strong>
+  return <div className="hp-delegate" data-hp-mode="delegate" aria-label={t('delegateMode')}>
+    <strong>{t('delegateMode')}</strong>
     <div className="hp-delegate-harness" role="radiogroup" aria-label={t('harness')}>
       {(Object.keys(names) as State['harness'][]).map(harness => <button key={harness} type="button" role="radio" aria-checked={options.harness === harness}
         onClick={() => update({ ...options, harness, worktree: harness !== 'dsh' && options.worktree })}>{names[harness]}</button>)}
@@ -382,7 +385,7 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
   </div>;
 }
 
-// ---- context ring (host ContextMeter geometry: 28px trigger, 14px ring, 264px panel) ----
+// ---- context ring: the host ContextMeter's ring and percentage under the composer, in scarcity colors ----
 function ContextRing({ usage, t }: { usage: Usage | undefined; t: T }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLSpanElement>(null);
@@ -397,6 +400,7 @@ function ContextRing({ usage, t }: { usage: Usage | undefined; t: T }) {
         <circle className="hp-track" cx="7" cy="7" r={RADIUS} />
         <circle className="hp-fill" cx="7" cy="7" r={RADIUS} strokeDasharray={CIRCUMFERENCE} strokeDashoffset={CIRCUMFERENCE * (1 - ratio)} transform="rotate(-90 7 7)" />
       </svg>
+      <span>{percent}%</span>
     </button>
     {open && <div className="hp-panel hp-panel-right" role="dialog" aria-label={t('contextAria')}>
       <div className="hp-panel-head"><span className="hp-muted">{t('contextUsed')}</span><span className={`hp-percent${level}`}>{percent}%</span>
@@ -408,6 +412,13 @@ function ContextRing({ usage, t }: { usage: Usage | undefined; t: T }) {
       </dl>
     </div>}
   </span>;
+}
+
+/** A Harness session's context reading, in the dock slot where DSH native sessions show theirs; DSH sessions read null. */
+export function HarnessContext({ sessionId, useSessions, usage, t }: ContextDockProps) {
+  const running = useSessions(s => s.byId[sessionId]?.running);
+  const view = usePolled(() => usage(sessionId), running ? 5_000 : 30_000, [sessionId, running]);
+  return <ContextRing usage={view ?? undefined} t={t} />;
 }
 
 function SessionRecovery({ sessionId, recover, running, onChange }: {
@@ -587,7 +598,7 @@ export function HarnessPermission({ sessionId, locked, useSessions, read, models
 }
 
 // ---- model seat (external Harness only): context ring + "model · effort" chip with the host's two-level menu ----
-export function HarnessModel({ sessionId, locked, useSessions, read, models, selectModel, selectThinking, selectConfig, usage, subscribe, t }: ModelProps) {
+export function HarnessModel({ sessionId, locked, useSessions, read, models, selectModel, selectThinking, selectConfig, subscribe, t }: ModelProps) {
   const [state,setState] = useState<State>();
   const [catalog,setCatalog] = useState<Models>();
   const [error,setError] = useState<string>();
@@ -613,7 +624,6 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
     }).catch(error => { if (generation.current === version) setError(error instanceof Error ? error.message : String(error)); });
     return () => { generation.current++; };
   }, [sessionId,summary?.running,reload,read,models]);
-  const usageView = usePolled(() => usage(sessionId), summary?.running ? 5_000 : 30_000, [sessionId, summary?.running]);
   async function choose(work: () => Promise<State>) {
     const version = generation.current; setBusy(true); setError(undefined); close();
     try { const next = await work(); if (generation.current === version) setState(next); }
@@ -680,7 +690,6 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
         })()}
       </div>}
     </div>
-    <ContextRing usage={usageView} t={t} />
     {error && <span role="alert" className="hp-alert">{error}</span>}
   </div>;
 }
@@ -737,6 +746,16 @@ function ExternalOnboarding({ complete }: PropsRuntime<'settings.onboarding'>) {
 
 /* Copied from the host's ModelSelect.module.css / PermissionSelect.module.css / ContextMeter.module.css so the
    plugin controls read as the same material: 28px r24 chips, r20 menus, 40px cells, 38px options, r12 panels. */
+// The host ContextMeter (DSH native sessions) has no tier classes; its aria-label carries the reading (capped at 100%),
+// so the same scarcity colors key on it: zh `上下文已用 N%`, en `N% of context used`.
+const hostContextRing = (from = 0, to = 100) => from === 0 && to === 100
+  ? 'button[aria-label^="上下文已用 "],button[aria-label$="% of context used"]'
+  : Array.from({ length: to - from + 1 }, (_, i) => `button[aria-label="上下文已用 ${from + i}%"],button[aria-label="${from + i}% of context used"]`).join(',');
+const nativeContextColors = `${hostContextRing()}{--hp-usage-color:var(--dsw-alias-state-success-primary)}
+${hostContextRing(70, 89)}{--hp-usage-color:var(--dsw-alias-state-warn-primary)}
+${hostContextRing(90, 100)}{--hp-usage-color:var(--dsw-alias-state-error-primary)}
+:is(${hostContextRing()})>svg>circle:first-child{stroke:var(--hp-usage-color);stroke-opacity:.2}
+:is(${hostContextRing()})>svg>circle:last-child{stroke:var(--hp-usage-color)}`;
 const styles = `
 .hp-root{display:flex;align-items:center;gap:12px;min-width:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary)}
 .hp-anchor{position:relative;display:inline-flex;min-width:0}
@@ -774,13 +793,14 @@ const styles = `
 .hp-status,.hp-empty{padding:10px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
 .hp-error{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:4px;padding:7px 8px;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
 .hp-retry{flex:0 0 auto;padding:0;border:none;background:transparent;color:inherit;font:inherit;font-weight:600;cursor:pointer}
-.hp-ring{display:grid;place-items:center;flex:none;width:28px;height:28px;border:none;border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}
-.hp-ring:hover,.hp-ring[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover)}
+.hp-ring{display:inline-flex;align-items:center;gap:6px;flex:none;padding:1px 8px;border:none;border-radius:24px;background:transparent;color:var(--dsw-alias-label-tertiary);font-family:inherit;font-size:var(--dsh-content-font-size-secondary,13px);font-variant-numeric:tabular-nums;line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));white-space:nowrap;cursor:pointer}
+.hp-ring:hover,.hp-ring[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
 .hp-quota-ring,.hp-ring{--hp-usage-color:var(--dsw-alias-state-success-primary)}
 .hp-quota-ring.hp-warn,.hp-ring.hp-warn{--hp-usage-color:var(--dsw-alias-state-warn-primary)}
 .hp-quota-ring.hp-danger,.hp-ring.hp-danger{--hp-usage-color:var(--dsw-alias-state-error-primary)}
 .hp-track{fill:none;stroke:var(--hp-usage-color);stroke-opacity:.2;stroke-width:2}
 .hp-fill{fill:none;stroke:var(--hp-usage-color);stroke-width:2;stroke-linecap:round}
+${nativeContextColors}
 .hp-panel{position:absolute;bottom:calc(100% + 8px);z-index:100;box-sizing:border-box;width:264px;padding:12px;border:0;border-radius:12px;background:var(--dsw-specific-menu);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);font-size:12px;line-height:20px;font-weight:400;color:var(--dsw-alias-label-secondary);text-align:left;white-space:normal;cursor:default}
 .hp-panel-head{display:flex;align-items:center;gap:6px}
 .hp-panel-icon{display:inline-flex;color:var(--dsw-alias-label-tertiary)}
@@ -842,6 +862,9 @@ const styles = `
 .hp-edit-error{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
 .hp-delegate{display:flex;align-items:center;gap:10px;box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance));max-width:var(--dsh-composer-card-max-width);margin:0 auto;padding:7px 10px;border-bottom:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .hp-delegate>strong{color:var(--dsw-alias-label-primary);font-weight:600}
+.hp-delegate[data-hp-mode=delegate]>strong{color:var(--dsw-alias-state-warn-label);white-space:nowrap}
+/* Delegation mode rings the composer card of the same seat in the orange of the /delegate token. */
+[data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]) [data-composer-card]{--dsw-elevation-stroke-color:var(--dsw-alias-state-warn-label);box-shadow:0 0 0 1.5px var(--dsw-alias-state-warn-label),var(--dsw-elevation-soft,0 0 #0000)}
 .hp-delegate-harness{display:flex;padding:2px;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover)}
 .hp-delegate-harness button{height:26px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer}
 .hp-delegate-harness button[aria-checked=true]{background:var(--dsw-specific-menu);color:var(--dsw-alias-label-primary)}
@@ -1056,6 +1079,8 @@ export async function apply(ctx: Context): Promise<void> {
         nativeSeats = [scope.slots.register({ name: 'conversation.input.plan', priority: -100 }, () => null)];
         nativeSeats.push(scope.slots.register({ name: 'conversation.input.permission', priority: -100, locale: 'harness', inject: () => api }, HarnessPermission));
         nativeSeats.push(scope.slots.register({ name: 'conversation.input.model', priority: -100, locale: 'harness', inject: () => api }, HarnessModel));
+        // After the host's session stats (order 0), where the host draws a DSH session's context reading.
+        nativeSeats.push(scope.slots.register({ name: 'conversation.composer.dock', id: 'harness-context', order: 100, locale: 'harness', inject: () => api }, HarnessContext));
         nativeSeats.push(scope.slots.register({ name: 'settings.onboarding', id: 'deepseek-official', priority: -100 }, ExternalOnboarding));
         nativeSeats.push(scope.slots.inject('conversation.chat.node', () => scope.slots.register({ name: 'conversation.chat.node', key: 'user', priority: -100,
           locale: 'chat', inject: () => editApi }, EditableUserMessage)));
@@ -1098,6 +1123,7 @@ export async function apply(ctx: Context): Promise<void> {
     const kept = new Set(['file', 'goal', 'plan', 'compact']);
     const replacements: Source = {
       candidates: async (session, request, ...rest) => {
+        if (delegateSkillMenus.has(session.sessionId)) return [];
         const original = await candidates(session, request, ...rest);
         const rows = await external(session.sessionId) ? original.filter(row => kept.has(row.name)) : [...original];
         const query = request.query.toLowerCase();
@@ -1110,7 +1136,7 @@ export async function apply(ctx: Context): Promise<void> {
         return compact < 0 ? [...rows, ...commands] : [...rows.slice(0, compact + 1), ...commands, ...rows.slice(compact + 1)];
       },
       dispatch: pick => pick.candidate.name === 'delegate' || pick.candidate.name === 'discuss' ? claim(pick.candidate.name, pick.session) : dispatch(pick),
-      matchSpace: (session, token) => token === '/delegate' ? claim('delegate', session) : token === '/discuss' ? claim('discuss', session) : matchSpace(session, token),
+      matchSpace: (session, token) => delegateSkillMenus.has(session.sessionId) ? undefined : token === '/delegate' ? claim('delegate', session) : token === '/discuss' ? claim('discuss', session) : matchSpace(session, token),
       matchEnter: async (session, line, ...rest) => /^\/delegate(?:\s|$)/.test(line.trim()) ? claim('delegate', session) : /^\/discuss(?:\s|$)/.test(line.trim()) ? claim('discuss', session)
         : /^\/model(\s|$)/.test(line.trim()) && await external(session.sessionId) ? undefined : matchEnter(session, line, ...rest),
     };
@@ -1139,6 +1165,36 @@ export async function apply(ctx: Context): Promise<void> {
       },
       codec: { clipboardText: ref => ref, serialize: ref => Promise.resolve(ref) },
     }), 'harness: plugin mentions');
+  });
+  // A claimed composer suppresses `/`. After `/delegate ` it opens this session's skills instead, so a skill such as a
+  // hand-off runs here first and its reply goes to the delegated Harness.
+  ctx.inject(['inputTriggers', 'sessions'], scope => {
+    type Controller = { track(draft: string, caret: number, guard: { tier: 'plain' | 'claimed' | 'frozen' }, draftRev: number): void };
+    const service = scope.inputTriggers as unknown as { sessionOf(actx: unknown): Controller };
+    const sessionOf = service.sessionOf.bind(service), token = '/delegate ';
+    // ponytail: patched controllers stay referenced until the plugin unloads; one per opened session.
+    const patched = new Set<Controller>();
+    const replacement = (actx: unknown) => {
+      const controller = sessionOf(actx);
+      const sessionId = scope.sessions.sessionOf(actx as never)?.sessionId;
+      if (sessionId === undefined || patched.has(controller)) return controller;
+      patched.add(controller);
+      const track = controller.track.bind(controller);
+      controller.track = (draft, caret, guard, draftRev) => {
+        const skills = guard.tier === 'claimed' && draft.startsWith(token) && caret >= token.length;
+        if (skills) delegateSkillMenus.add(sessionId); else delegateSkillMenus.delete(sessionId);
+        track(draft, caret, skills ? { tier: 'plain' } : guard, draftRev);
+      };
+      return controller;
+    };
+    scope.effect(() => {
+      service.sessionOf = replacement;
+      return () => {
+        if (service.sessionOf === replacement) Reflect.deleteProperty(service, 'sessionOf');
+        for (const controller of patched) Reflect.deleteProperty(controller, 'track');
+        patched.clear(); delegateSkillMenus.clear();
+      };
+    }, 'harness: skills in delegation mode');
   });
   ctx.inject(['slots'], scope => {
     scope.effect(() => scope.slots.inject('conversation.input.dock', () => scope.slots.register({
