@@ -367,7 +367,9 @@ export class HarnessService extends TypertRemoteService {
     return Object.fromEntries(await Promise.all(sessionIds.map(async id => {
       const delegated = await this.bindings.readDelegated(id).catch(() => undefined);
       const harness = delegated?.harness ?? (await this.bindings.read(id).catch(() => undefined))?.harness ?? 'dsh';
-      return [id, { harness, delegated: !!delegated }] as const;
+      // Running: an external Harness has a live process; a DSH session is loaded as an agent.
+      const running = harness === 'dsh' ? !!this.ctx.agents.get(SessionId(id)) : this.runner.live.has(id);
+      return [id, { harness, delegated: !!delegated, running }] as const;
     })));
   }
 

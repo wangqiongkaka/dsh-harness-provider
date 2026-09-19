@@ -17,7 +17,7 @@ test('task mode dock follows the composer card width axis', async () => {
 // Runs the real client entry with only the `@` source's services present.
 test('the @ plugin source lists Harness plugins after files and inserts the native mention text', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const notion={name:'notion',displayName:'Notion',description:'Notion docs and workflows',mention:'[@notion](plugin://notion@openai-curated)'};
@@ -46,7 +46,7 @@ test('the @ plugin source lists Harness plugins after files and inserts the nati
 
 test('the DSH / command source keeps file, goal, plan and compact beside delegate and discuss in Harness sessions', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const rows=['file','model','goal','plan','compact','export'];
@@ -102,10 +102,10 @@ test('the DSH / command source keeps file, goal, plan and compact beside delegat
 
 test('the model seat follows the Harness of the main-view session and task modes render above the composer', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
-  MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){}});
+  MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){},setInterval:()=>1,clearInterval(){}});
  // DSH 0.1.6 snapshots carry no `current`; the open session is the one retained by the main view.
  const snapshot={ids:['draft','other'],byId:{draft:{id:'draft',retainedBy:{mainView:1}},other:{id:'other',retainedBy:{}}}};
  const seats=new Map(),components=new Map();let api;
@@ -139,10 +139,34 @@ test('the model seat follows the Harness of the main-view session and task modes
  assert.equal(seats.get('conversation.input.model'),0,'switching back to DSH restores its model seat');
 });
 
+test('sidebar marks turn gray when a session closes and colored again when it runs', async () => {
+ const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
+ const module={exports:{}},row={dataset:{},'__reactFiber$x':{memoizedProps:{node:{id:'s'}}}},styles=[];
+ let refresh,running=true;
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,
+  document:{createElement:()=>({remove(){}}),head:{append(style){styles.push(style.textContent);}},body:{},querySelectorAll:()=>[row]},
+  MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:fn=>{queueMicrotask(fn);return 1;},cancelAnimationFrame(){},
+  setInterval:fn=>{refresh=fn;return 1;},clearInterval(){}});
+ const snapshot={ids:['s'],byId:{s:{id:'s',retainedBy:{}}}};
+ const remote={harness:{harnesses:async()=>({ok:true,value:{s:{harness:'codex',delegated:true,running}}})}};
+ const slots={inject(){},register(){return ()=>{};}};
+ await module.exports.apply({remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
+  inject(keys,apply){if(keys.includes('sessions'))apply({sessions:{list:{getSnapshot:()=>snapshot,subscribe:()=>()=>{}}},slots,remote,on(){},effect(fn){fn();}});}});
+ const settle=()=>new Promise(resolve=>setTimeout(resolve,10));
+ await settle();
+ assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
+ assert.match(styles.join('\n'),/data-hp-harness="codex"[^}]+:not\(\[data-hp-closed\]\)[^}]+background:url\("data:image\/png;base64,[^}]+center\/contain no-repeat/);
+ running=false;refresh();await settle();
+ assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:'',hpClosed:''});
+ running=true;refresh();await settle();
+ assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
+});
+
 test('the subagents guide card names the plugin that provides it and opens the tab in place', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const React=require('react'), {renderToStaticMarkup}=require('react-dom/server');
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const cards=[];

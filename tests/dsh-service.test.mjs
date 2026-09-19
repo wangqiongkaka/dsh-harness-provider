@@ -97,7 +97,8 @@ test('thinking selection validates against the catalog, persists, and quota read
   assert.equal((await h.state({sessionId:'fresh'})).harness,'dsh');
   await h.select({sessionId:'bound',harness:'codex'});
   // Sidebar marks read bindings only: an unbound fresh session stays native instead of adopting the remembered Harness.
-  assert.deepEqual(await h.harnesses({sessionIds:['bound','fresh','unknown']}),{bound:{harness:'codex',delegated:false},fresh:{harness:'dsh',delegated:false},unknown:{harness:'dsh',delegated:false}});
+  // A Harness session without a live process is closed (gray); a loaded DSH agent is running.
+  assert.deepEqual(await h.harnesses({sessionIds:['bound','fresh','unknown']}),{bound:{harness:'codex',delegated:false,running:false},fresh:{harness:'dsh',delegated:false,running:true},unknown:{harness:'dsh',delegated:false,running:true}});
   assert.equal(inspections,2); // one per harness, cached per cwd afterwards
   const quota=await h.quota({sessionId:'bound'});
   assert.deepEqual(quota,{kind:'windows',source:'codex',plan:'pro',windows:[

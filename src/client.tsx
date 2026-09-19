@@ -15,6 +15,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-commands/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client';
 import { contribution, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema } from './remote.js';
+import CODEX_ICON from './assets/codex-dark-color.png';
 import type { z } from 'zod';
 
 type State = z.infer<typeof stateSchema>;
@@ -36,7 +37,7 @@ type Api = {
   selectPermission(request: {sessionId: string; permission: string}): Promise<RemoteResult<State>>;
   selectConfig(request: {sessionId: string; configId: string; value: string | boolean}): Promise<RemoteResult<State>>;
   usage(request: {sessionId: string}): Promise<RemoteResult<Usage>>;
-  harnesses(request: {sessionIds: string[]}): Promise<RemoteResult<Record<string, {harness: State['harness']; delegated: boolean}>>>;
+  harnesses(request: {sessionIds: string[]}): Promise<RemoteResult<Record<string, {harness: State['harness']; delegated: boolean; running: boolean}>>>;
   quota(request: {sessionId: string}): Promise<RemoteResult<Quota>>;
   viewing(request: {sessionId: string}): Promise<RemoteResult<null>>;
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
@@ -919,10 +920,15 @@ const logos: Record<State['harness'], { mask: string; color: string }> = {
   codex: { color: 'var(--dsw-alias-label-primary)', mask: svg('0 0 24 24', OPENAI_PATH) },
   'claude-code': { color: '#D97757', mask: svg('0 0 24 24', CLAUDE_PATH) },
 };
+const delegatedMask = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><mask id="m"><circle cx="5" cy="5" r="5" fill="#fff"/><path d="M3 3l4 4M7 4v3H4" stroke="#000" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="5" cy="5" r="5" mask="url(#m)"/></svg>')}")`;
 const markStyles = Object.entries(logos).map(([harness, { mask, color }]) =>
   `[data-hp-harness="${harness}"]>span:first-child:empty::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`).join('\n')
-  // Delegated sessions: a small arrow badge on the logo's bottom-right corner.
-  + `\n[data-hp-delegated]>span:first-child:empty{position:relative}[data-hp-delegated]>span:first-child:empty::after{content:"";position:absolute;right:-1px;bottom:1px;width:8px;height:8px;background:url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="5" fill="#8A8F98"/><path d="M3 3l4 4M7 4v3H4" stroke="#fff" stroke-width="1.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>')}") center/contain no-repeat}`;
+  // The running Codex mark uses the native app icon; a closed session falls back to the monochrome rule above.
+  + `\n[data-hp-harness="codex"]:not([data-hp-closed])>span:first-child:empty::before{width:18px;height:18px;background:url("${CODEX_ICON}") center/contain no-repeat;-webkit-mask:none;mask:none}`
+  // Delegated sessions: a solid badge with a cut-out arrow on the logo's bottom-right corner, in the logo's state color.
+  + `\n[data-hp-delegated]>span:first-child:empty{position:relative}[data-hp-delegated]>span:first-child:empty::after{content:"";position:absolute;right:-2px;bottom:0;width:9px;height:9px;background:#4D6BFE;-webkit-mask:${delegatedMask} center/contain no-repeat;mask:${delegatedMask} center/contain no-repeat}`
+  // Closed sessions (no live Harness process, or an unloaded DSH agent) show the logo and badge in gray.
+  + `\n[data-hp-closed]>span:first-child:empty::before,[data-hp-closed]>span:first-child:empty::after{background:var(--dsw-alias-label-tertiary)}`;
 /** Session id from the row's React props (the host's SessionNodeItem receives `node`); undefined for non-session rows. */
 // ponytail: reads React internals because the host has no session-row slot; replace with a slot once DSH offers one.
 function rowSessionId(row: Element): string | undefined {
@@ -962,8 +968,8 @@ export async function apply(ctx: Context): Promise<void> {
   ctx.inject(['sessions', 'remote.harness'], scope => {
     let nativeSeats: Array<()=>void> = [];
     const known = new Map<string,State['harness']>();
-    // Harness per session id for sidebar marks; external results are final, native ones are re-read when the session list changes.
-    const fetched = new Set<string>(), delegated = new Set<string>();
+    // Harness, delegation and running state per session id for sidebar marks; visible rows are re-read on an interval and when the session list changes.
+    const fetched = new Set<string>(), delegated = new Set<string>(), running = new Set<string>();
     let frame = 0, loading = false;
     function paint() {
       frame = 0;
@@ -975,6 +981,7 @@ export async function apply(ctx: Context): Promise<void> {
         const harness=known.get(id);
         if (harness && row.dataset.hpHarness !== harness) row.dataset.hpHarness=harness;
         if (delegated.has(id) && row.dataset.hpDelegated === undefined) row.dataset.hpDelegated='';
+        if (harness && running.has(id) === (row.dataset.hpClosed !== undefined)) { if (running.has(id)) delete row.dataset.hpClosed; else row.dataset.hpClosed=''; }
         if (!fetched.has(id)) missing.push(id);
       }
       if (!missing.length || loading) return;
@@ -982,6 +989,7 @@ export async function apply(ctx: Context): Promise<void> {
       void value(scope.remote.harness.harnesses({sessionIds:missing})).then(result => {
         for (const [id,mark] of Object.entries(result)) {
           fetched.add(id); if (mark.delegated) delegated.add(id);
+          if (mark.running) running.add(id); else running.delete(id);
           if (!known.has(id) || mark.harness !== 'dsh') known.set(id,mark.harness);
         }
       }, () => {}).finally(() => { loading=false; schedule(); });
@@ -1065,7 +1073,10 @@ export async function apply(ctx: Context): Promise<void> {
       const observer=new MutationObserver(schedule);
       observer.observe(document.body,{childList:true,subtree:true});
       schedule();
-      return ()=>{observer.disconnect();cancelAnimationFrame(frame);frame=0;for (const row of document.querySelectorAll<HTMLElement>('[data-hp-harness],[data-hp-delegated]')) { delete row.dataset.hpHarness; delete row.dataset.hpDelegated; }};
+      // Processes start with a turn and are reclaimed when idle, so every visible row is re-read periodically.
+      // ponytail: polls all visible rows every 5s; push process start/exit events if the sidebar grows large.
+      const refresh=setInterval(()=>{fetched.clear();schedule();},5_000);
+      return ()=>{observer.disconnect();clearInterval(refresh);cancelAnimationFrame(frame);frame=0;for (const row of document.querySelectorAll<HTMLElement>('[data-hp-harness],[data-hp-delegated],[data-hp-closed]')) { delete row.dataset.hpHarness; delete row.dataset.hpDelegated; delete row.dataset.hpClosed; }};
     },'harness: sidebar marks');
     scope.slots.inject('conversation.input.left',()=>scope.slots.register({
       name:'conversation.input.left',id:'harness-selector',order:-100,locale:'harness',inject:()=>api,

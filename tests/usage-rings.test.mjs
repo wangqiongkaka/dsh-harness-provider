@@ -12,7 +12,7 @@ test('quota remaining and context used have opposite arcs but the same scarcity 
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const React=require('react'), {renderToStaticMarkup}=require('react-dom/server');
  const source=await readFile('src/client.tsx','utf8');
- const bundle=await build({stdin:{contents:source+'\nexport {QuotaChip,ContextRing,styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:source+'\nexport {QuotaChip,ContextRing,styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',loader:{'.png':'dataurl'},external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require});
  const {QuotaChip,ContextRing,styles}=module.exports;

@@ -42,7 +42,7 @@ export const quotaSchema = z.discriminatedUnion('kind', [
 ]).nullable();
 /** Sidebar marks: the Harness of each listed session and whether it was delegated, read from bindings only (no agent load, no remembered-Harness binding). */
 export const harnessesRequest = z.object({ sessionIds: z.array(z.string().min(1)).max(1000) }).strict();
-export const harnessesSchema = z.record(z.string(), z.object({ harness: selection, delegated: z.boolean() }));
+export const harnessesSchema = z.record(z.string(), z.object({ harness: selection, delegated: z.boolean(), running: z.boolean() }));
 const delegationAttachmentSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('image'), mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif']), data: z.string().min(1), name: z.string().min(1).max(255).optional() }).strict(),
   z.object({ type: z.literal('file'), receiptId: z.string().min(1) }).strict(),

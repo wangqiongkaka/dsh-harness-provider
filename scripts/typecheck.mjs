@@ -11,7 +11,7 @@ const options = {
   },
 };
 // Host and browser augment the same Cordis keys with different services.
-for (const entries of [ts.sys.readDirectory('src', ['.ts']), ['src/client.tsx']]) {
+for (const entries of [ts.sys.readDirectory('src', ['.ts']), ['src/client.tsx', 'src/assets.d.ts']]) {
   const program = ts.createProgram(entries, options);
   const diagnostics = ts.getPreEmitDiagnostics(program);
   if (diagnostics.length) {
