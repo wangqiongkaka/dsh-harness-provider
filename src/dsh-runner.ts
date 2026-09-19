@@ -9,13 +9,14 @@ import { Bindings, type Binding } from './bindings.js';
 import { SecretQuestions } from './secret-questions.js';
 import { harnessInput } from './media.js';
 import { DshOutput } from './dsh-output.js';
+import { modelValue } from './acp-adapter.js';
 import { delegationInstructions, type DelegationBridge } from './delegation.js';
 
 export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
 }
-type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; turnId?: import('./contracts.js').HostTurnId; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
+type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; modelLabel?: string; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; turnId?: import('./contracts.js').HostTurnId; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
 /**
  * How long an external Harness session may sit idle — no turn, and off screen — before its process is closed; the next
  * turn resumes it from its binding. Clients report a shown session every 15 seconds, well inside this window.
@@ -141,7 +142,8 @@ export class DshRunner {
       const session = unwrap(await this.adapters[binding.harness].open(binding.nativeRef
         ? { kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef, ...hints }
         : { kind: 'create', cwd: binding.cwd, ...hints }));
-      live = { session, revision: 0, usage: session.initialUsage, queue: [], ended: false, wake: () => {}, activeAt: Date.now() };
+      live = { session, revision: 0, usage: session.initialUsage, queue: [], ended: false, wake: () => {}, activeAt: Date.now(),
+        ...(session.initialState.resolvedModelLabel ? { modelLabel: session.initialState.resolvedModelLabel } : {}) };
       pump(live);
       this.live.set(agent.id, live);
       this.retainedSubagents.delete(agent.id);
@@ -165,7 +167,9 @@ export class DshRunner {
     const questionSignal = AbortSignal.any([signal, turnAbort.signal]);
     const output = new DshOutput(this.ctx, agent, { turn, step }, () => ++current.revision, () => ({
       provider: 'sourceProvider' in current.session && typeof current.session.sourceProvider === 'string' ? current.session.sourceProvider : current.session.harnessId || binding.harness,
-      model: binding.model?.id ?? current.session.initialState.effectiveModel?.id ?? 'unreported',
+      // The turn-usage panel shows this as provider / model: the model's display name, as in the composer, over the
+      // transport-encoded ref (`b64.…`).
+      model: current.modelLabel ?? (binding.model ?? current.session.initialState.effectiveModel ? modelValue((binding.model ?? current.session.initialState.effectiveModel)!) : 'unreported'),
     }));
     const usageBefore = current.usage;
     let submitted = false;
@@ -207,7 +211,10 @@ export class DshRunner {
           continue;
         }
         const event = value.event;
-        if (event.type === 'session.state.changed') { await this.saveState(binding, event.state); continue; }
+        if (event.type === 'session.state.changed') {
+          if (event.state.effectiveModel) current.modelLabel = event.state.resolvedModelLabel;
+          await this.saveState(binding, event.state); continue;
+        }
         if (event.type === 'session.faulted') throw new Error(event.error.message);
         if (!('turnId' in event) || event.turnId !== turnId) continue;
         switch (event.type) {

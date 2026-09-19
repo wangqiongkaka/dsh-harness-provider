@@ -29,7 +29,7 @@ function fakeAdapter(log,native) {
    const channel=new HarnessOutputChannel();
    let active;
    const session={
-    initialState:{nativeRef:{harnessId:'codex',nativeSessionId:'native-fixed',formatVersion:1},effectiveModel:{id:'fixture-model'}},
+    initialState:{nativeRef:{harnessId:'codex',nativeSessionId:'native-fixed',formatVersion:1},effectiveModel:{id:'b64.Zml4dHVyZVsxbV0'},resolvedModelLabel:'Fixture 1M'},
     // Thread-scoped counters, like Codex: the persisted usage is still the baseline after a reopen.
     initialUsage:input.usage??null,
     outputs:channel.outputs,
@@ -112,7 +112,9 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   assert.deepEqual(calls.map(e=>e.data.name),['bash','bash']);
   assert.equal(JSON.parse(calls[0].data.arguments).command,'pwd');
   assert.equal(JSON.parse(calls[0].data.arguments).description,'确认工作目录');
-  assert.equal(agent.session.snapshotEvents().find(e=>e.type==='assistant/message' && e.data.message.content[0].type==='tool-call').data.message.source.provider,'codex');
+  const callSource=agent.session.snapshotEvents().find(e=>e.type==='assistant/message' && e.data.message.content[0].type==='tool-call').data.message.source;
+  // The turn-usage panel shows provider / model, so the model is its display name rather than the encoded ref.
+  assert.deepEqual([callSource.provider,callSource.model],['codex','Fixture 1M']);
   assert.equal(frames.filter(f=>f.type==='chunk' && f.chunk.type==='text-delta').length,4);
   // The turn's usage delta rides the last agent message; earlier messages of the turn report zero.
   const zero={inputTokens:0,outputTokens:0,cacheReadTokens:0,cacheWriteTokens:0};
