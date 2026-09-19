@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { nativeSessionRefSchema, harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema } from './contracts.js';
 
 export const harnessChoice = z.enum(['codex', 'claude-code']);
-const delegationSchema = z.object({ parentSessionId: z.string(), requestHash: z.string(), notifiedSeq: z.number().int().optional() }).strict();
+const delegationSchema = z.object({ parentSessionId: z.string(), requestHash: z.string(), reportBack: z.boolean().optional(), notifiedSeq: z.number().int().optional() }).strict();
 type Delegation = z.infer<typeof delegationSchema>;
 const bindingSchema = z.object({
   version: z.literal(1), sessionId: z.string().min(1), harness: harnessChoice,

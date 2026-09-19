@@ -82,7 +82,7 @@ export class DshRunner {
     if (binding.pending) throw new Error('上次 Harness 请求的结果尚未确认；为避免重复执行，本会话暂停发送。');
     const input = await harnessInput(this.ctx, messages, signal);
     if (!input.length) throw new Error('Harness prompt is empty');
-    const delegation = binding.delegation ? undefined : this.delegation;
+    const delegation = this.delegation;
     let live = this.live.get(agent.id);
     if (!live) {
       // The adapter places the instructions: the agent's system prompt, or Codex's developer instructions at launch.

@@ -9,6 +9,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client';
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client';
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client';
+import type { ClientSessionContext, CommandClaim, InputTriggerCandidate, InputTriggerPick, PickOutcome, SubmitAttachment, SubmitEnvelope } from '@deepseek-ai/dsh-client-ui-input-trigger/client';
 import type {} from '@deepseek-ai/dsh-client-ui-commands/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client';
@@ -39,6 +40,8 @@ type Api = {
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
   plugins(request: {sessionId: string}): Promise<RemoteResult<Plugin[]>>;
   edit(request: {sessionId: string; seq: number; text: string; requestId: string}): Promise<RemoteResult<State>>;
+  delegateFromUser(request: {sessionId: string; requestId: string; harness: State['harness']; prompt: string; reportBack: boolean; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId: string; harness: State['harness']; accepted: true}>>;
+  startDiscussionFromUser(request: {sessionId: string; requestId: string; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
 };
 const zh = {
   harness: '选择 Harness', model: '选择 Harness 模型', native: 'DSH 原生', defaultModel: '默认模型',
@@ -62,6 +65,10 @@ const zh = {
   'subagent.running': '运行中', 'subagent.completed': '已完成', 'subagent.failed': '失败', 'subagent.cancelled': '已取消',
   plugins: '插件',
   edit: '编辑', editCancel: '取消', editSend: '发送', editHint: '发送后从这条消息重新执行，之后的原生上下文会撤销；工作区文件不会还原。',
+  delegate: '委派', delegateDescription: '创建独立会话执行任务', delegateTask: '任务', delegateCreated: '已创建委派会话', commands: '指令',
+  reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
+  discuss: '讨论', discussDescription: '由主 Agent 分配一个或多个会话并汇总', discussTask: '讨论任务', discussStarted: '已开始讨论',
+  discussHint: '主 Agent 自动选择 1–4 个会话；多个会话完成后互评一轮', discussExit: '退出讨论模式',
 };
 const en: Record<keyof typeof zh,string> = {
   harness:'Select Harness', model:'Select Harness model', native:'Native DSH', defaultModel:'Default model',
@@ -85,6 +92,10 @@ const en: Record<keyof typeof zh,string> = {
   'subagent.running':'Running', 'subagent.completed':'Completed', 'subagent.failed':'Failed', 'subagent.cancelled':'Cancelled',
   plugins:'Plugins',
   edit:'Edit', editCancel:'Cancel', editSend:'Send', editHint:'Sending reruns from this message and drops the native context after it; workspace files are not restored.',
+  delegate:'Delegate', delegateDescription:'Create an independent session for this task', delegateTask:'Task', delegateCreated:'Delegation session created', commands:'Commands',
+  reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
+  discuss:'Discuss', discussDescription:'Let the main agent assign one or more sessions and synthesize', discussTask:'Discussion task', discussStarted:'Discussion started',
+  discussHint:'The main agent selects 1–4 sessions; multiple sessions peer-review once', discussExit:'Exit discussion mode',
 };
 type Key = keyof typeof zh;
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -120,6 +131,7 @@ type T = (key: Key, params?: Record<string, unknown>) => string;
 type LeftProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'harness'> & InjectFace<Injected>;
 type ModelProps = PropsRuntime<'conversation.input.model'> & PropsLocale<'harness'> & InjectFace<Injected>;
 type PermissionProps = PropsRuntime<'conversation.input.permission'> & PropsLocale<'harness'> & InjectFace<Injected>;
+type DelegationDockProps = PropsRuntime<'conversation.input.dock'> & PropsLocale<'harness'>;
 
 // ---- shared chrome (copies the host's ModelSelect / PermissionSelect / ContextMeter geometry) ----
 const Chevron = ({ open }: { open?: boolean }) => <svg className={`hp-chevron${open ? ' hp-chevron-open' : ''}`} width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
@@ -205,6 +217,63 @@ function usePolled<V>(load: () => Promise<V>, everyMs: number, deps: unknown[]):
   return state;
 }
 
+type DelegationOptions = { harness: State['harness']; reportBack: boolean };
+const delegationOptions = new Map<string, DelegationOptions>();
+const optionsFor = (sessionId: string) => delegationOptions.get(sessionId) ?? { harness: 'codex' as const, reportBack: false };
+let delegationRequestSequence = 0;
+const delegationRequestId = () => globalThis.crypto?.randomUUID?.() ?? `delegate-${Date.now()}-${++delegationRequestSequence}`;
+const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
+  const requestId = delegationRequestId();
+  delegationOptions.set(session.sessionId, { harness: 'codex', reportBack: false });
+  return {
+    name: 'delegate', token: '/delegate ', hint: t('delegateTask'), attachments: true,
+    async submit(prompt, _actx, attachments) {
+      const options = optionsFor(session.sessionId);
+      await value(remote.delegateFromUser({ sessionId: session.sessionId, requestId, prompt, attachments, ...options }));
+      delegationOptions.delete(session.sessionId);
+      return { kind: 'success', text: t('delegateCreated') };
+    },
+  };
+};
+const discussionClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
+  const requestId = delegationRequestId();
+  return {
+    name: 'discuss', token: '/discuss ', hint: t('discussTask'), attachments: true,
+    async submit(prompt, _actx, attachments) {
+      await value(remote.startDiscussionFromUser({ sessionId: session.sessionId, requestId, prompt, attachments }));
+      return { kind: 'success', text: t('discussStarted') };
+    },
+  };
+};
+
+function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationDockProps) {
+  const [options, setOptions] = useState(() => optionsFor(sessionId));
+  const update = (next: DelegationOptions) => { delegationOptions.set(sessionId, next); setOptions(next); };
+  const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code' };
+  return <div className="hp-delegate" aria-label={t('delegate')}>
+    <strong>{t('delegate')}</strong>
+    <div className="hp-delegate-harness" role="radiogroup" aria-label={t('harness')}>
+      {(Object.keys(names) as State['harness'][]).map(harness => <button key={harness} type="button" role="radio" aria-checked={options.harness === harness}
+        onClick={() => update({ ...options, harness })}>{names[harness]}</button>)}
+    </div>
+    <label className="hp-delegate-report" title={!options.reportBack ? t('reportBackOff') : undefined}>
+      <input type="checkbox" checked={options.reportBack} onChange={event => update({ ...options, reportBack: event.target.checked })} />
+      <span>{t('reportBack')}</span>
+    </label>
+    <button type="button" className="hp-delegate-exit" aria-label={t('delegateExit')} title={t('delegateExit')}
+      onClick={() => { delegationOptions.delete(sessionId); inputActions.setDraft(input.draft.startsWith('/delegate ') ? input.draft.slice(10) : input.draft); }}>×</button>
+  </div>;
+}
+function DelegationDock(props: DelegationDockProps) {
+  if (props.input.claim?.name === 'delegate') return <DelegationDockActive {...props} />;
+  if (props.input.claim?.name !== 'discuss') return null;
+  return <div className="hp-delegate" aria-label={props.t('discuss')}>
+    <strong>{props.t('discuss')}</strong><span className="hp-discuss-hint">{props.t('discussHint')}</span>
+    <button type="button" className="hp-delegate-exit" aria-label={props.t('discussExit')} title={props.t('discussExit')}
+      onClick={() => props.inputActions.setDraft(props.input.draft.startsWith('/discuss ') ? props.input.draft.slice(9) : props.input.draft)}>×</button>
+  </div>;
+}
+
 const RADIUS = 5.5, CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
 // ---- quota chip: one 28px chip after the Harness chip, showing the tightest window (or the balance) ----
@@ -232,13 +301,15 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
     // The chip lists the plan-wide windows (5-hour, weekly); per-model windows stay in the panel. Color follows the tightest.
     const headline = quota.windows.filter(window => !window.id.startsWith('product:')).slice(0, 2);
     const shown = headline.length ? headline : [tight];
+    // The ring draws the tightest window printed beside it, so arc and percentage agree.
+    const ring = shown.reduce((a, b) => (b.usedPercent > a.usedPercent ? b : a));
     trigger = <>
       {windowIcon(shown[0]!.id)}
       {shown.map((window, index) => <span key={window.id} className={index ? 'hp-chip-effort' : undefined}>{index ? '· ' : ''}{windowLabel(t, window.id, window.label)} {left(window.usedPercent)}%</span>)}
       <svg className={`hp-quota-ring${level}`} width="14" height="14" viewBox="0 0 14 14" aria-hidden>
         <circle className="hp-track" cx="7" cy="7" r={RADIUS} />
         <circle className="hp-fill" cx="7" cy="7" r={RADIUS} strokeDasharray={CIRCUMFERENCE}
-          strokeDashoffset={CIRCUMFERENCE * tight.usedPercent / 100} transform="rotate(-90 7 7)" />
+          strokeDashoffset={CIRCUMFERENCE * ring.usedPercent / 100} transform="rotate(-90 7 7)" />
       </svg>
     </>;
     panel = quota.windows.map((window, index) => {
@@ -716,6 +787,16 @@ const styles = `
 .hp-edit-bar .hp-edit-send:hover:not(:disabled){background:var(--dsw-alias-label-secondary)}
 .hp-edit-bar button:disabled{opacity:.5;cursor:default}
 .hp-edit-error{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
+.hp-delegate{display:flex;align-items:center;gap:10px;box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance));max-width:var(--dsh-composer-card-max-width);margin:0 auto;padding:7px 10px;border-bottom:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
+.hp-delegate>strong{color:var(--dsw-alias-label-primary);font-weight:600}
+.hp-delegate-harness{display:flex;padding:2px;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover)}
+.hp-delegate-harness button{height:26px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer}
+.hp-delegate-harness button[aria-checked=true]{background:var(--dsw-specific-menu);color:var(--dsw-alias-label-primary)}
+.hp-delegate-harness button:focus-visible,.hp-delegate-exit:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px}
+.hp-delegate-report{display:flex;align-items:center;gap:6px;margin-left:auto;white-space:nowrap;cursor:pointer}.hp-delegate-report input{margin:0}
+.hp-discuss-hint{flex:1;min-width:0;color:var(--dsw-alias-label-tertiary)}
+.hp-delegate-exit{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:18px;cursor:pointer}.hp-delegate-exit:hover{background:var(--dsw-alias-interactive-bg-hover)}
+@media(max-width:600px){.hp-delegate{flex-wrap:wrap}.hp-delegate-report{margin-left:0}.hp-delegate-exit{margin-left:auto}}
 `;
 
 // ---- editable user messages: wraps the host's user bubble; registered only while the current session runs on a Harness ----
@@ -920,18 +1001,40 @@ export async function apply(ctx: Context): Promise<void> {
   // server runs on the Harness. The rest act on DSH's agent (the server already hides its commands); a typed `/model`
   // reaches the Harness as a prompt instead of DSH's model picker.
   ctx.inject(['commandUi', 'remote.harness'], scope => {
-    type Source = { candidates(session: { sessionId: string }, ...rest: unknown[]): Promise<{ name: string }[]>; matchEnter(session: { sessionId: string }, line: string, ...rest: unknown[]): Promise<unknown> };
+    type Source = {
+      candidates(session: ClientSessionContext, request: { query: string; position?: string }, ...rest: unknown[]): Promise<readonly InputTriggerCandidate[]>;
+      dispatch(pick: InputTriggerPick): PickOutcome;
+      matchSpace(session: ClientSessionContext, token: string): PickOutcome;
+      matchEnter(session: ClientSessionContext, line: string, signal?: AbortSignal, envelope?: SubmitEnvelope): Promise<PickOutcome>;
+    };
     const runtime = scope.commandUi as unknown as Source;
+    const t = ctx.locale.bind('harness');
+    const claim = (name: 'delegate' | 'discuss', session: ClientSessionContext) => ({ claim: name === 'delegate' ? delegationClaim(scope.remote.harness, session, t) : discussionClaim(scope.remote.harness, session, t) } as const);
     const external = async (sessionId: string) => (await harnessOf(scope.remote.harness, sessionId).catch(() => 'dsh')) !== 'dsh';
-    const candidates = runtime.candidates.bind(runtime), matchEnter = runtime.matchEnter.bind(runtime);
+    const candidates = runtime.candidates.bind(runtime), dispatch = runtime.dispatch.bind(runtime);
+    const matchSpace = runtime.matchSpace.bind(runtime), matchEnter = runtime.matchEnter.bind(runtime);
     const kept = new Set(['file', 'goal', 'plan', 'compact']);
     const replacements: Source = {
-      candidates: async (session, ...rest) => await external(session.sessionId) ? (await candidates(session, ...rest)).filter(row => kept.has(row.name)) : candidates(session, ...rest),
-      matchEnter: async (session, line, ...rest) => /^\/model(\s|$)/.test(line.trim()) && await external(session.sessionId) ? undefined : matchEnter(session, line, ...rest),
+      candidates: async (session, request, ...rest) => {
+        const original = await candidates(session, request, ...rest);
+        const rows = await external(session.sessionId) ? original.filter(row => kept.has(row.name)) : [...original];
+        const query = request.query.toLowerCase();
+        const commands = [
+          { name: 'delegate', label: t('delegate'), description: t('delegateDescription'), icon: PluginIcon, section: t('commands') },
+          { name: 'discuss', label: t('discuss'), description: t('discussDescription'), icon: PluginIcon, section: t('commands') },
+        ].filter(command => command.name.includes(query));
+        if (request.position === 'inline' || !commands.length) return rows;
+        const compact = rows.findIndex(row => row.name === 'compact');
+        return compact < 0 ? [...rows, ...commands] : [...rows.slice(0, compact + 1), ...commands, ...rows.slice(compact + 1)];
+      },
+      dispatch: pick => pick.candidate.name === 'delegate' || pick.candidate.name === 'discuss' ? claim(pick.candidate.name, pick.session) : dispatch(pick),
+      matchSpace: (session, token) => token === '/delegate' ? claim('delegate', session) : token === '/discuss' ? claim('discuss', session) : matchSpace(session, token),
+      matchEnter: async (session, line, ...rest) => /^\/delegate(?:\s|$)/.test(line.trim()) ? claim('delegate', session) : /^\/discuss(?:\s|$)/.test(line.trim()) ? claim('discuss', session)
+        : /^\/model(\s|$)/.test(line.trim()) && await external(session.sessionId) ? undefined : matchEnter(session, line, ...rest),
     };
     scope.effect(() => {
       Object.assign(runtime, replacements);
-      return () => { for (const key of ['candidates', 'matchEnter'] as const) if (Object.hasOwn(runtime, key) && runtime[key] === replacements[key]) Reflect.deleteProperty(runtime, key); };
+      return () => { for (const key of ['candidates', 'dispatch', 'matchSpace', 'matchEnter'] as const) if (Object.hasOwn(runtime, key) && runtime[key] === replacements[key]) Reflect.deleteProperty(runtime, key); };
     }, 'harness: DSH slash commands');
   });
   // `@` menu: the session Harness's installed plugins after the files. A pick inserts a chip whose prompt text is the Harness's
@@ -954,6 +1057,11 @@ export async function apply(ctx: Context): Promise<void> {
       },
       codec: { clipboardText: ref => ref, serialize: ref => Promise.resolve(ref) },
     }), 'harness: plugin mentions');
+  });
+  ctx.inject(['slots'], scope => {
+    scope.effect(() => scope.slots.inject('conversation.input.dock', () => scope.slots.register({
+      name: 'conversation.input.dock', id: 'harness-delegation', order: -100, locale: 'harness',
+    }, DelegationDock)), 'harness: delegation composer mode');
   });
   // Optional: a DSH build without the right sidebar simply has no subagents tab.
   ctx.inject(['sidebarRightTabs', 'remote.harness'], scope => {

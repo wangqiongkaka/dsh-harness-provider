@@ -6,6 +6,14 @@ import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { build } from 'esbuild';
 
+test('task mode dock follows the composer card width axis', async () => {
+ const source=await readFile('src/client.tsx','utf8');
+ const rule=source.match(/\.hp-delegate\{([^}]+)\}/)?.[1]??'';
+ assert.match(rule,/width:calc\(100% - var\(--dsh-composer-side-clearance\) - var\(--dsh-composer-side-clearance\)\)/);
+ assert.match(rule,/max-width:var\(--dsh-composer-card-max-width\)/);
+ assert.match(rule,/margin:0 auto/);
+});
+
 // Runs the real client entry with only the `@` source's services present.
 test('the @ plugin source lists Harness plugins after files and inserts the native mention text', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
@@ -18,7 +26,7 @@ test('the @ plugin source lists Harness plugins after files and inserts the nati
  const sources=[],requests=[];
  const remote={harness:{async plugins(request){requests.push(request.sessionId);return {ok:true,value:[notion,sentry]};}}};
  const ctx={
-  remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
+  remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>({delegate:'委派',delegateDescription:'创建独立会话执行任务',delegateTask:'任务',delegateCreated:'已创建委派会话'})[key]??key},effect(fn){fn();},
   inject(keys,apply){if(keys.includes('inputTriggers'))apply({inputTriggers:{registerSource(source){sources.push(source);return ()=>{};}},remote,effect(fn){fn();}});},
  };
  await module.exports.apply(ctx);
@@ -36,36 +44,63 @@ test('the @ plugin source lists Harness plugins after files and inserts the nati
  assert.equal(await source.codec.serialize(pick.insert.ref,signal),'[@notion](plugin://notion@openai-curated)');
 });
 
-test('the DSH / command source keeps only file, goal, plan and compact in Harness sessions', async () => {
+test('the DSH / command source keeps file, goal, plan and compact beside delegate and discuss in Harness sessions', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const rows=['file','model','goal','plan','compact','export'];
- class CommandUi { async candidates(session){return rows.map(name=>({name,session:session.sessionId}));} async matchEnter(session,line){return 'handled:'+line;} }
+ class CommandUi {
+  async candidates(session,{query=''}){return rows.filter(name=>!query||name.includes(query)).map(name=>({name,session:session.sessionId,section:['file','goal','plan'].includes(name)?'添加':'指令'}));}
+  dispatch(pick){return 'handled:'+pick.candidate.name;} matchSpace(_session,token){return 'handled:'+token;} async matchEnter(_session,line){return 'handled:'+line;}
+ }
  const commandUi=new CommandUi(), disposers=[], reads=[];
  let failing=true;
- const remote={harness:{async state({sessionId}){reads.push(sessionId);if(sessionId==='flaky'&&failing){failing=false;return {ok:false,error:{message:'offline'}};}return {ok:true,value:{harness:sessionId==='codex'?'codex':'dsh'}};}}};
+ const delegations=[], discussions=[];
+ const remote={harness:{
+  async state({sessionId}){reads.push(sessionId);if(sessionId==='flaky'&&failing){failing=false;return {ok:false,error:{message:'offline'}};}return {ok:true,value:{harness:sessionId==='codex'?'codex':'dsh'}};},
+  async delegateFromUser(request){delegations.push(request);return {ok:true,value:{sessionId:'delegated',harness:request.harness,accepted:true}};},
+  async startDiscussionFromUser(request){discussions.push(request);return {ok:true,value:{accepted:true}};},
+ }};
  const ctx={
-  remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
+  remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>({delegate:'委派',delegateDescription:'创建独立会话执行任务',delegateTask:'任务',delegateCreated:'已创建委派会话',discuss:'讨论',discussDescription:'由主 Agent 分配多个会话并汇总',discussTask:'讨论任务',discussStarted:'已开始讨论',commands:'指令'})[key]??key},effect(fn){fn();},
   inject(keys,apply){if(keys.includes('commandUi'))apply({commandUi,remote,effect(fn){disposers.push(fn());}});},
  };
  await module.exports.apply(ctx);
- const names=async id=>(await commandUi.candidates({sessionId:id},{query:''})).map(row=>row.name);
- assert.deepEqual(await names('codex'),['file','goal','plan','compact']);
+ const names=async id=>Array.from(await commandUi.candidates({sessionId:id},{query:''}),row=>row.name);
+ assert.deepEqual(await names('codex'),['file','goal','plan','compact','delegate','discuss']);
+ const merged=await commandUi.candidates({sessionId:'codex'},{query:''});
+ assert.deepEqual(Array.from(merged.filter(row=>['compact','delegate','discuss'].includes(row.name)),row=>row.section),['指令','指令','指令']);
+ const session={sessionId:'codex'},candidate=(await commandUi.candidates(session,{query:'del'}))[0];
+ const delegated=commandUi.dispatch({candidate,session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
+ assert.equal(delegated.claim.attachments,true);
+ assert.equal(commandUi.matchSpace(session,'/delegate').claim.name,'delegate');
+ assert.equal((await commandUi.matchEnter(session,'/delegate task')).claim.name,'delegate');
+ const image={type:'image',mediaType:'image/png',data:'AA=='};
+ assert.deepEqual(JSON.parse(JSON.stringify(await delegated.claim.submit('处理图片',{},[image]))),{kind:'success',text:'已创建委派会话'});
+ const submitted=JSON.parse(JSON.stringify(delegations[0]));delete submitted.requestId;
+ assert.deepEqual(submitted,{sessionId:'codex',harness:'codex',prompt:'处理图片',attachments:[image],reportBack:false});
+ const discussCandidate=(await commandUi.candidates(session,{query:'dis'}))[0];
+ const discussed=commandUi.dispatch({candidate:discussCandidate,session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
+ assert.equal(discussed.claim.attachments,true);
+ assert.equal(commandUi.matchSpace(session,'/discuss').claim.name,'discuss');
+ assert.equal((await commandUi.matchEnter(session,'/discuss compare')).claim.name,'discuss');
+ assert.deepEqual(JSON.parse(JSON.stringify(await discussed.claim.submit('比较方案',{},[image]))),{kind:'success',text:'已开始讨论'});
+ const discussion=JSON.parse(JSON.stringify(discussions[0]));delete discussion.requestId;
+ assert.deepEqual(discussion,{sessionId:'codex',prompt:'比较方案',attachments:[image]});
  assert.equal(await commandUi.matchEnter({sessionId:'codex'},'/compact'),'handled:/compact','the server runs /compact on Codex');
  assert.equal(await commandUi.matchEnter({sessionId:'codex'},'/model gpt-5'),undefined,'a typed /model is sent to Codex as a prompt');
  assert.equal(await commandUi.matchEnter({sessionId:'native'},'/model'),'handled:/model');
- assert.deepEqual(await names('native'),rows);
+ assert.deepEqual(await names('native'),['file','model','goal','plan','compact','delegate','discuss','export']);
  assert.equal(await commandUi.matchEnter({sessionId:'native'},'/compact'),'handled:/compact');
- assert.deepEqual(await names('flaky'),rows,'an unreadable session keeps the DSH menu');
+ assert.deepEqual(await names('flaky'),['file','model','goal','plan','compact','delegate','discuss','export'],'an unreadable session keeps the DSH menu');
  await commandUi.candidates({sessionId:'flaky'},{query:''});
  assert.deepEqual(reads,['codex','native','flaky','flaky'],'one read per session; a failed read is retried');
  for(const dispose of disposers)dispose?.();
- assert.equal(Object.hasOwn(commandUi,'candidates'),false);assert.equal(Object.hasOwn(commandUi,'matchEnter'),false);
+ for(const key of ['candidates','dispatch','matchSpace','matchEnter'])assert.equal(Object.hasOwn(commandUi,key),false);
 });
 
-test('the model seat follows the Harness of the main-view session', async () => {
+test('the model seat follows the Harness of the main-view session and task modes render above the composer', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
@@ -73,17 +108,29 @@ test('the model seat follows the Harness of the main-view session', async () => 
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){}});
  // DSH 0.1.6 snapshots carry no `current`; the open session is the one retained by the main view.
  const snapshot={ids:['draft','other'],byId:{draft:{id:'draft',retainedBy:{mainView:1}},other:{id:'other',retainedBy:{}}}};
- const seats=new Map();let api;
+ const seats=new Map(),components=new Map();let api;
  const slots={
   inject(_name,register){return register();},
-  register(options){if(options.name==='conversation.input.left')api=options.inject();seats.set(options.name,(seats.get(options.name)??0)+1);return ()=>seats.set(options.name,seats.get(options.name)-1);},
+  register(options,component){if(options.name==='conversation.input.left')api=options.inject();components.set(options.name,component);seats.set(options.name,(seats.get(options.name)??0)+1);return ()=>seats.set(options.name,seats.get(options.name)-1);},
  };
  const remote={harness:{}};
  const ctx={
   remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
-  inject(keys,apply){if(keys.includes('sessions'))apply({sessions:{list:{getSnapshot:()=>snapshot,subscribe:()=>()=>{}}},slots,remote,on(){},effect(fn){fn();}});},
+  inject(keys,apply){
+   if(keys.includes('sessions'))apply({sessions:{list:{getSnapshot:()=>snapshot,subscribe:()=>()=>{}}},slots,remote,on(){},effect(fn){fn();}});
+   else if(keys.length===1&&keys[0]==='slots')apply({slots,effect(fn){fn();}});
+  },
  };
  await module.exports.apply(ctx);
+ const React=require('react'),{renderToStaticMarkup}=require('react-dom/server'),Dock=components.get('conversation.input.dock');
+ assert.ok(Dock);
+ const t=key=>({delegate:'委派',native:'DSH 原生',reportBack:'完成后回传到当前会话',reportBackOff:'结果仅保留在新会话，不唤醒当前会话',delegateExit:'退出委派模式',discuss:'讨论',discussHint:'主 Agent 自动选择 1–4 个会话；多个会话完成后互评一轮',discussExit:'退出讨论模式'})[key]??key;
+ const common={sessionId:'draft',inputActions:{setDraft(){}},t};
+ assert.equal(renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'plain',draft:'',attachmentIds:[],draftRev:0,occurrences:[],queue:[]}})),'');
+ const html=renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'claimed',claim:{name:'delegate',token:'/delegate '},draft:'/delegate task',attachmentIds:[],draftRev:1,occurrences:[],queue:[]}}));
+ assert.match(html,/委派/);assert.match(html,/DSH 原生/);assert.match(html,/Codex/);assert.match(html,/Claude Code/);assert.match(html,/完成后回传到当前会话/);assert.match(html,/type="checkbox"/);
+ const discussionHtml=renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'claimed',claim:{name:'discuss',token:'/discuss '},draft:'/discuss task',attachmentIds:[],draftRev:1,occurrences:[],queue:[]}}));
+ assert.match(discussionHtml,/讨论/);assert.match(discussionHtml,/1–4/);assert.doesNotMatch(discussionHtml,/type="checkbox"/);
  api.changed('other','claude-code');
  assert.equal(seats.get('conversation.input.model')??0,0,'a Harness on a background session leaves the DSH model seat');
  api.changed('draft','claude-code');

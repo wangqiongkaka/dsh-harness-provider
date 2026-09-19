@@ -16,11 +16,8 @@ const codex=await startResponsesFixture([{kind:'complete',text:'Codex native fir
 const skillsProbe=process.env.DSH_SKILLS_PROBE === '1';
 const delegationProbe=process.env.DSH_DELEGATION_PROBE === '1';
 const subagentProbe=process.env.DSH_SUBAGENT_PROBE === '1';
-const quote=text=>"'"+text.replaceAll("'","'\\''")+"'";
-const delegateCommand=[process.execPath,resolve('dist/delegate-cli.mjs'),'create',JSON.stringify({requestId:'web-review',harness:'codex',prompt:'Review this workspace without editing'})].map(quote).join(' ');
-const claude=await startMessagesFixture(delegationProbe
- ? {kind:'tool-use',toolName:'Bash',input:{command:delegateCommand,description:'Create visible Codex review'},finalText:'Claude native reply'}
- : subagentProbe ? {kind:'tool-use',toolName:'Agent',input:{description:'Find fixture files',prompt:'List the fixture files',subagent_type:'general-purpose'},finalText:'Claude native reply'}
+const claude=await startMessagesFixture(subagentProbe
+ ? {kind:'tool-use',toolName:'Agent',input:{description:'Find fixture files',prompt:'List the fixture files',subagent_type:'general-purpose'},finalText:'Claude native reply'}
  : {kind:'complete',text:'Claude native reply'});
 // DSH's own subagent: the parent calls the subagent tool, the child replies, then the parent finishes.
 // DeepSeek's default Messages protocol posts to {DEEPSEEK_BASE_URL}/v1/messages, which the Messages fixture serves.
@@ -53,6 +50,7 @@ enabled = false
 `);
 await writeFile(join(claudeHome,'settings.json'),JSON.stringify({model:'claude-sonnet-4-6',permissions:{defaultMode:'default'}}));
 const env={PATH:process.env.PATH,HOME:root,DSH_HOME:dshHome,DSH_TELEMETRY_DISABLED:'1',CODEX_HOME:codexHome,
+ ...(process.env.COREPACK_HOME ? {COREPACK_HOME:process.env.COREPACK_HOME} : {}),
  CODEXHOST_CLAUDE_COMMAND:process.env.CLAUDE_COMMAND ?? '/opt/homebrew/bin/claude',CLAUDE_CONFIG_DIR:claudeHome,
  OPENAI_API_KEY:'fixture-only',ANTHROPIC_API_KEY:'fixture-only',ANTHROPIC_BASE_URL:claudeProxy.baseUrl,
  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:'1',
@@ -204,29 +202,51 @@ try{
  }else if(delegationProbe){
   const sessionId='claude-delegation-parent';
   await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId});
-  await rpc('harness/select',{sessionId,harness:'claude-code'});
-  await rpc('harness/selectPermission',{sessionId,permission:'bypassPermissions'});
+ await rpc('harness/select',{sessionId,harness:'claude-code'});
+ await rpc('harness/selectPermission',{sessionId,permission:'bypassPermissions'});
   await page.reload();await dismiss();
-  await rpc('session/prompt',{sessionId,requestId:'delegate-web-parent',mode:'queue',content:[{type:'text',text:'Use Codex to review this workspace'}]});
-  const review=page.getByText('Codex · Review this workspace without editing',{exact:true});
-  await review.waitFor({timeout:60000});
-  await page.getByRole('button',{name:'1 tool call',exact:true}).click();
-  await expect(page.getByText('Create visible Codex review',{exact:true})).toBeVisible({timeout:10000});
-  console.log('PASS: Bash activity displays its purpose description instead of a raw command');
-  await review.click();
+  await send('Prepare to delegate one task','Claude native reply');
+  const editor=page.locator('[contenteditable="true"][role="textbox"]');
+  await editor.fill('/');
+  await expect(page.getByRole('option').filter({hasText:'Delegate'})).toBeVisible();
+  await expect(page.getByRole('option').filter({hasText:'Discuss'})).toBeVisible();
+  await expect(page.getByText('Commands',{exact:true})).toHaveCount(1);
+  await page.screenshot({path:resolve('.cache/delegation-menu-web.png')});
+  await editor.fill('/dis');
+  await page.getByRole('option').filter({hasText:'Discuss'}).click();
+  const discussionDock=page.getByLabel('Discuss',{exact:true});
+  await expect(discussionDock).toContainText('1–4');await expect(discussionDock).toContainText('peer-review once');
+  await page.screenshot({path:resolve('.cache/discussion-compose-web.png')});
+  await discussionDock.getByRole('button',{name:'Exit discussion mode'}).click();
+  await editor.fill('/del');
+  await page.getByRole('option').filter({hasText:'Delegate'}).click();
+  const dock=page.getByLabel('Delegate',{exact:true});
+  await dock.waitFor();
+  const reportBack=dock.getByRole('checkbox',{name:'Report back to this session when complete'});
+  await expect(reportBack).not.toBeChecked();
+  await dock.getByRole('radio',{name:'Codex',exact:true}).click();
+  await reportBack.check();
+  const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC','base64');
+  await page.locator('input[type="file"]').setInputFiles({name:'fixture.png',mimeType:'image/png',buffer:png});
+  await editor.click();await editor.press('End');await editor.pressSequentially('Review this workspace without editing');
+  await expect(editor).toContainText('Review this workspace without editing');
+  await page.screenshot({path:resolve('.cache/delegation-compose-web.png')});
+  await page.getByRole('button',{name:'Send message',exact:true}).click();
+  const delegatedRow=page.locator('[role="treeitem"][data-hp-harness="codex"][data-hp-delegated]').first();
+  await delegatedRow.waitFor({state:'attached',timeout:60000});
+  await delegatedRow.click();
   await page.getByText('Codex native first',{exact:true}).waitFor({timeout:60000});
-  const childId='session-'+createHash('sha256').update(JSON.stringify([sessionId,'web-review'])).digest('hex');
-  assert.equal((await rpc('harness/state',{sessionId:childId})).harness,'codex');
   assert.equal((await rpc('harness/state',{sessionId})).harness,'claude-code');
-  await expect.poll(()=>claude.requests.some(request=>JSON.stringify(request.body.messages).includes(`委派会话 ${childId} 已结束`)),{timeout:60000}).toBe(true);
-  const badge=page.locator('[role="treeitem"][data-hp-harness="codex"][data-hp-delegated]>span:first-child').first();
+  assert.ok(codex.requests.some(request=>JSON.stringify(request.body).includes('input_image')));
+  await expect.poll(()=>claude.requests.some(request=>JSON.stringify(request.body.messages).includes('委派会话 ')&&JSON.stringify(request.body.messages).includes('已结束')),{timeout:60000}).toBe(true);
+  const badge=delegatedRow.locator('>span:first-child');
   await badge.waitFor({state:'attached'});
   assert.notEqual(await badge.evaluate(el=>getComputedStyle(el,'::after').backgroundImage),'none');
   await expect(page.locator('[role="treeitem"][data-hp-harness="claude-code"]:not([data-hp-delegated])')).not.toHaveCount(0);
   console.log('PASS: the delegated Codex session carries a badge on its logo; the source session does not');
   await page.screenshot({path:resolve('.cache/delegation-web.png')});
-  console.log('PASS: real Claude Code tool created a delegated Codex session in the live DSH sidebar; selecting it displayed its native reply');
-  console.log('PASS: delegation completion automatically woke the source Claude Code session with the result-reading instruction');
+  console.log('PASS: the real composer created a delegated Codex session with an image and displayed its native reply');
+  console.log('PASS: report-back defaults off and, when explicitly enabled, wakes the source Claude Code session');
  }else{
  await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:'codex-web-probe'});
  await page.reload();await dismiss();

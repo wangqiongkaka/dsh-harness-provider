@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService, RemoteError } from '@deepseek-ai/dsh-typert-protocol';
 import { SessionId } from '@deepseek-ai/dsh-session';
-import { createUserMessage } from '@deepseek-ai/dsh-llm';
+import { createUserMessage, type ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { brandString } from '@deepseek-ai/dsh-brand';
@@ -19,6 +19,7 @@ import type {} from '@deepseek-ai/dsh-shell';
 import type {} from '@deepseek-ai/dsh-workspace';
 import type {} from '@deepseek-ai/dsh-attachment';
 import type {} from '@deepseek-ai/dsh-client-file-upload';
+import type { FileUploadReceiptId } from '@deepseek-ai/dsh-client-file-upload/types';
 import type {} from '@deepseek-ai/dsh-session-title';
 import type {} from '@deepseek-ai/dsh-agent-presets/types';
 import type {} from '@deepseek-ai/dsh-subagent';
@@ -35,8 +36,8 @@ import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT
 import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
-import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest } from './remote.js';
-import { DelegationBridge, delegationRequest, delegationReadRequest } from './delegation.js';
+import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest } from './remote.js';
+import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest } from './delegation.js';
 
 /** DSH commands a Harness session keeps: the row stays DSH's, the work runs on the Harness's own command or mode. */
 const HARNESS_COMMANDS = new Set(['goal', 'plan', 'compact']);
@@ -59,6 +60,7 @@ export async function apply(ctx: Context, rawConfig: unknown = {}): Promise<void
 }
 
 type Ready = Extract<HarnessInspection, { status: 'ready' }>;
+type DiscussionResult = { peerReview: boolean; participants: Array<{ sessionId: string; harness: Binding['harness'] | 'dsh'; role?: string; task: string; status: string; text: string }> };
 
 /** Replaces a Service method for the scope's lifetime; a later plugin's replacement is left intact on dispose. */
 function override<T extends object, K extends keyof T>(scope: Context, target: T, key: K, replacement: T[K], label: string): void {
@@ -121,10 +123,12 @@ export class HarnessService extends TypertRemoteService {
   private readonly pluginCatalogs = new Map<string, { until: number; plugins: Promise<HarnessPlugin[]> }>();
   // ponytail: per-source quota cache; account probes are rate-limited upstream and identical across sessions.
   private readonly quotas = new Map<string, { until: number; work: Promise<Quota> }>();
+  // One user-authorized discussion per source turn; retries share the same work instead of spawning more sessions.
+  private readonly discussions = new Map<string, { requestId: string; content: ContentBlock[]; inputHash?: string; work?: Promise<DiscussionResult> }>();
   constructor(ctx: Context, root: string, private readonly adapters: Record<Binding['harness'], HarnessAdapter>) {
     super(ctx, 'harness');
     this.bindings = new Bindings(root);
-    this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : this.readDelegation(source, input));
+    this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : method === 'discuss' ? this.discuss(source, input) : this.readDelegation(source, input));
     this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation);
     ctx.effect(() => ctx.typert.register({ package: contribution.package, face: 'host', schemas: [], invocations: contribution.descriptors, model: { services: [], events: [], objects: [] } }), 'harness: Remote contracts');
     ctx.effect(() => async () => {
@@ -147,22 +151,23 @@ export class HarnessService extends TypertRemoteService {
     });
     ctx.on('agent/inbox/inserted', ({ agent }) => { this.runner.drainSteering(agent); });
     ctx.on('session/event', (session, event) => {
-      if (event.type === 'turn/end') void this.notifyDelegation(session.id).catch(() => {});
+      if (event.type === 'turn/end') { this.discussions.delete(session.id); void this.notifyDelegation(session.id).catch(() => {}); }
     });
     ctx.on('agent/created', async ({ agent }) => { void agent.whenIdle().then(() => this.notifyDelegation(agent.id)).catch(() => {}); });
     ctx.inject(['tools'], scope => {
       scope.tools.register(defineTool({
-        name: 'harness_delegate', description: '用户明确要求把工作（实现、修复、调研、审查等）委派给 DSH 原生、Codex 或 Claude Code 时，创建同工作区的可见独立会话。新会话没有本会话历史，prompt 须写全目标、范围、约束和验收要求。创建成功后立即结束当前轮次并等待宿主的完成通知，不要主动轮询；收到通知后再读取结果。重试保持 requestId 和所有参数不变。',
-        parameters: { requestId: { type: 'string', required: true }, harness: { type: 'string', enum: ['dsh', 'codex', 'claude-code'], required: true }, prompt: { type: 'string', required: true },
-          title: { type: 'string', description: '可选的简短任务标题，显示在会话列表' } },
-        output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
-        execute: async (args, exec) => { if (!exec.agent) throw new Error('委派需要来源会话'); return JSON.stringify(await this.delegate(exec.agent.id, args)); },
-      }));
-      scope.tools.register(defineTool({
-        name: 'harness_delegate_read', description: '收到完成通知后，分页读取本会话创建的委派结果；运行中不要定时读取。首次省略 offset/throughSeq；按 nextOffset 和 throughSeq 读到末尾。状态为 not-started 时用相同参数重试创建；interrupted 时进入目标会话处理，不要自动重发。',
+        name: 'harness_delegate_read', description: '收到完成通知后，分页读取本会话创建的委派结果；运行中不要定时读取。首次省略 offset/throughSeq；按 nextOffset 和 throughSeq 读到末尾。状态为 not-started 或 interrupted 时提醒用户进入目标会话处理，不要自动重发。',
         parameters: { sessionId: { type: 'string', required: true }, offset: { type: 'integer' }, throughSeq: { type: 'integer' } },
         output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
         execute: async (args, exec) => { if (!exec.agent) throw new Error('查询需要来源会话'); return JSON.stringify(await this.readDelegation(exec.agent.id, args)); },
+      }));
+      scope.tools.register(defineTool({
+        name: 'harness_discussion_dispatch', description: '仅当用户在当前轮明确使用 /discuss 开启讨论模式时调用一次。根据任务并发性选择 1–4 个参与者并给出各自分工；1 个直接执行，多个会话会自动互评一轮。等待返回后由你综合最终答案。普通委派不得调用此入口。',
+        parameters: { assignments: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+          harness: { type: 'string', required: true, enum: ['dsh', 'codex', 'claude-code'] }, role: { type: 'string' }, task: { type: 'string', required: true },
+        } } } },
+        output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+        execute: async (args, exec) => { if (!exec.agent) throw new Error('讨论需要来源会话'); return JSON.stringify(await this.discuss(exec.agent.id, args)); },
       }));
     });
     this.wrapCommands(ctx);
@@ -386,15 +391,14 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /** Creates an ordinary DSH session, with a stable identity for admission retries. */
-  async delegate(source: string, raw: unknown) {
+  async delegate(source: string, raw: unknown, admitted?: { content: ContentBlock[]; requestHash: string }) {
     const request = delegationRequest.parse(raw);
     const parent = await this.agent(source);
-    if (await this.bindings.readDelegated(source)) throw new Error('委派子会话不能再次委派；请返回来源会话继续处理');
     const cwd = parent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
     const hash = (value: string) => createHash('sha256').update(value).digest('hex');
     const sessionId = SessionId(`session-${hash(JSON.stringify([source, request.requestId]))}`);
-    const requestHash = hash(JSON.stringify(request));
+    const requestHash = admitted?.requestHash ?? hash(JSON.stringify(request));
     return this.bindings.serial(`delegate:${sessionId}`, async () => {
       try {
         const existing = await this.bindings.readDelegated(sessionId);
@@ -446,10 +450,10 @@ export class HarnessService extends TypertRemoteService {
             const child = await this.agent(sessionId);
             if (!this.fresh(child)) throw new Error('目标会话已有内容，拒绝重复创建');
             if (preset) presets!.set(child.session, preset);
-            if (request.harness === 'dsh') await this.bindings.writeDelegated({ version: 1, sessionId, harness: 'dsh', cwd, locked: false, delegation: { parentSessionId: source, requestHash } });
+            if (request.harness === 'dsh') await this.bindings.writeDelegated({ version: 1, sessionId, harness: 'dsh', cwd, locked: false, delegation: { parentSessionId: source, requestHash, reportBack: request.reportBack } });
             else await this.bind(child, sessionId, request.harness, {
               permission: external?.permission ? harnessPermissionModeIdSchema.parse(external.permission) : external?.inspection.permissionModes?.defaultModeId,
-              delegation: { parentSessionId: source, requestHash },
+              delegation: { parentSessionId: source, requestHash, reportBack: request.reportBack },
             });
             if (this.ctx.get('sessionTitle')) await this.ctx.sessionController.rename({ sessionId,
               title: request.title ?? `${request.harness === 'dsh' ? 'DSH 原生' : request.harness === 'codex' ? 'Codex' : 'Claude Code'} · ${request.prompt.split('\n').find(line => line.trim())!.trim().slice(0, 40)}` });
@@ -461,13 +465,120 @@ export class HarnessService extends TypertRemoteService {
           native.locked = true;
           await this.bindings.writeDelegated(native);
         }
-        await this.ctx.sessionController.prompt({ sessionId, requestId: brandString<SessionRequestId>(request.requestId), mode: 'queue',
+        if (admitted) {
+          const child = await this.agent(sessionId);
+          child.followup(createUserMessage({ content: admitted.content, source: { kind: 'user', rpcId: request.requestId } }));
+          await this.ctx.sessions.flush(child.session);
+        } else await this.ctx.sessionController.prompt({ sessionId, requestId: brandString<SessionRequestId>(request.requestId), mode: 'queue',
           content: [{ type: 'text', text: request.prompt }] }, new AbortController().signal);
         return { sessionId, harness: request.harness, accepted: true };
       } catch (error) {
-        throw new Error(`会话 ${sessionId}：${error instanceof Error ? error.message : '委派失败'}。重试请保持 requestId 和参数不变。`);
+        throw new Error(`会话 ${sessionId}：${error instanceof Error ? error.message : '委派失败'}。重试请保持 requestId 和参数不变。`, { cause: error });
       }
     });
+  }
+
+  async delegateFromUser(raw: unknown) {
+    const request = delegateFromUserRequest.parse(raw);
+    const { content, binding } = await this.admitUserPrompt(request);
+    const requestHash = createHash('sha256').update(JSON.stringify(request)).digest('hex');
+    try {
+      const result = await this.delegate(request.sessionId, {
+        requestId: request.requestId, harness: request.harness, reportBack: request.reportBack,
+        prompt: request.prompt.trim() || '处理附件任务', ...(request.title ? { title: request.title } : {}),
+      }, { content, requestHash });
+      binding?.commit();
+      return result;
+    } finally { binding?.[Symbol.dispose](); }
+  }
+
+  private async admitUserPrompt(request: z.infer<typeof delegateFromUserRequest> | z.infer<typeof startDiscussionFromUserRequest>) {
+    const source = await this.agent(request.sessionId);
+    const receiptIds = request.attachments.flatMap(part => part.type === 'file' ? [brandString<FileUploadReceiptId>(part.receiptId)] : []);
+    const admission = request.attachments.map(part => {
+      if (part.type === 'image') return part;
+      const attachment = this.ctx.fileUploads.resolve(source, brandString<FileUploadReceiptId>(part.receiptId));
+      if (!attachment) throw new RemoteError('session/attachment-invalid', '附件不属于当前会话或上传已过期', { reason: 'FILE_NOT_STAGED' });
+      return { type: 'file' as const, attachment };
+    });
+    const content = await this.ctx.attachments.admitPromptContent([
+      ...admission,
+      ...(request.prompt.trim() ? [{ type: 'text' as const, text: request.prompt.trim() }] : []),
+    ]);
+    const binding = receiptIds.length ? this.ctx.fileUploads.bindPrompt(source, receiptIds, request.requestId) : undefined;
+    return { source, content, binding };
+  }
+
+  async startDiscussionFromUser(raw: unknown) {
+    const request = startDiscussionFromUserRequest.parse(raw);
+    const source = await this.agent(request.sessionId);
+    if (source.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.source.kind === 'user' && 'rpcId' in event.data.source && event.data.source.rpcId === request.requestId)) return { accepted: true as const };
+    const active = this.discussions.get(request.sessionId);
+    if (active) {
+      if (active.requestId === request.requestId) return { accepted: true as const };
+      throw new Error('当前轮次的讨论仍在进行，请等待完成后再开启新讨论');
+    }
+    const admitted = await this.admitUserPrompt(request);
+    this.discussions.set(request.sessionId, { requestId: request.requestId, content: admitted.content });
+    try {
+      const sourceContent = [...admitted.content];
+      if (request.prompt.trim() && sourceContent.at(-1)?.type === 'text') sourceContent.pop();
+      admitted.source.followup(createUserMessage({ content: [{ type: 'text', text: `/discuss ${request.prompt.trim() || '处理附件任务'}` }, ...sourceContent], source: { kind: 'user', rpcId: request.requestId } }));
+      await this.ctx.sessions.flush(admitted.source.session);
+      admitted.binding?.commit();
+      return { accepted: true as const };
+    } catch (error) {
+      this.discussions.delete(request.sessionId);
+      throw error;
+    } finally { admitted.binding?.[Symbol.dispose](); }
+  }
+
+  async discuss(source: string, raw: unknown): Promise<DiscussionResult> {
+    const request = discussionRequest.parse(raw);
+    await this.agent(source);
+    const authorization = this.discussions.get(source);
+    if (!authorization) throw new Error('请先由用户使用 /discuss 明确开启讨论模式');
+    const inputHash = createHash('sha256').update(JSON.stringify(request)).digest('hex');
+    if (authorization.work) {
+      if (authorization.inputHash !== inputHash) throw new Error('本轮讨论已使用不同分工启动，不能再次创建会话');
+      return authorization.work;
+    }
+    authorization.inputHash = inputHash;
+    return authorization.work = this.runDiscussion(source, authorization, request.assignments);
+  }
+
+  private async runDiscussion(source: string, authorization: { requestId: string; content: ContentBlock[] }, assignments: z.infer<typeof discussionRequest>['assignments']): Promise<DiscussionResult> {
+    const participants: Array<{ sessionId: SessionId; harness: 'dsh' | Binding['harness']; role?: string; task: string }> = [];
+    for (const [index, assignment] of assignments.entries()) {
+      const requestId = `${authorization.requestId}:participant:${index}`;
+      const role = assignment.role ? `角色：${assignment.role}\n` : '';
+      const prompt = `${role}分工：${assignment.task}`;
+      const requestHash = createHash('sha256').update(JSON.stringify([authorization.requestId, index, assignment])).digest('hex');
+      const created = await this.delegate(source, { requestId, harness: assignment.harness, prompt, title: `讨论 · ${assignment.role ?? assignment.task}`.slice(0, 80), reportBack: false }, {
+        content: [...authorization.content, { type: 'text', text: `\n\n[讨论分工]\n${prompt}\n独立完成本轮分析；不要等待或联系其他参与者。` }], requestHash,
+      });
+      participants.push({ sessionId: created.sessionId, harness: created.harness, ...(assignment.role ? { role: assignment.role } : {}), task: assignment.task });
+    }
+    await Promise.all(participants.map(async participant => (await this.agent(participant.sessionId)).whenIdle()));
+    const first = await Promise.all(participants.map(async participant => ({ ...participant, ...await this.readDiscussionResult(source, participant.sessionId) })));
+    if (participants.length > 1) {
+      await Promise.all(participants.map(async (participant, index) => {
+        const peers = first.filter((_, peer) => peer !== index).map((entry, peer) => `参与者 ${peer + 1}${entry.role ? `（${entry.role}）` : ''}：\n${entry.text.slice(0, 12_000)}`).join('\n\n');
+        await this.ctx.sessionController.prompt({ sessionId: participant.sessionId, requestId: brandString<SessionRequestId>(`${authorization.requestId}:review:${index}`), mode: 'queue',
+          content: [{ type: 'text', text: `[讨论互评 · 第 2/2 轮]\n请审阅其他参与者的结果，指出冲突、遗漏或可合并之处，并给出修正后的结论。不要创建新会话。\n\n${peers}` }] }, new AbortController().signal);
+      }));
+      await Promise.all(participants.map(async participant => (await this.agent(participant.sessionId)).whenIdle()));
+    }
+    const results = await Promise.all(participants.map(async participant => {
+      const result = await this.readDiscussionResult(source, participant.sessionId);
+      return { sessionId: participant.sessionId, harness: participant.harness, ...(participant.role ? { role: participant.role } : {}), task: participant.task, status: result.status, text: result.text };
+    }));
+    return { peerReview: participants.length > 1, participants: results };
+  }
+
+  private async readDiscussionResult(source: string, sessionId: string) {
+    const summary = await this.readDelegation(source, { sessionId, limit: 1 });
+    return this.readDelegation(source, { sessionId, offset: Math.max(0, summary.totalChars - 16_000), limit: 16_000, throughSeq: summary.throughSeq });
   }
 
   async readDelegation(source: string, raw: unknown) {
@@ -501,7 +612,12 @@ export class HarnessService extends TypertRemoteService {
       const binding = await this.bindings.readDelegated(id);
       if (!binding) return;
       const end = child.session.snapshotEvents().findLast(event => event.type === 'turn/end');
-      if (!end || (binding.delegation.notifiedSeq ?? -1) >= end.seq) return;
+      if (!end || binding.delegation.notifiedSeq !== undefined) return;
+      if (binding.delegation.reportBack === false) {
+        binding.delegation.notifiedSeq = end.seq;
+        await this.bindings.writeDelegated(binding);
+        return;
+      }
       const parentId = binding.delegation.parentSessionId;
       if ((await this.bindings.read(parentId))?.pending && this.ctx.agents.get(SessionId(parentId))?.status !== 'running') return;
       const parent = await this.agent(parentId);

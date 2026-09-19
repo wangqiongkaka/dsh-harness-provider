@@ -32,5 +32,9 @@ test('quota remaining and context used have opposite arcs but the same scarcity 
    // Empty arcs retain a faint state-colored track, including exhausted quota.
    assert.deepEqual(await page.locator('.hp-track').evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).stroke)),[expected,expected]);
   }
+  // The ring matches the percentage printed beside it, not a per-model window that only the panel lists.
+  const mixed=renderToStaticMarkup(React.createElement(QuotaChip,{quota:{kind:'windows',source:'test',plan:null,windows:[{id:'five_hour',label:'5h',usedPercent:1,resetsAt:null},{id:'product:opus',label:'Opus',usedPercent:40,resetsAt:null}]},t:key=>key}));
+  assert.match(mixed,/ 99%/);
+  assert.match(mixed,new RegExp(`stroke-dashoffset="${2*Math.PI*5.5/100}"`));
  } finally {await browser.close();}
 });
