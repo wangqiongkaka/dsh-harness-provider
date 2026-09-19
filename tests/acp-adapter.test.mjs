@@ -60,7 +60,9 @@ const app = agent({ name: 'peer' })
     const turn = ++counter, userId = 'u' + turn, replyId = 'm' + turn;
     const entries = load();
     const reply = async body => { await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: body } }); entries.push({ input: raw, userId, reply: body, replyId }); save(entries); };
-    const end = usage => ({ stopReason: 'end_turn', usage: usage ?? { inputTokens: 100 * turn, outputTokens: 10 * turn, cachedReadTokens: 5 * turn, totalTokens: 115 * turn } });
+    // Both bundled adapters report inputTokens without cached tokens (codex-acp toTokenCount, claude-agent-acp sessionUsage);
+    // the fixture mirrors that wire shape, so cached input travels only in its own buckets.
+    const end = usage => ({ stopReason: 'end_turn', usage: usage ?? { inputTokens: 100 * turn, outputTokens: 10 * turn, cachedReadTokens: 5 * turn, cachedWriteTokens: 2 * turn, totalTokens: 117 * turn } });
     if (text === 'cancel') { entries.push({ input: raw, userId }); save(entries); while (!cancelled) await new Promise(r => setTimeout(r, 10)); return { stopReason: 'cancelled' }; }
     if (text === 'wait') { while (!steered) await new Promise(r => setTimeout(r, 10)); await reply('steered:' + steered); return end(); }
     if (text === 'approve') {
@@ -245,7 +247,9 @@ test('turns stream text, apply hints, steer, cancel, and carry cumulative usage 
     assert.match(started.nativeTurnRef.nativeTurnKey, /^[0-9a-f]{16}\.1$/);
     assert.equal(events(seen, 'turn.completed')[0].nativeTurnRef.nativeTurnKey, started.nativeTurnRef.nativeTurnKey);
     const usage = events(seen, 'session.usage.changed').at(-1).usage;
-    assert.deepEqual(usage, { inputTokens: 1100, cachedInputTokens: 5, cacheWriteInputTokens: 0, outputTokens: 110, totalTokens: 1210 });
+    // HostUsage counts cached input inside inputTokens (usageDelta subtracts the buckets), so the turn's 100 uncached
+    // plus 5 read plus 2 written fold into the baseline's 1000.
+    assert.deepEqual(usage, { inputTokens: 1107, cachedInputTokens: 5, cacheWriteInputTokens: 2, outputTokens: 110, totalTokens: 1217 });
     value(await session.execute({ type: 'turn.start', turnId: 'host-2', input: [{ type: 'text', text: 'second' }] }));
     seen = await until(output, 'turn.completed');
     assert.equal(events(seen, 'item.completed')[0].snapshot.item.text, 'reply:second');

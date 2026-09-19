@@ -748,7 +748,11 @@ class AcpSession implements HarnessSession {
 
   #finishPrompt(active: ActiveTurn, response: acp.PromptResponse): void {
     if (response.usage) {
-      this.#totals = { inputTokens: this.#totals.inputTokens + response.usage.inputTokens, cachedInputTokens: this.#totals.cachedInputTokens + (response.usage.cachedReadTokens ?? 0),
+      // Both bundled adapters report inputTokens without cached tokens (codex-acp dist/index.js toTokenCount subtracts
+      // cachedInputTokens; claude-agent-acp acp-agent.js accumulates Anthropic's cache-exclusive input_tokens), while
+      // HostUsage counts cached input in inputTokens — usageDelta subtracts the buckets per turn. Fold them in here.
+      const cachedInput = (response.usage.cachedReadTokens ?? 0) + (response.usage.cachedWriteTokens ?? 0);
+      this.#totals = { inputTokens: this.#totals.inputTokens + response.usage.inputTokens + cachedInput, cachedInputTokens: this.#totals.cachedInputTokens + (response.usage.cachedReadTokens ?? 0),
         cacheWriteInputTokens: this.#totals.cacheWriteInputTokens + (response.usage.cachedWriteTokens ?? 0), outputTokens: this.#totals.outputTokens + response.usage.outputTokens };
       this.#publishUsage({ ...this.#totals, totalTokens: this.#totals.inputTokens + this.#totals.outputTokens }, active.hostId);
     }

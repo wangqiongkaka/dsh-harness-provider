@@ -256,3 +256,26 @@ Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工
 - 验证：新增适配器测试（后台任务开始/进度/结束的跟踪、不进入对话内容）、runner 测试（查看期间保活、离开后回收并保留子代理、后台任务期间保活且结束后重新计时）、服务层断言（保留的子代理回退、`viewing` 转发）、浏览器测试（外部会话可见时上报、隐藏时不上报、恢复可见立即补报，DSH 原生会话不上报）。逐项把对应实现改坏，相应测试均失败。
 
 
+
+## Harness 每轮用量口径修复（2026-09-19）
+
+### 问题
+
+- Codex / Claude Code 会话的「本轮用量」角标缺失或数字失真：未缓存输入恒为 0，总量漏掉缓存输入。真实绑定数据可见 `inputTokens: 88` 与 `cachedInputTokens: 3,467,527` 并存，契约（`contracts.ts`「`inputTokens` includes cached input」）被违反。
+
+### 根因（依据随包适配器实现，非文档转述）
+
+- `codex-acp` 1.12.0 `dist/index.js` `toTokenCount()`：`inputTokens: usage.inputTokens - usage.cachedInputTokens`，且 PromptResponse 的 usage 取自 `sessionState.lastTokenUsage`——只是该轮最后一次模型调用。
+- `claude-agent-acp` 0.78.0 `dist/acp-agent.js`：按 Anthropic 原生 `input_tokens`（不含 cache_read/cache_write）逐条累加，按轮重置。
+- 插件 `usageDelta()` 按契约再减一次缓存桶，`Math.max(0, …)` 把未缓存输入钳成 0。
+
+### 决定
+
+- 在 `#finishPrompt` 边界归一化：累加前把 `cachedReadTokens + cachedWriteTokens` 并入 `inputTokens`，`usageDelta` 无需改动；`totalTokens` 继续由归一化后的桶重算（`sessionTotal` 显示同步修正）。
+- 已知残留：Codex 的每轮用量仍是「该轮最后一次模型调用」口径（多步回合被低估），精确总量需要适配器暴露线程累计 `totalTokenUsage`（`dist/index.js` `handleTokenUsageUpdated` 已持有但不外露），属后续上游补丁议题。Claude 的每轮用量只含主循环（Task 子代理与压缩只进 `_meta.quota.model_usage`）。
+- 升级后第一轮的持久化基线是旧口径，未缓存输入可能仍被钳为 0，之后自愈。
+
+### 验证
+
+- 先改测试确认红灯：现实现得 `inputTokens: 1100 / totalTokens: 1210`，期望 `1107 / 1217`（夹具补上 `cachedWriteTokens` 以覆盖写桶）。
+- `npm run check` 通过（60 项测试，含类型检查与构建）。
