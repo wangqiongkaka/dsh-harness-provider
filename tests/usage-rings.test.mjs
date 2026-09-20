@@ -56,7 +56,7 @@ test('delegation and discussion modes share composer styling with distinct color
  const browser=await chromium.launch({headless:true});
  try {
   const page=await browser.newPage();
-  const seat=(dock,id,command='/delegate ')=>`<div data-composer-seat><div>${dock}</div><div><div data-composer-card id="${id}"><div contenteditable><p><span style="color: var(--dsw-alias-state-warn-label);">${command}</span><span>实现登录</span></p></div></div></div></div>`;
+  const seat=(dock,id)=>`<div data-composer-seat><div>${dock}</div><div><div data-composer-card id="${id}"><div contenteditable><p><span>实现登录</span></p></div></div></div></div>`;
   await page.setContent(`<style>:root{--dsw-alias-state-warn-label:rgb(255, 128, 0);--dsw-static-blue-450:rgb(77, 107, 254)}${module.exports.styles}</style>`
    +seat('<div class="hp-delegate" data-hp-mode="delegate"><strong>委派模式</strong></div>','delegating')
    +seat('<div class="hp-delegate" data-hp-mode="discuss"><strong>讨论</strong></div>','discussing','/discuss ')+seat('','plain'));
@@ -65,119 +65,160 @@ test('delegation and discussion modes share composer styling with distinct color
   assert.match(await shadow('discussing'),/rgb\(77, 107, 254\)/);assert.equal(await shadow('plain'),'none');
   assert.equal(await page.locator('.hp-delegate[data-hp-mode=delegate]>strong').evaluate(node=>getComputedStyle(node).color),'rgb(255, 128, 0)');
   assert.equal(await page.locator('.hp-delegate[data-hp-mode=discuss]>strong').evaluate(node=>getComputedStyle(node).color),'rgb(77, 107, 254)');
-  // Mode tokens stay in the draft (and the submitted command) but are not shown in either mode.
-  const token=id=>page.locator(`#${id} p>span`).first().evaluate(node=>({width:node.getBoundingClientRect().width,color:getComputedStyle(node).color}));
-  assert.deepEqual(await token('delegating'),{width:0,color:'rgba(0, 0, 0, 0)'});
-  assert.equal(await page.locator('#delegating [contenteditable]').innerText(),'/delegate 实现登录');
-  assert.deepEqual(await token('discussing'),{width:0,color:'rgba(0, 0, 0, 0)'});
-  assert.equal(await page.locator('#discussing [contenteditable]').innerText(),'/discuss 实现登录');
+  for(const id of ['delegating','discussing']){
+   assert.equal(await page.locator(`#${id} [contenteditable]`).innerText(),'实现登录');
+   assert.ok(await page.locator(`#${id} p>span`).evaluate(node=>node.getBoundingClientRect().width)>0);
+  }
  } finally {await browser.close();}
 });
 
-// The host composer is Lexical with plain-text bindings, which deletes on keydown itself.
-test('task modes keep the hidden token and block empty sends in a Lexical editor', async () => {
+test('输入提示条与输入框在宽屏和窄屏下左右对齐', async () => {
+ const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require});
+ const hostCss=await readFile('node_modules/@deepseek-ai/dsh-client-ui-conversation/src/client/skeleton/InputBar.module.css','utf8');
+ const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage();
+  for(const width of [375,1440]){
+   await page.setViewportSize({width,height:600});
+   await page.setContent(`<style>:root{--dsh-composer-side-clearance:16px;--dsh-composer-card-max-width:780px}${hostCss}${module.exports.styles}</style><div data-composer-seat><div class="root"><div class="notice" role="status">已创建委派会话</div><div class="card" data-composer-card>输入框</div></div></div>`);
+   const bounds=await page.locator('[role=status],[data-composer-card]').evaluateAll(nodes=>nodes.map(node=>{const {left,right}=node.getBoundingClientRect();return {left,right};}));
+   assert.deepEqual(bounds[0],bounds[1],`${width}px 下提示条与输入框边缘一致`);
+  }
+ } finally {await browser.close();}
+});
+
+// Exercise the actual mode facade and editor keymap with the plugin docks.
+test('task modes edit only the body and submit through their own backend', async () => {
  const source=await readFile('src/client.tsx','utf8');
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const conversation=resolve('node_modules/@deepseek-ai/dsh-client-ui-conversation'), lexical=name=>resolve(conversation,'node_modules',name);
  const bundle=await build({stdin:{contents:source+`\nimport {createRoot} from 'react-dom/client';
-import {createEditor,$getRoot,$getSelection,$createParagraphNode,$createTextNode,KEY_ENTER_COMMAND,COMMAND_PRIORITY_CRITICAL} from 'lexical';
-import {registerPlainText} from '@lexical/plain-text';
-import {registerClaimDecoration} from '${conversation}/src/client/input/editor/claim-decor.ts';
+import {$getRoot} from 'lexical';
+import {SessionInputShell} from '${conversation}/src/client/input/facade.ts';
+import {registerComposerKeymap} from '${conversation}/src/client/input/editor/keymap.ts';
 document.head.append(Object.assign(document.createElement('style'),{textContent:styles}));
-const editor=createEditor({namespace:'composer',onError(error){throw error;}});
-editor.setRootElement(document.querySelector('[contenteditable]'));
-let token='/delegate ';
-registerPlainText(editor);registerClaimDecoration(editor,()=>token);
-editor.registerCommand(KEY_ENTER_COMMAND,event=>{event?.preventDefault();document.body.dataset.sent=String(Number(document.body.dataset.sent??0)+1);return true;},COMMAND_PRIORITY_CRITICAL);
+window.requests=[];
+window.fail=false;
+const respond=async(mode,request)=>{window.requests.push({mode,...request});if(window.delay)await new Promise(resolve=>window.finish=resolve);if(window.fail)throw new Error('retry');return {ok:true,value:{sessionId:'child',accepted:true}};};
+const remote={delegateFromUser:request=>respond('delegate',request),startDiscussionFromUser:request=>respond('discuss',request)};
+const commandUi={async candidates(){return [];},dispatch(){},matchSpace(){},async matchEnter(){}};
+window.released=[];
+const conversation={async sendSession(session,text){window.requests.push({mode:'plain',prompt:text});return {kind:'success'};},async serializeDraftAttachments(ids){return {attachments:ids.map(receiptId=>({type:'file',receiptId}))};},releaseDraftAttachment(id){window.released.push(id);}};
+apply({remote:{harness:remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},inject(keys,fn){if((keys.includes('conversation')&&keys.includes('remote.harness'))||keys.includes('commandUi'))fn({conversation,commandUi,remote:{harness:remote},effect(fn){fn();}});}});
+const shell=new SessionInputShell({actx:{},defaultSink:(text,ids,mode,signal)=>conversation.sendSession({sessionId:'s'},text,ids,mode,signal),commandAttachments:{serialize:async()=>[],release(){},unsupportedNotice:()=>''}});
+shell.editor.setRootElement(document.querySelector('[contenteditable]'));
 const root=createRoot(document.querySelector('#dock'));
-window.reset=(mode,task)=>{
- delete document.body.dataset.sent;
- token=mode==='discuss'?'/discuss ':'/delegate ';
- const input={phase:'claimed',claim:{name:mode,token},draft:token+task,attachmentIds:[],draftRev:1,occurrences:[],queue:[]};
- root.render(<DelegationDock sessionId="s" input={input} inputActions={{setDraft(){}}} t={key=>key} />);
- editor.update(()=>{const paragraph=$createParagraphNode().append($createTextNode(token).setStyle('color: var(--dsw-alias-state-warn-label)'));if(task)paragraph.append($createTextNode(task));$getRoot().clear().append(paragraph);paragraph.selectEnd();},{discrete:true});
- editor.focus();
+const render=()=>{
+ const input=shell.snapshot;
+ root.render(<DelegationDock sessionId="s" input={input} inputActions={shell.actions} t={key=>key} />);
+ document.querySelector('#send').disabled=(!input.draft.trim()&&!input.attachmentIds.length)||input.phase==='submitting';
 };
-// Safari composes without a keydown first; with the token's style on the selection, Lexical composes inside the token's node.
-window.inheritTokenStyle=()=>editor.update(()=>$getSelection().setStyle('color: var(--dsw-alias-state-warn-label)'),{discrete:true});
-window.selectedHarnesses=mode=>mode==='delegate'?optionsFor('s').harnesses:discussionFor('s');`,resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'browser',format:'iife',jsx:'automatic',
+shell.state.subscribe(render);render();
+document.querySelector('#send').onclick=()=>shell.submit();
+registerComposerKeymap(shell.editor,{arbitrate:()=> 'pass',space:()=>false,dismissPopup(){},canSubmit:()=>!document.querySelector('#send').disabled,submit:()=>shell.submit(),intakeFiles(){},pasteText:text=>shell.paste(text)});
+window.reset=(mode,task)=>{
+ setTaskMode('s');
+ const token=mode==='discuss'?'/discuss ':'/delegate ';
+ shell.setDraft(token+task);
+ const outcome=commandUi.matchSpace({sessionId:'s'},token.trim());
+ shell.insertText(outcome.text,{start:0,end:token.length,draftRev:shell.snapshot.draftRev});
+ shell.editor.update(()=>$getRoot().selectEnd(),{discrete:true});shell.focus();
+};
+window.snapshot=()=>({...shell.snapshot,taskMode:taskModes.get('s')?.task.name});
+window.attach=()=>shell.addAttachments(['receipt']);
+window.plain=text=>{setTaskMode('s');shell.setDraft(text);shell.submit();};
+window.selectedHarnesses=mode=>mode==='delegate'?optionsFor('s').harnesses:discussionFor('s');`,resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'browser',format:'iife',jsx:'automatic',loader:{'.css':'empty','.module.css':'empty'},
   alias:{react:require.resolve('react'),'react/jsx-runtime':require.resolve('react/jsx-runtime'),'react-dom/client':require.resolve('react-dom/client'),lexical:lexical('lexical'),'@lexical/plain-text':lexical('@lexical/plain-text')}});
  const browser=await chromium.launch({headless:true});
  try {
-  const page=await browser.newPage();
-  await page.setContent('<div data-composer-seat><div id="dock"></div><div data-composer-card><div contenteditable style="white-space:pre-wrap"></div><button class="RVCQnG_primary">send</button></div></div>');
+  const page=await browser.newPage(),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  await page.setContent('<div data-composer-seat><div id="dock"></div><div data-composer-card><div contenteditable style="white-space:pre-wrap"></div><button id="send">send</button></div></div>');
   await page.addScriptTag({content:bundle.outputFiles[0].text});
-  const text=()=>page.locator('[contenteditable]').innerText();
+  const text=()=>page.locator('[contenteditable]').textContent();
   const settle=()=>page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,50)));
   const reset=async(task,mode='delegate')=>{await page.evaluate(({mode,task})=>window.reset(mode,task),{mode,task});await page.locator(`.hp-delegate[data-hp-mode=${mode}]`).waitFor();await settle();};
-  await reset('ab');
-  for(let i=0;i<5;i++)await page.keyboard.press('Backspace');
-  assert.equal(await text(),'/delegate ','held Backspace stops at the token');
-  await reset('ab');
-  await page.keyboard.press('Home');await settle();await page.keyboard.press('Backspace');await page.keyboard.press('Delete');
-  assert.equal(await text(),'/delegate b','the caret never enters the token');
-  await reset('ab');
-  for(let i=0;i<4;i++)await page.keyboard.press('ArrowLeft');
-  await settle();await page.keyboard.press('Backspace');
-  assert.equal(await text(),'/delegate ab');
-  await reset('ab');
-  await page.keyboard.press('ControlOrMeta+a');await settle();await page.keyboard.press('Backspace');
-  assert.equal(await text(),'/delegate ','select-all clears only the task');
-  await reset('ab');
-  await page.keyboard.press('Meta+Backspace');
-  assert.equal(await text(),'/delegate ab');
-  await reset('');
-  assert.equal(await page.locator('[data-composer-card] button').evaluate(node=>getComputedStyle(node).pointerEvents),'none','an empty task greys out send');
-  await page.keyboard.press('Enter');
-  assert.equal(await page.evaluate(()=>document.body.dataset.sent),undefined,'Enter does not send an empty task');
-  await reset('ab');
-  assert.equal(await page.locator('[data-composer-card] button').evaluate(node=>getComputedStyle(node).pointerEvents),'auto');
-  await page.keyboard.press('Enter');
-  assert.equal(await page.evaluate(()=>document.body.dataset.sent),'1');
-  await reset('ab','discuss');
-  for(let i=0;i<5;i++)await page.keyboard.press('Backspace');
-  assert.equal(await text(),'/discuss ','discussion holds its mode token');
-  await reset('','discuss');
-  assert.equal(await page.locator('[data-composer-card] button').evaluate(node=>getComputedStyle(node).pointerEvents),'none','an empty discussion greys out send');
-  await page.keyboard.press('Enter');
-  assert.equal(await page.evaluate(()=>document.body.dataset.sent),undefined,'Enter does not start an empty discussion');
-  await reset('');
-  await page.evaluate(()=>window.inheritTokenStyle());
-  const cdp=await page.context().newCDPSession(page);
-  for(const text of ['w','wo'])await cdp.send('Input.imeSetComposition',{text,selectionStart:text.length,selectionEnd:text.length});
-  await settle();
-  const composed=await page.locator('[contenteditable] p>span').first().evaluate(span=>{
-   const text=span.firstChild,range=document.createRange();range.setStart(text,'/delegate '.length);range.setEnd(text,text.length);
-   const box=span.getBoundingClientRect(),rest=range.getBoundingClientRect(),style=getComputedStyle(span);
-   return {text:span.textContent.replace(/\u200b/g,''),width:Math.round(box.width),rest:Math.round(rest.width),left:box.left===span.closest('[contenteditable]').getBoundingClientRect().left,color:style.color,overflow:style.overflow};
-  });
-  assert.equal(composed.text,'/delegate wo','the IME composes inside the token node');
-  assert.ok(composed.rest>0);
-  assert.deepEqual({width:composed.width,left:composed.left,overflow:composed.overflow},{width:composed.rest,left:true,overflow:'clip'},'only the composed text shows, from the start of the line');
-  assert.notEqual(composed.color,'rgba(0, 0, 0, 0)');
-  await cdp.send('Input.insertText',{text:'我'});await settle();
-  assert.equal(await text(),'/delegate 我');
-  await page.keyboard.press('Backspace');await settle();
-  assert.equal((await text()).replace(/\u200b/g,''),'/delegate ','输入法提交后可以删掉最后一个字符');
-  // Both real mode docks allow independent toggles and keep at least one recipient.
+  for(const mode of ['delegate','discuss']){
+   await reset('ffff',mode);
+   assert.equal(await text(),'ffff','DOM 中只有正文');
+   assert.equal((await page.evaluate(()=>window.snapshot())).draft,'ffff');
+   for(let i=0;i<5;i++)await page.keyboard.press('Backspace');
+   assert.equal(await text(),'');
+   assert.equal((await page.evaluate(()=>window.snapshot())).draft,'');
+   assert.equal((await page.evaluate(()=>window.snapshot())).taskMode,mode,'删空保留模式');
+   await page.keyboard.press('Enter');
+   assert.equal(await page.evaluate(()=>window.requests.length),0,'空正文不发送');
+   await page.keyboard.type('ab');await page.keyboard.press('Home');await settle();await page.keyboard.press('Delete');
+   assert.equal(await text(),'b','行首可以前向删除');
+   await page.keyboard.press('ControlOrMeta+a');
+   assert.equal(await page.evaluate(()=>document.getSelection().toString()),'b','选区没有隐藏指令');
+   await page.keyboard.press('Backspace');
+   const cdp=await page.context().newCDPSession(page);
+   for(const value of ['w','wo'])await cdp.send('Input.imeSetComposition',{text:value,selectionStart:value.length,selectionEnd:value.length});
+   await cdp.send('Input.insertText',{text:'我'});await settle();
+   assert.equal(await text(),'我');
+   await page.keyboard.press('Backspace');await settle();
+   assert.equal(await text(),'');
+   await page.keyboard.insertText('保留正文');
+   await page.locator('.hp-delegate-exit').click();await settle();
+   assert.equal(await text(),'保留正文');
+   assert.equal((await page.evaluate(()=>window.snapshot())).phase,'plain');
+  }
   await reset('task');
   const selector=page.locator('.hp-delegate-harness');
-  assert.equal(await selector.getByRole('checkbox',{name:'Codex',exact:true}).getAttribute('aria-checked'),'true');
   await selector.getByRole('checkbox',{name:'Claude Code',exact:true}).click();
   assert.deepEqual(await page.evaluate(()=>window.selectedHarnesses('delegate')),['codex','claude-code']);
-  await selector.getByRole('checkbox',{name:'Codex',exact:true}).click();
-  await selector.getByRole('checkbox',{name:'Claude Code',exact:true}).click();
-  assert.deepEqual(await page.evaluate(()=>window.selectedHarnesses('delegate')),['claude-code'],'the last selected target cannot be cleared');
-  await selector.getByRole('checkbox',{name:'native',exact:true}).click();
-  assert.deepEqual(await page.evaluate(()=>window.selectedHarnesses('delegate')),['claude-code','dsh']);
-  assert.equal(await page.getByRole('checkbox',{name:'worktree',exact:true}).isDisabled(),true);
-  await reset('task','discuss');
-  assert.equal(await selector.getByRole('checkbox',{name:'native',exact:true}).isDisabled(),true);
-  assert.equal(await selector.getByRole('checkbox',{name:'Codex',exact:true}).getAttribute('aria-checked'),'true');
-  assert.equal(await selector.getByRole('checkbox',{name:'Claude Code',exact:true}).getAttribute('aria-checked'),'true');
-  await selector.getByRole('checkbox',{name:'Codex',exact:true}).click();
-  assert.deepEqual(await page.evaluate(()=>window.selectedHarnesses('discuss')),['claude-code']);
-  await selector.getByRole('checkbox',{name:'Codex',exact:true}).click();
-  assert.deepEqual(await page.evaluate(()=>window.selectedHarnesses('discuss')),['claude-code','codex']);
+  await page.evaluate(()=>{window.fail=true;});
+  await page.locator('#send').click();await settle();
+  assert.equal(await text(),'task','失败保留正文');
+  assert.equal((await page.evaluate(()=>window.snapshot())).taskMode,'delegate');
+  await page.evaluate(()=>{window.fail=false;});
+  await page.locator('#send').click();await settle();
+  const requests=await page.evaluate(()=>window.requests);
+  assert.equal(requests[0].prompt,'task');assert.equal(requests[1].prompt,'task');
+  assert.deepEqual(requests[1].harnesses,['codex','claude-code']);
+  assert.equal(requests[0].requestId,requests[1].requestId,'重试沿用请求标识');
+  assert.equal(await text(),'');
+  await reset('比较方案','discuss');
+  await page.locator('#send').click();await settle();
+  assert.equal((await page.evaluate(()=>window.requests)).at(-1).mode,'discuss');
+  assert.equal((await page.evaluate(()=>window.requests)).at(-1).prompt,'比较方案');
+  await reset('','delegate');
+  await page.evaluate(()=>{window.attach();window.fail=true;});
+  await page.locator('#send').click();await settle();
+  assert.deepEqual((await page.evaluate(()=>window.snapshot())).attachmentIds,['receipt'],'附件失败后恢复');
+  assert.deepEqual(await page.evaluate(()=>window.released),[]);
+  await page.evaluate(()=>{window.fail=false;});
+  await page.locator('#send').click();await settle();
+  assert.deepEqual((await page.evaluate(()=>window.requests)).at(-1).attachments,[{type:'file',receiptId:'receipt'}]);
+  assert.deepEqual(await page.evaluate(()=>window.released),['receipt']);
+  await page.evaluate(()=>window.plain('普通消息'));await settle();
+  assert.equal((await page.evaluate(()=>window.requests)).at(-1).mode,'plain');
+  await page.evaluate(()=>{window.fail=true;window.plain('/delegate 粘贴任务');});await settle();
+  await page.evaluate(()=>{window.fail=false;});await page.locator('#send').click();await settle();
+  assert.equal((await page.evaluate(()=>window.requests)).at(-1).prompt,'粘贴任务','粘贴指令失败重试不会把指令混进正文');
+  for(const mode of ['delegate','discuss']){
+   await reset('延迟失败时保留的正文',mode);
+   await page.evaluate(()=>{window.attach();window.delay=true;window.fail=true;});
+   await page.locator('#send').click();await settle();
+   assert.equal(await page.locator('[data-composer-seat]').evaluate(node=>node.inert),true,'发送中锁定整个输入区');
+   await page.locator('[contenteditable]').evaluate(node=>node.focus());
+   await page.keyboard.insertText('不能覆盖原稿');
+   await page.keyboard.press('Enter');
+   await page.evaluate(()=>window.finish());await settle();
+   assert.equal(await text(),'延迟失败时保留的正文');
+   assert.deepEqual((await page.evaluate(()=>window.snapshot())).attachmentIds,['receipt']);
+   assert.equal((await page.evaluate(()=>window.snapshot())).taskMode,mode);
+   assert.equal(await page.locator('[data-composer-seat]').evaluate(node=>node.inert),false,'失败后恢复编辑');
+   await page.evaluate(()=>{window.delay=false;window.fail=false;});
+   await page.locator('#send').click();await settle();
+   assert.equal(await text(),'');
+   assert.equal((await page.evaluate(()=>window.snapshot())).taskMode,undefined);
+   assert.equal(await page.locator('[data-composer-seat]').evaluate(node=>node.inert),false,'成功后恢复编辑');
+  }
+  assert.deepEqual(errors,[]);
  } finally {await browser.close();}
 });

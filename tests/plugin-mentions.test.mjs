@@ -14,28 +14,10 @@ test('task mode dock follows the composer card width axis', async () => {
  assert.match(rule,/margin:0 auto/);
 });
 
-test('delegation mode blocks keys that would edit the hidden token or send an empty task', async () => {
- const source=await readFile('src/client.tsx','utf8');
- const bundle=await build({stdin:{contents:source+'\nexport {guardDelegateToken};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
- const module={exports:{}};
- runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require:createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'))});
- const guard=(key,start,{collapsed=true,empty=false,...keys}={})=>module.exports.guardDelegateToken({key,shiftKey:false,metaKey:false,isComposing:false,...keys},start,collapsed,empty,'/delegate ');
- assert.equal(guard('Backspace',10),true,'the caret right after the token');
- assert.equal(guard('Backspace',9),true,'a bare /delegate still holds the mode');
- assert.equal(guard('Backspace',11),false);
- assert.equal(guard('Backspace',14,{metaKey:true}),true,'deleting to the line start');
- assert.equal(guard('Backspace',undefined),false,'a later paragraph');
- assert.equal(guard('Backspace',5,{collapsed:false}),true,'a selection covering the token');
- assert.equal(guard('Delete',9),true);assert.equal(guard('Delete',10),false);
- assert.equal(guard('Backspace',10,{isComposing:true}),false,'IME composition owns its keys');
- assert.equal(guard('Enter',10,{empty:true}),true);assert.equal(guard('Enter',10,{empty:true,shiftKey:true}),false);assert.equal(guard('Enter',12),false);
- assert.equal(guard('ArrowLeft',10,{empty:true}),false);
-});
-
 // Runs the real client entry with only the `@` source's services present.
 test('the @ plugin source lists Harness plugins after files and inserts the native mention text', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const notion={name:'notion',displayName:'Notion',description:'Notion docs and workflows',mention:'[@notion](plugin://notion@openai-curated)'};
@@ -64,7 +46,7 @@ test('the @ plugin source lists Harness plugins after files and inserts the nati
 
 test('the DSH / command source keeps file, goal, plan, compact and localized clear beside delegate and discuss in Harness sessions', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const rows=['file','model','goal','plan','compact','clear','export'];
@@ -98,21 +80,24 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
  assert.equal(typeof clear.icon,'function','clear keeps the command menu icon column');
  const session={sessionId:'codex'},candidate=(await commandUi.candidates(session,{query:'del'}))[0];
  const delegated=commandUi.dispatch({candidate,session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
- assert.equal(delegated.claim.attachments,true);
- assert.equal(commandUi.matchSpace(session,'/delegate').claim.name,'delegate');
- assert.equal((await commandUi.matchEnter(session,'/delegate task')).claim.name,'delegate');
+ assert.equal(delegated.text,'');const delegation=module.exports.taskModes.get(session.sessionId).task;
+ module.exports.setTaskMode(session.sessionId);
+ assert.equal(commandUi.matchSpace(session,'/delegate').text,'');
+ assert.equal(await commandUi.matchEnter(session,'/delegate task'),undefined);
  const image={type:'image',mediaType:'image/png',data:'AA=='};
- assert.deepEqual(JSON.parse(JSON.stringify(await delegated.claim.submit('处理图片',{},[image]))),{kind:'success',text:'已创建委派会话'});
+ assert.deepEqual(JSON.parse(JSON.stringify(await delegation.submit('处理图片',{},[image]))),{kind:'success',text:'已创建委派会话'});
  const submitted=JSON.parse(JSON.stringify(delegations[0]));delete submitted.requestId;
  assert.deepEqual(submitted,{sessionId:'codex',harnesses:['codex'],prompt:'处理图片',attachments:[image],reportBack:false,worktree:false});
+ module.exports.setTaskMode(session.sessionId);
  const discussCandidate=(await commandUi.candidates(session,{query:'dis'}))[0];
  const discussed=commandUi.dispatch({candidate:discussCandidate,session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
- assert.equal(discussed.claim.attachments,true);
- assert.equal(commandUi.matchSpace(session,'/discuss').claim.name,'discuss');
- assert.equal((await commandUi.matchEnter(session,'/discuss compare')).claim.name,'discuss');
- assert.deepEqual(JSON.parse(JSON.stringify(await discussed.claim.submit('比较方案',{},[image]))),{kind:'success',text:'已开始讨论'});
+ assert.equal(discussed.text,'');const discussionTask=module.exports.taskModes.get(session.sessionId).task;
+ assert.equal(commandUi.matchSpace(session,'/discuss'),undefined,'模式内不重复接管指令');
+ assert.equal(await commandUi.matchEnter(session,'/discuss compare'),undefined);
+ assert.deepEqual(JSON.parse(JSON.stringify(await discussionTask.submit('比较方案',{},[image]))),{kind:'success',text:'已开始讨论'});
  const discussion=JSON.parse(JSON.stringify(discussions[0]));delete discussion.requestId;
  assert.deepEqual(discussion,{sessionId:'codex',prompt:'比较方案',attachments:[image],harnesses:['codex','claude-code']});
+ module.exports.setTaskMode(session.sessionId);
  assert.equal(await commandUi.matchEnter({sessionId:'codex'},'/compact'),'handled:/compact','the server runs /compact on Codex');
  assert.equal(await commandUi.matchEnter({sessionId:'codex'},'/model gpt-5'),undefined,'a typed /model is sent to Codex as a prompt');
  assert.equal(await commandUi.matchEnter({sessionId:'native'},'/model'),'handled:/model');
@@ -127,44 +112,49 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
 
 test('after /delegate the / menu lists only this session\'s skills and the hand-off waits for them', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  class CommandUi {
   async candidates(){return [{name:'compact'}];}
   dispatch(){return 'handled';} matchSpace(_session,token){return 'handled:'+token;} async matchEnter(){return 'handled';}
  }
- class Controller { constructor(){this.guards=[];} track(draft,_caret,guard){this.guards.push(guard.tier);} }
- const commandUi=new CommandUi(), controllers=new Map(), disposers=[];
- const inputTriggers={sessionOf(actx){if(!controllers.has(actx.id))controllers.set(actx.id,new Controller());return controllers.get(actx.id);}};
+ const commandUi=new CommandUi(), disposers=[];
  const remote={harness:{async state(){return {ok:true,value:{harness:'dsh'}};},async delegateFromUser(request){return {ok:true,value:{harness:request.harness,accepted:true}};}}};
  const ctx={
   remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
   inject(keys,apply){
-   const scope={commandUi,inputTriggers,sessions:{sessionOf:actx=>({sessionId:actx.id})},remote,effect(fn){disposers.push(fn());}};
-   if(keys.includes('commandUi')||(keys.includes('inputTriggers')&&keys.includes('sessions')))apply(scope);
+   const scope={commandUi,remote,effect(fn){disposers.push(fn());}};
+   if(keys.includes('commandUi'))apply(scope);
   },
  };
  await module.exports.apply(ctx);
- const controller=inputTriggers.sessionOf({id:'s1'}),session={sessionId:'s1'};
- controller.track('/delegate /han',14,{tier:'claimed'},1);
- assert.equal(controller.guards.at(-1),'plain','/ after the /delegate token opens the menu');
+ const session={sessionId:'s1'};
+ commandUi.matchSpace(session,'/delegate');
+
  assert.deepEqual(Array.from(await commandUi.candidates(session,{query:'han',position:'inline'}),row=>row.name),[],'only skills: no command rows');
  assert.equal(commandUi.matchSpace(session,'/plan'),undefined,'a space after a skill does not claim a command');
- controller.track('/delegate task',5,{tier:'claimed'},2);
- assert.equal(controller.guards.at(-1),'claimed','inside the token / stays suppressed');
+ module.exports.setTaskMode(session.sessionId);
+
+ commandUi.matchSpace(session,'/discuss');
+ assert.equal(commandUi.matchSpace(session,'/goal'),undefined,'讨论正文中的空格不能触发宿主指令');
+ assert.deepEqual(Array.from(await commandUi.candidates(session,{query:'',position:'leading'})),[],'讨论模式不列出宿主指令');
+ assert.equal(commandUi.dispatch({candidate:{name:'goal'},session}),undefined,'过期菜单项不能绕过模式');
+ assert.equal(await commandUi.matchEnter(session,'/goal task'),undefined);
+ module.exports.setTaskMode(session.sessionId);
+
  assert.deepEqual(Array.from(await commandUi.candidates(session,{query:'',position:'inline'}),row=>row.name),['compact']);
- controller.track('/discuss /x',11,{tier:'claimed'},3);
- assert.equal(controller.guards.at(-1),'claimed','other claimed commands keep / suppressed');
+
  const delegated=commandUi.dispatch({candidate:{name:'delegate'},session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
- assert.equal((await delegated.claim.submit('/handoff 实现登录',{},[])).text,'delegatePrepared','no session yet while the skill runs here');
+ const delegation=module.exports.taskModes.get(session.sessionId).task;
+ assert.equal((await delegation.submit('/handoff 实现登录',{},[])).text,'delegatePrepared','no session yet while the skill runs here');
  for(const dispose of disposers)dispose?.();
- assert.equal(Object.hasOwn(inputTriggers,'sessionOf'),false);assert.equal(Object.hasOwn(controller,'track'),false);
+
 });
 
 test('the model seat follows the Harness of the main-view session and task modes render above the composer', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){},setInterval:()=>1,clearInterval(){}});
@@ -189,8 +179,10 @@ test('the model seat follows the Harness of the main-view session and task modes
  const t=key=>({delegate:'委派',delegateMode:'委派模式',native:'DSH 原生',reportBack:'完成后回传到当前会话',reportBackOff:'结果仅保留在新会话，不唤醒当前会话',delegateExit:'退出委派模式',discuss:'讨论',discussHint:'主 Agent 自动选择 1–4 个会话；多个会话完成后互评一轮',discussExit:'退出讨论模式'})[key]??key;
  const common={sessionId:'draft',inputActions:{setDraft(){}},t};
  assert.equal(renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'plain',draft:'',attachmentIds:[],draftRev:0,occurrences:[],queue:[]}})),'');
+ module.exports.setTaskMode('draft',module.exports.delegationClaim({}, {sessionId:'draft'},t));
  const html=renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'claimed',claim:{name:'delegate',token:'/delegate '},draft:'/delegate task',attachmentIds:[],draftRev:1,occurrences:[],queue:[]}}));
  assert.match(html,/委派模式/);assert.match(html,/data-hp-mode="delegate"/);assert.match(html,/DSH 原生/);assert.match(html,/Codex/);assert.match(html,/Claude Code/);assert.match(html,/完成后回传到当前会话/);assert.match(html,/type="checkbox"/);
+ module.exports.setTaskMode('draft',module.exports.discussionClaim({}, {sessionId:'draft'},t));
  const discussionHtml=renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'claimed',claim:{name:'discuss',token:'/discuss '},draft:'/discuss task',attachmentIds:[],draftRev:1,occurrences:[],queue:[]}}));
  assert.match(discussionHtml,/讨论/);assert.match(discussionHtml,/1–4/);assert.match(discussionHtml,/data-hp-mode="discuss"/);assert.doesNotMatch(discussionHtml,/type="checkbox"/);
  api.changed('other','claude-code');
@@ -205,7 +197,7 @@ test('the model seat follows the Harness of the main-view session and task modes
 
 test('sidebar marks active turns as breathing, completed sessions as static, and closed sessions as gray', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}},row={dataset:{},'__reactFiber$x':{memoizedProps:{node:{id:'s'}}}},styles=[];
  let refresh,processRunning=true;
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,
@@ -239,7 +231,7 @@ test('sidebar marks active turns as breathing, completed sessions as static, and
 test('the subagents guide card names the plugin that provides it and opens the tab in place', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const React=require('react'), {renderToStaticMarkup}=require('react-dom/server');
- const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const cards=[];
@@ -253,6 +245,7 @@ test('the subagents guide card names the plugin that provides it and opens the t
  const opened=[];
  const t=key=>({providedBy:'由 dsh-harness-provider 插件提供'})[key]??key;
  const props={kind:'harness-subagents',title:'子代理',useTabInfo:()=>({tab:{actions:{openTab:(...args)=>opened.push(args)}}}),t};
+ module.exports.setTaskMode('draft',module.exports.delegationClaim({}, {sessionId:'draft'},t));
  const html=renderToStaticMarkup(React.createElement(cards[0].component,props));
  assert.match(html,/子代理/);assert.match(html,/由 dsh-harness-provider 插件提供/);
  assert.match(renderToStaticMarkup(React.createElement(cards[0].component,{...props,description:'查看子代理'})),/查看子代理/,'a description still shows while the host lists one');

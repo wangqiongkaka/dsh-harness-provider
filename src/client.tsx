@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode } from 'react';
 import type { Context } from '@deepseek-ai/cordis';
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
 import type {} from '@deepseek-ai/dsh-api-remotes/client';
 import type {} from '@deepseek-ai/dsh-api-session-controller/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
-import type {} from '@deepseek-ai/dsh-client-ui-conversation/client';
+import type { DraftAttachmentId, SubmitOutcome } from '@deepseek-ai/dsh-client-ui-conversation/client';
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client';
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client';
@@ -269,26 +269,6 @@ const delegationOptions = new Map<string, DelegationOptions>();
 const optionsFor = (sessionId: string): DelegationOptions => delegationOptions.get(sessionId) ?? { harnesses: ['codex'], reportBack: false, worktree: false };
 const discussionHarnesses = new Map<string, State['harness'][]>();
 const discussionFor = (sessionId: string): State['harness'][] => discussionHarnesses.get(sessionId) ?? ['codex', 'claude-code'];
-// The host keeps delegation mode only while the draft starts with the hidden `/delegate ` token (or is `/delegate`), so no
-// edit may reach into it, and an empty task has nothing to send. `start` is the selection's offset in the first paragraph.
-function guardDelegateToken(event: Pick<KeyboardEvent, 'key' | 'shiftKey' | 'metaKey' | 'isComposing'>, start: number | undefined, collapsed: boolean, emptyTask: boolean, token: string): boolean {
-  if (event.isComposing) return false;
-  if (event.key === 'Enter') return !event.shiftKey && emptyTask;
-  if ((event.key !== 'Backspace' && event.key !== 'Delete') || start === undefined) return false;
-  // ponytail: Cmd+Backspace is blocked anywhere in the first paragraph, even on a wrapped line that would leave the token.
-  return start < token.length || (event.key === 'Backspace' && collapsed && (start === token.length || event.metaKey));
-}
-// Text offset of a DOM point within `paragraph`; undefined when the point lies after it.
-function paragraphOffset(paragraph: Element, node: Node, offset: number): number | undefined {
-  const range = document.createRange();
-  range.selectNodeContents(paragraph);
-  const side = range.comparePoint(node, offset);
-  if (side !== 0) return side < 0 ? 0 : undefined;
-  range.setEnd(node, offset);
-  return range.toString().length;
-}
-// Sessions whose `/` menu currently sits after a `/delegate ` token: it offers only this session's skills, which run here before handing off.
-const delegateSkillMenus = new Set<string>();
 let delegationRequestSequence = 0;
 const delegationRequestId = () => globalThis.crypto?.randomUUID?.() ?? `delegate-${Date.now()}-${++delegationRequestSequence}`;
 const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
@@ -317,109 +297,70 @@ const discussionClaim = (remote: Api, session: ClientSessionContext, t: T): Comm
   };
 };
 
-function useTaskModeDock(input: DelegationDockProps['input']) {
-  const dock = useRef<HTMLDivElement>(null);
-  const token = input.claim?.token;
-  const attachments = input.attachmentIds.length;
-  useEffect(() => {
-    if (!token) return;
-    const seat=dock.current?.closest<HTMLElement>('[data-composer-seat]');
-    if (!seat) return;
-    // Held keys repeat faster than the draft prop re-renders, so both listeners read the editor's live DOM. Lexical deletes
-    // on keydown without checking defaultPrevented, so a guarded key also stops before reaching the editor.
-    const onKeyDown=(event: KeyboardEvent) => {
-      const editor=(event.target as Element | null)?.closest?.<HTMLElement>('[contenteditable]'), paragraph=editor?.firstElementChild, selection=document.getSelection();
-      if (!editor || !paragraph) return;
-      const range=selection?.rangeCount ? selection.getRangeAt(0) : undefined;
-      const start=range && paragraphOffset(paragraph,range.startContainer,range.startOffset);
-      const emptyTask=attachments === 0 && editor.innerText.replace(/\u00a0/g,' ').replace(/\u200b/g,'').slice(token.length).trim() === '';
-      if (guardDelegateToken(event,start,range?.collapsed ?? true,emptyTask,token)) { event.preventDefault(); event.stopPropagation(); }
-    };
-    // The draft's first text node, while it still starts with the token.
-    const tokenText=() => {
-      const paragraph=seat.querySelector('[contenteditable]')?.firstElementChild;
-      const text=paragraph && document.createTreeWalker(paragraph,NodeFilter.SHOW_TEXT).nextNode() as Text | null;
-      return paragraph && text?.data.startsWith(token.trimEnd()) ? { paragraph, text } : undefined;
-    };
-    // The caret and selections stay after the token, so select-all, Home or a click before the task never cover it.
-    const onSelection=() => {
-      const selection=document.getSelection(), found=tokenText();
-      if (!found || !selection?.anchorNode || !selection.focusNode || !seat.contains(selection.anchorNode)) return;
-      const { paragraph, text }=found, end=Math.min(token.length,text.length);
-      const clamp=(node: Node, offset: number): [Node, number] => (paragraphOffset(paragraph,node,offset) ?? end) < end ? [text,end] : [node,offset];
-      const [anchorNode,anchorOffset]=clamp(selection.anchorNode,selection.anchorOffset), [focusNode,focusOffset]=clamp(selection.focusNode,selection.focusOffset);
-      if (anchorNode !== selection.anchorNode || anchorOffset !== selection.anchorOffset || focusNode !== selection.focusNode || focusOffset !== selection.focusOffset)
-        selection.setBaseAndExtent(anchorNode,anchorOffset,focusNode,focusOffset);
-    };
-    // An IME can compose into the token's own text node (Lexical composes in place when the selection carries the token's
-    // style, and skips the host's splitting transform while composing), so the hidden box widens to show the text after it.
-    const reveal=() => {
-      const text=tokenText()?.text;
-      let rest=0;
-      if (text && text.length > token.length) {
-        const range=document.createRange();
-        range.setStart(text,token.length); range.setEnd(text,text.length);
-        rest=range.getBoundingClientRect().width;
-      }
-      dock.current?.toggleAttribute('data-hp-merged',rest > 0);
-      seat.style.setProperty('--hp-token-rest',`${rest}px`);
-    };
-    const observer=new MutationObserver(reveal);
-    observer.observe(seat,{subtree:true,childList:true,characterData:true});
-    reveal();
-    seat.addEventListener('keydown',onKeyDown,true);
-    document.addEventListener('selectionchange',onSelection);
-    return () => {
-      observer.disconnect(); seat.style.removeProperty('--hp-token-rest');
-      seat.removeEventListener('keydown',onKeyDown,true); document.removeEventListener('selectionchange',onSelection);
-    };
-  }, [token,attachments]);
-  return { dock, emptyTask: attachments === 0 && input.draft.slice(token?.length).trim() === '' };
+// Mode metadata never enters Lexical: the composer keeps an ordinary draft.
+const taskModes = new Map<string, { task: CommandClaim; busy: boolean }>();
+const taskModeListeners = new Set<() => void>();
+const publishTaskMode = () => { for (const listener of taskModeListeners) listener(); };
+const subscribeTaskMode = (listener: () => void) => { taskModeListeners.add(listener); return () => { taskModeListeners.delete(listener); }; };
+function setTaskMode(sessionId: string, task?: CommandClaim) {
+  if (task) taskModes.set(sessionId, { task, busy: false }); else taskModes.delete(sessionId);
+  publishTaskMode();
 }
 
-function TaskHarnessSelector({ selected, onChange, discussion = false, t }: { selected: State['harness'][]; onChange: (selected: State['harness'][]) => void; discussion?: boolean; t: T }) {
+function TaskHarnessSelector({ selected, onChange, discussion = false, disabled = false, t }: { selected: State['harness'][]; onChange: (selected: State['harness'][]) => void; discussion?: boolean; disabled?: boolean; t: T }) {
   const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code' };
   return <div className="hp-delegate-harness" role="group" aria-label={t('harness')}>
     {(Object.keys(names) as State['harness'][]).map(harness => <button key={harness} type="button" role="checkbox" aria-checked={selected.includes(harness)}
-      disabled={discussion && harness === 'dsh'} title={discussion && harness === 'dsh' ? t('discussNative') : undefined}
+      disabled={disabled || (discussion && harness === 'dsh')} title={discussion && harness === 'dsh' ? t('discussNative') : undefined}
       onClick={() => { const next = selected.includes(harness) ? selected.filter(value => value !== harness) : [...selected, harness]; if (next.length) onChange(next); }}>
       {selected.includes(harness) && <Check />}{names[harness]}
     </button>)}
   </div>;
 }
-function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationDockProps) {
+function DelegationDockActive({ sessionId, t }: DelegationDockProps) {
   const [options, setOptions] = useState(() => optionsFor(sessionId));
-  const { dock, emptyTask } = useTaskModeDock(input);
+  const busy = taskModes.get(sessionId)?.busy === true;
   const update = (next: DelegationOptions) => { delegationOptions.set(sessionId, next); setOptions(next); };
-  return <div ref={dock} className="hp-delegate" data-hp-mode="delegate" data-hp-empty={emptyTask ? '' : undefined} aria-label={t('delegateMode')}>
+  return <div className="hp-delegate" data-hp-mode="delegate" aria-label={t('delegateMode')}>
     <strong>{t('delegateMode')}</strong>
-    <TaskHarnessSelector selected={options.harnesses} onChange={harnesses => update({ ...options, harnesses, worktree: !harnesses.includes('dsh') && options.worktree })} t={t} />
+    <TaskHarnessSelector disabled={busy} selected={options.harnesses} onChange={harnesses => update({ ...options, harnesses, worktree: !harnesses.includes('dsh') && options.worktree })} t={t} />
     <label className="hp-delegate-report" title={options.harnesses.includes('dsh') ? t('worktreeNative') : t('worktreeHint')}>
-      <input type="checkbox" checked={options.worktree} disabled={options.harnesses.includes('dsh')} onChange={event => update({ ...options, worktree: event.target.checked })} />
+      <input type="checkbox" checked={options.worktree} disabled={busy || options.harnesses.includes('dsh')} onChange={event => update({ ...options, worktree: event.target.checked })} />
       <span>{t('worktree')}</span>
     </label>
     <label className="hp-delegate-report" title={!options.reportBack ? t('reportBackOff') : undefined}>
-      <input type="checkbox" checked={options.reportBack} onChange={event => update({ ...options, reportBack: event.target.checked })} />
+      <input type="checkbox" checked={options.reportBack} disabled={busy} onChange={event => update({ ...options, reportBack: event.target.checked })} />
       <span>{t('reportBack')}</span>
     </label>
-    <button type="button" className="hp-delegate-exit" aria-label={t('delegateExit')} title={t('delegateExit')}
-      onClick={() => { delegationOptions.delete(sessionId); inputActions.setDraft(input.draft.startsWith('/delegate ') ? input.draft.slice(10) : input.draft); }}>×</button>
+    <button type="button" className="hp-delegate-exit" disabled={busy} aria-label={t('delegateExit')} title={t('delegateExit')}
+      onClick={() => { delegationOptions.delete(sessionId); setTaskMode(sessionId); }}>×</button>
   </div>;
 }
-function DiscussionDockActive({ input, sessionId, inputActions, t }: DelegationDockProps) {
-  const { dock, emptyTask } = useTaskModeDock(input);
+function DiscussionDockActive({ sessionId, t }: DelegationDockProps) {
   const [selected, setSelected] = useState(() => discussionFor(sessionId));
-  return <div ref={dock} className="hp-delegate" data-hp-mode="discuss" data-hp-empty={emptyTask ? '' : undefined} aria-label={t('discuss')}>
+  const busy = taskModes.get(sessionId)?.busy === true;
+  return <div className="hp-delegate" data-hp-mode="discuss" aria-label={t('discuss')}>
     <strong title={t('discussHint')}>{t('discuss')}</strong>
-    <TaskHarnessSelector selected={selected} onChange={harnesses => { discussionHarnesses.set(sessionId, harnesses); setSelected(harnesses); }} discussion t={t} />
-    <button type="button" className="hp-delegate-exit" aria-label={t('discussExit')} title={t('discussExit')}
-      onClick={() => { discussionHarnesses.delete(sessionId); inputActions.setDraft(input.draft.startsWith('/discuss ') ? input.draft.slice(9) : input.draft); }}>×</button>
+    <TaskHarnessSelector disabled={busy} selected={selected} onChange={harnesses => { discussionHarnesses.set(sessionId, harnesses); setSelected(harnesses); }} discussion t={t} />
+    <button type="button" className="hp-delegate-exit" disabled={busy} aria-label={t('discussExit')} title={t('discussExit')}
+      onClick={() => { discussionHarnesses.delete(sessionId); setTaskMode(sessionId); }}>×</button>
   </div>;
 }
 function DelegationDock(props: DelegationDockProps) {
-  if (props.input.claim?.name === 'delegate') return <DelegationDockActive key={props.sessionId} {...props} />;
-  if (props.input.claim?.name !== 'discuss') return null;
-  return <DiscussionDockActive key={props.sessionId} {...props} />;
+  const mode = useSyncExternalStore(subscribeTaskMode, () => taskModes.get(props.sessionId), () => taskModes.get(props.sessionId));
+  const dock = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const seat = dock.current?.closest<HTMLElement>('[data-composer-seat]');
+    if (!mode?.busy || !seat) return;
+    // Ordinary sends detach their draft; prevent edits until a failed send can restore it.
+    const inert = seat.inert;
+    seat.inert = true;
+    return () => { seat.inert = inert; };
+  }, [mode?.busy, props.sessionId]);
+  if (!mode) return null;
+  return <div ref={dock} style={{ display: 'contents' }}>
+    {mode.task.name === 'delegate' ? <DelegationDockActive key={props.sessionId} {...props} /> : <DiscussionDockActive key={props.sessionId} {...props} />}
+  </div>;
 }
 
 const RADIUS = 5.5, CIRCUMFERENCE = 2 * Math.PI * RADIUS;
@@ -958,6 +899,7 @@ ${nativeContextColors}
 .hp-edit-bar .hp-edit-send:hover:not(:disabled){background:var(--dsw-alias-label-secondary)}
 .hp-edit-bar button:disabled{opacity:.5;cursor:default}
 .hp-edit-error{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
+[data-composer-seat] [role=status]:has(~ [data-composer-card]){box-sizing:border-box}
 .hp-delegate{display:flex;align-items:center;gap:10px;box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance));max-width:var(--dsh-composer-card-max-width);margin:0 auto;padding:7px 10px;border-bottom:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .hp-delegate>strong{color:var(--dsw-alias-label-primary);font-weight:600}
 .hp-delegate[data-hp-mode=delegate],[data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]){--hp-mode-color:var(--dsw-alias-state-warn-label)}
@@ -965,14 +907,6 @@ ${nativeContextColors}
 .hp-delegate[data-hp-mode]>strong{color:var(--hp-mode-color);white-space:nowrap}
 /* Task modes ring the composer card of the same seat in their command color. */
 [data-composer-seat]:has(.hp-delegate[data-hp-mode]) [data-composer-card]{--dsw-elevation-stroke-color:var(--hp-mode-color);box-shadow:0 0 0 1.5px var(--hp-mode-color),var(--dsw-elevation-soft,0 0 #0000)}
-/* The dock names the mode, so the composer hides its command token; the draft (and the submitted command) keeps it.
-   A zero-width box whose text overflows to the left keeps the caret, at the token's end, where the task starts. */
-[data-composer-seat]:has(.hp-delegate[data-hp-mode]) [data-composer-card] [contenteditable] p:first-child>span:first-child[style*="--dsw-alias-state-warn-label"]{display:inline-flex;width:var(--hp-token-rest,0px);justify-content:flex-end;white-space:pre;color:transparent!important;vertical-align:top}
-/* Text composed into the token's node shows after the clipped token; the clip margin keeps the caret at its end visible. */
-[data-composer-seat]:has(.hp-delegate[data-hp-merged]) [data-composer-card] [contenteditable] p:first-child>span:first-child[style*="--dsw-alias-state-warn-label"]{overflow:clip;overflow-clip-margin:2px;color:inherit!important}
-/* The host only sees the hidden token, so an empty task mode would still look sendable; its send button greys out
-   like the host's disabled one (the keydown guard blocks Enter). */
-[data-composer-seat]:has(.hp-delegate[data-hp-empty]) [data-composer-card] button[class$="_primary"]{opacity:.4;cursor:default;pointer-events:none}
 .hp-delegate-harness{display:flex;padding:2px;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover)}
 .hp-delegate-harness button{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer}
 .hp-delegate-harness button:disabled{opacity:.4;cursor:not-allowed}
@@ -1234,14 +1168,18 @@ export async function apply(ctx: Context): Promise<void> {
     };
     const runtime = scope.commandUi as unknown as Source;
     const t = ctx.locale.bind('harness');
-    const claim = (name: 'delegate' | 'discuss', session: ClientSessionContext) => ({ claim: name === 'delegate' ? delegationClaim(scope.remote.harness, session, t) : discussionClaim(scope.remote.harness, session, t) } as const);
+    const enter = (name: 'delegate' | 'discuss', session: ClientSessionContext) => {
+      if (taskModes.get(session.sessionId)?.busy) return 'handled' as const;
+      setTaskMode(session.sessionId, name === 'delegate' ? delegationClaim(scope.remote.harness, session, t) : discussionClaim(scope.remote.harness, session, t));
+      return { text: '' } as const;
+    };
     const external = async (sessionId: string) => (await harnessOf(scope.remote.harness, sessionId).catch(() => 'dsh')) !== 'dsh';
     const candidates = runtime.candidates.bind(runtime), dispatch = runtime.dispatch.bind(runtime);
     const matchSpace = runtime.matchSpace.bind(runtime), matchEnter = runtime.matchEnter.bind(runtime);
     const kept = new Set(['file', 'goal', 'plan', 'compact', 'clear']);
     const replacements: Source = {
       candidates: async (session, request, ...rest) => {
-        if (delegateSkillMenus.has(session.sessionId)) return [];
+        if (taskModes.has(session.sessionId)) return [];
         const original = await candidates(session, request, ...rest);
         const rows = await external(session.sessionId) ? original.filter(row => kept.has(row.name)).map(row => row.name === 'clear'
           ? { ...row, label: t('clear'), description: t('clearDescription'), icon: ClearIcon, section: t('commands') } : row) : [...original];
@@ -1254,9 +1192,9 @@ export async function apply(ctx: Context): Promise<void> {
         const compact = rows.findIndex(row => row.name === 'compact');
         return compact < 0 ? [...rows, ...commands] : [...rows.slice(0, compact + 1), ...commands, ...rows.slice(compact + 1)];
       },
-      dispatch: pick => pick.candidate.name === 'delegate' || pick.candidate.name === 'discuss' ? claim(pick.candidate.name, pick.session) : dispatch(pick),
-      matchSpace: (session, token) => delegateSkillMenus.has(session.sessionId) ? undefined : token === '/delegate' ? claim('delegate', session) : token === '/discuss' ? claim('discuss', session) : matchSpace(session, token),
-      matchEnter: async (session, line, ...rest) => /^\/delegate(?:\s|$)/.test(line.trim()) ? claim('delegate', session) : /^\/discuss(?:\s|$)/.test(line.trim()) ? claim('discuss', session)
+      dispatch: pick => taskModes.has(pick.session.sessionId) ? undefined : pick.candidate.name === 'delegate' || pick.candidate.name === 'discuss' ? enter(pick.candidate.name, pick.session) : dispatch(pick),
+      matchSpace: (session, token) => taskModes.has(session.sessionId) ? undefined : token === '/delegate' ? enter('delegate', session) : token === '/discuss' ? enter('discuss', session) : matchSpace(session, token),
+      matchEnter: async (session, line, ...rest) => taskModes.has(session.sessionId) || /^\/(delegate|discuss)(?:\s|$)/.test(line.trim()) ? undefined
         : /^\/model(\s|$)/.test(line.trim()) && await external(session.sessionId) ? undefined : matchEnter(session, line, ...rest),
     };
     scope.effect(() => {
@@ -1285,35 +1223,46 @@ export async function apply(ctx: Context): Promise<void> {
       codec: { clipboardText: ref => ref, serialize: ref => Promise.resolve(ref) },
     }), 'harness: plugin mentions');
   });
-  // A claimed composer suppresses `/`. After `/delegate ` it opens this session's skills instead, so a skill such as a
-  // hand-off runs here first and its reply goes to the delegated Harness.
-  ctx.inject(['inputTriggers', 'sessions'], scope => {
-    type Controller = { track(draft: string, caret: number, guard: { tier: 'plain' | 'claimed' | 'frozen' }, draftRev: number): void };
-    const service = scope.inputTriggers as unknown as { sessionOf(actx: unknown): Controller };
-    const sessionOf = service.sessionOf.bind(service), token = '/delegate ';
-    // ponytail: patched controllers stay referenced until the plugin unloads; one per opened session.
-    const patched = new Set<Controller>();
-    const replacement = (actx: unknown) => {
-      const controller = sessionOf(actx);
-      const sessionId = scope.sessions.sessionOf(actx as never)?.sessionId;
-      if (sessionId === undefined || patched.has(controller)) return controller;
-      patched.add(controller);
-      const track = controller.track.bind(controller);
-      controller.track = (draft, caret, guard, draftRev) => {
-        const skills = guard.tier === 'claimed' && draft.startsWith(token) && caret >= token.length;
-        if (skills) delegateSkillMenus.add(sessionId); else delegateSkillMenus.delete(sessionId);
-        track(draft, caret, skills ? { tier: 'plain' } : guard, draftRev);
-      };
-      return controller;
+  ctx.inject(['conversation', 'remote.harness'], scope => {
+    const service = scope.conversation as unknown as {
+      sendSession(session: ClientSessionContext, text: string, ids: readonly DraftAttachmentId[], mode: 'queue' | 'steer', signal?: AbortSignal): Promise<SubmitOutcome>;
+      serializeDraftAttachments(ids: readonly DraftAttachmentId[]): Promise<{ attachments: readonly SubmitAttachment[] }>;
+      releaseDraftAttachment(id: DraftAttachmentId): void;
+    };
+    const sendSession = service.sendSession.bind(service);
+    const t = ctx.locale.bind('harness');
+    const replacement: typeof service.sendSession = async (session, text, attachmentIds, mode, signal) => {
+      let active = taskModes.get(session.sessionId);
+      const command = /^\/(delegate|discuss)(?:\s+|$)/.exec(text);
+      if (command && !active) {
+        setTaskMode(session.sessionId, command[1] === 'delegate' ? delegationClaim(scope.remote.harness, session, t) : discussionClaim(scope.remote.harness, session, t));
+        active = taskModes.get(session.sessionId);
+      }
+      if (command && command[1] === active?.task.name) text = text.slice(command[0].length);
+      if (!active) return sendSession(session, text, attachmentIds, mode, signal);
+      if (active.busy) return { kind: 'error', text: t('loading') };
+      if (!text.trim() && !attachmentIds.length) return { kind: 'success' };
+      taskModes.set(session.sessionId, { ...active, busy: true }); publishTaskMode();
+      try {
+        const { attachments } = await service.serializeDraftAttachments(attachmentIds);
+        signal?.throwIfAborted();
+        const outcome = await active.task.submit(text, scope, attachments);
+        if (outcome.kind === 'success') {
+          for (const id of attachmentIds) service.releaseDraftAttachment(id);
+          setTaskMode(session.sessionId);
+        }
+        return outcome;
+      } finally {
+        if (taskModes.has(session.sessionId)) { taskModes.set(session.sessionId, { ...active, busy: false }); publishTaskMode(); }
+      }
     };
     scope.effect(() => {
-      service.sessionOf = replacement;
+      service.sendSession = replacement;
       return () => {
-        if (service.sessionOf === replacement) Reflect.deleteProperty(service, 'sessionOf');
-        for (const controller of patched) Reflect.deleteProperty(controller, 'track');
-        patched.clear(); delegateSkillMenus.clear();
+        if (service.sendSession === replacement) Reflect.deleteProperty(service, 'sendSession');
+        taskModes.clear(); publishTaskMode();
       };
-    }, 'harness: skills in delegation mode');
+    }, 'harness: task submission');
   });
   ctx.inject(['slots'], scope => {
     scope.effect(() => scope.slots.inject('conversation.input.dock', () => scope.slots.register({
