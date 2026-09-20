@@ -89,7 +89,9 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
  assert.deepEqual(await names('codex'),['file','goal','plan','compact','delegate','discuss','clear']);
  const merged=await commandUi.candidates({sessionId:'codex'},{query:''});
  assert.deepEqual(Array.from(merged.filter(row=>['compact','delegate','discuss','clear'].includes(row.name)),row=>row.section),['指令','指令','指令','指令']);
- assert.deepEqual(JSON.parse(JSON.stringify(merged.find(row=>row.name==='clear'))),{name:'clear',session:'codex',section:'指令',label:'清理',description:'清理上下文'});
+ const clear=merged.find(row=>row.name==='clear');
+ assert.deepEqual(JSON.parse(JSON.stringify(clear)),{name:'clear',session:'codex',section:'指令',label:'清理',description:'清理上下文'});
+ assert.equal(typeof clear.icon,'function','clear keeps the command menu icon column');
  const session={sessionId:'codex'},candidate=(await commandUi.candidates(session,{query:'del'}))[0];
  const delegated=commandUi.dispatch({candidate,session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
  assert.equal(delegated.claim.attachments,true);

@@ -157,6 +157,7 @@ const Chevron = ({ open }: { open?: boolean }) => <svg className={`hp-chevron${o
 const ChevronRight = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const Back = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M10 4L6 8l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const PluginIcon = ({ size = 16 }: { size?: number }) => <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden><path d="M6 2.5h4v2a1.5 1.5 0 003 0V6h.5v4H13v-.5a1.5 1.5 0 00-3 0v4H6v-2a1.5 1.5 0 00-3 0V12h-.5V6H3v.5a1.5 1.5 0 003 0v-4z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/></svg>;
+const ClearIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M3.2 8.8 8.4 3.6a1.4 1.4 0 012 0L12.4 5.6a1.4 1.4 0 010 2L8 12H5.2a1.4 1.4 0 01-1-.4l-1-1a1.4 1.4 0 010-2zM6.1 6l3.9 3.9M8 12h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const Check = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const icons: Record<string, ReactNode> = {
   clock: <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden><circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.4"/><path d="M8 4.5V8l2.5 1.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>,
@@ -1219,7 +1220,7 @@ export async function apply(ctx: Context): Promise<void> {
         if (delegateSkillMenus.has(session.sessionId)) return [];
         const original = await candidates(session, request, ...rest);
         const rows = await external(session.sessionId) ? original.filter(row => kept.has(row.name)).map(row => row.name === 'clear'
-          ? { ...row, label: t('clear'), description: t('clearDescription'), section: t('commands') } : row) : [...original];
+          ? { ...row, label: t('clear'), description: t('clearDescription'), icon: ClearIcon, section: t('commands') } : row) : [...original];
         const query = request.query.toLowerCase();
         const commands = [
           { name: 'delegate', label: t('delegate'), description: t('delegateDescription'), icon: PluginIcon, section: t('commands') },
