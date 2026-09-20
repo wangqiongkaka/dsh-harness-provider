@@ -68,9 +68,13 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
  const rows=['file','model','goal','plan','compact','clear','export'];
+ let commandInjectKeys=[];
  class CommandUi {
   async candidates(session,{query=''}){return rows.filter(name=>!query||name.includes(query)).map(name=>({name,session:session.sessionId,section:['file','goal','plan'].includes(name)?'添加':'指令'}));}
-  dispatch(pick){return 'handled:'+pick.candidate.name;} matchSpace(_session,token){return 'handled:'+token;} async matchEnter(_session,line){return 'handled:'+line;}
+  dispatch(pick){return 'handled:'+pick.candidate.name;} matchSpace(_session,token){return 'handled:'+token;} async matchEnter(_session,line){
+   if(!commandInjectKeys.includes('remote.commands'))throw new Error('cannot get property "remote.commands" without inject');
+   return 'handled:'+line;
+  }
  }
  const commandUi=new CommandUi(), disposers=[], reads=[];
  let failing=true;
@@ -82,7 +86,7 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
  }};
  const ctx={
   remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>({clear:'清理',clearDescription:'清理上下文',delegate:'委派',delegateDescription:'创建独立会话执行任务',delegateTask:'任务',delegateCreated:'已创建委派会话',discuss:'讨论',discussDescription:'由主 Agent 分配多个会话并汇总',discussTask:'讨论任务',discussStarted:'已开始讨论',commands:'指令'})[key]??key},effect(fn){fn();},
-  inject(keys,apply){if(keys.includes('commandUi'))apply({commandUi,remote,effect(fn){disposers.push(fn());}});},
+  inject(keys,apply){if(keys.includes('commandUi')){commandInjectKeys=keys;apply({commandUi,remote,effect(fn){disposers.push(fn());}});}},
  };
  await module.exports.apply(ctx);
  const names=async id=>Array.from(await commandUi.candidates({sessionId:id},{query:''}),row=>row.name);
@@ -218,7 +222,7 @@ test('sidebar marks active turns as breathing, completed sessions as static, and
  await settle();
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
  const css=styles.join('\n');
- assert.match(css,/data-hp-harness="codex"[^}]+width:14px;height:14px;background:linear-gradient\(145deg,#b6a4ff 0%,#6078ff 48%,#3725ff 100%\)[^}]+mask:url/);
+ assert.match(css,/data-hp-harness="codex"[^}]+width:14px;height:14px;background:#fff[^}]+mask:url/);
  assert.match(css,/\[data-hp-running\]>span:first-child>\*\{display:none\}/,'the breathing Harness logo replaces native running dots');
  assert.match(css,/\[data-hp-running\]>span:first-child::before\{animation:hp-logo-breathe 1\.4s ease-in-out infinite\}/);
  assert.match(css,/@media \(prefers-reduced-motion:reduce\)\{\[data-hp-running\][^}]+animation:none/);

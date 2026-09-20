@@ -1025,7 +1025,7 @@ const CLAUDE_PATH = 'm4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-
 const svg = (viewBox: string, path: string) => `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}"><path d="${path}"/></svg>`)}")`;
 const logos: Record<State['harness'], { mask: string; color: string }> = {
   dsh: { color: '#4D6BFE', mask: svg('0 0 23.16 17.04', FISH_LOGO_PATH) },
-  codex: { color: 'linear-gradient(145deg,#b6a4ff 0%,#6078ff 48%,#3725ff 100%)', mask: svg('0 0 24 24', OPENAI_PATH) },
+  codex: { color: '#fff', mask: svg('0 0 24 24', OPENAI_PATH) },
   'claude-code': { color: '#D97757', mask: svg('0 0 24 24', CLAUDE_PATH) },
 };
 const delegatedMask = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><mask id="m"><circle cx="5" cy="5" r="5" fill="#fff"/><path d="M3 3l4 4M7 4v3H4" stroke="#000" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="5" cy="5" r="5" mask="url(#m)"/></svg>')}")`;
@@ -1201,7 +1201,7 @@ export async function apply(ctx: Context): Promise<void> {
   // `/` in a Harness session keeps the DSH rows a Harness carries out: attaching files, and goal / plan / compact / clear, which the
   // server runs on the Harness. The rest act on DSH's agent (the server already hides its commands); a typed `/model`
   // reaches the Harness as a prompt instead of DSH's model picker.
-  ctx.inject(['commandUi', 'remote.harness'], scope => {
+  ctx.inject(['commandUi', 'remote.harness', 'remote.commands'], scope => {
     type Source = {
       candidates(session: ClientSessionContext, request: { query: string; position?: string }, ...rest: unknown[]): Promise<readonly InputTriggerCandidate[]>;
       dispatch(pick: InputTriggerPick): PickOutcome;
