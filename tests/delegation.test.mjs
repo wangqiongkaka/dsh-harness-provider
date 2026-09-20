@@ -49,12 +49,12 @@ test('session CLI creates a visible independent harness session, reads its resul
  }
  const adapter = harness => ({
   async inspect() { return unavailable ? {status:'unavailable',error:{message:'fixture unavailable'}} : {status:'ready',catalog:{models:[],thinkingOptions:[]},
-   permissionModes:{modes:[{id:'read-only',label:'Read only'},{id:'agent',label:'Agent'},{id:'default',label:'Default'},{id:'acceptEdits',label:'Accept edits'}],defaultModeId:'read-only'}}; },
+   permissionModes:{modes:[{id:'read-only',label:'Read only'},{id:'plan',label:'Plan'},{id:'agent',label:'Agent'},{id:'default',label:'Default'},{id:'acceptEdits',label:'Accept edits'}],defaultModeId:'read-only'}}; },
   async open(input) {
    opens.push({harness,input});
-   if (harness === 'codex') assert.ok(input.environment?.DSH_DELEGATE_TOKEN);
+   if (harness === 'codex' && !input.discussion) assert.ok(input.environment?.DSH_DELEGATE_TOKEN);
    const channel=new HarnessOutputChannel();
-   return {ok:true,value:{initialState:{},outputs:channel.outputs,async close(){channel.end();},async execute(command){
+   return {ok:true,value:{initialState:{effectivePermissionModeId:input.permissionModeId},outputs:channel.outputs,async close(){channel.end();},async execute(command){
     if (harness === 'claude-code') {
      channel.emit({kind:'event',event:{type:'turn.completed',turnId:command.turnId,outcome:{status:'succeeded'}}});
      return {ok:true,value:{turnId:command.turnId}};
@@ -238,9 +238,9 @@ test('session CLI creates a visible independent harness session, reads its resul
   const turnsBeforeDiscussion=turns.length, createdBeforeDiscussion=created.length;
   let discussionPrompt;
   const stopDiscussionPrompt=ctx.on('agent/inbox/inserted',({agent,message})=>{if(agent.id==='other'&&message.source.kind==='user'&&message.source.rpcId==='discussion-1')discussionPrompt=message;});
-  await h.startDiscussionFromUser({sessionId:'other',requestId:'discussion-1',prompt:'Compare both approaches',attachments:[{type:'image',mediaType:'image/png',data:png,name:'pixel.png'}]});
+  await h.startDiscussionFromUser({sessionId:'other',requestId:'discussion-1',harnesses:['codex'],prompt:'Compare both approaches',attachments:[{type:'image',mediaType:'image/png',data:png,name:'pixel.png'}]});
   await stopDiscussionPrompt();
-  assert.equal(discussionPrompt.content[0].text,'/discuss Compare both approaches');
+  assert.equal(discussionPrompt.content[0].text,'/discuss Compare both approaches\n\n参与 Harness：codex；每个选中的 Harness 至少分配一个参与者，只使用这些 Harness。');
   await ctx.agents.get('other').whenIdle();
   await assert.rejects(h.discuss('other',{assignments:[{harness:'codex',task:'Too late'}]}),/请先由用户使用 \/discuss/,'unused authorization expires with the source turn');
   h.discussions.set('other',{requestId:'discussion-1',content:[...discussionPrompt.content.slice(1),{type:'text',text:'Compare both approaches'}]});
@@ -250,6 +250,14 @@ test('session CLI creates a visible independent harness session, reads its resul
   ]};
   const discussion=await bridge('discuss',discussionAssignments,otherEnvironment);
   assert.equal(discussion.participants.length,2);assert.equal(discussion.peerReview,true);
+  for (const participant of discussion.participants) {
+   const binding=await h.bindings.readDelegated(participant.sessionId);
+   assert.equal(binding.delegation.discussion,true);
+   assert.equal(binding.permission,'read-only');
+   await assert.rejects(h.selectPermission({sessionId:participant.sessionId,permission:'agent'}),/讨论/);
+   await assert.rejects(h.selectConfig({sessionId:participant.sessionId,configId:'anything',value:true}),/讨论/);
+   await assert.rejects(h.delegate(participant.sessionId,{...request,requestId:'nested-discussion'}),/讨论/);
+  }
   assert.equal(created.length,createdBeforeDiscussion+2);
   assert.equal(turns.length,turnsBeforeDiscussion+4,'two workers each run once and review once');
   assert.ok(turns.slice(turnsBeforeDiscussion,turnsBeforeDiscussion+2).every(turn=>JSON.stringify(turn.input).includes('Compare both approaches')));
@@ -269,7 +277,38 @@ test('session CLI creates a visible independent harness session, reads its resul
   const single=JSON.parse(singleTool.content[0].text);
   assert.equal(single.peerReview,false);assert.equal(turns.length,singleTurns+1,'one worker skips peer review');
   h.discussions.delete('other');
+  h.discussions.set('other',{requestId:'discussion-claude',content:[{type:'text',text:'Analyze'}]});
+  unavailable=false;
+  h.catalogs.clear();
+  const multiRequest={sessionId:'other',requestId:'multi-delegate',harnesses:['codex','claude-code'],prompt:'Same task for both',attachments:[],reportBack:false};
+  const multi=await h.delegateFromUser(multiRequest);
+  assert.deepEqual(multi.sessions.map(session=>session.harness),['codex','claude-code']);
+  for(const session of multi.sessions){
+   const agent=ctx.agents.get(session.sessionId);await agent.whenIdle();
+   assert.equal(agent.session.snapshotEvents().find(event=>event.type==='user/message').data.content[0].text,'Same task for both');
+  }
+  const beforeMultiRetry=created.length;
+  assert.deepEqual((await h.delegateFromUser(multiRequest)).sessions,multi.sessions);
+  assert.equal(created.length,beforeMultiRetry);
+  await assert.rejects(h.delegateFromUser({...multiRequest,requestId:'empty-multi',harnesses:[]}),/至少|1/);
+  await assert.rejects(h.delegateFromUser({...multiRequest,requestId:'duplicate-multi',harnesses:['codex','codex']}),/重复/);
+  await assert.rejects(h.delegateFromUser({...multiRequest,requestId:'native-worktree-multi',harnesses:['dsh','codex'],worktree:true}),/仅支持 Codex/);
+  const claudeDiscussion=await h.discuss('other',{assignments:[{harness:'claude-code',task:'Analyze'}]});
+  assert.equal((await h.bindings.read(claudeDiscussion.participants[0].sessionId)).permission,'plan');
+  assert.equal(opens.at(-1).input.discussion,true);
+  h.discussions.delete('other');
+  h.discussions.set('other',{requestId:'discussion-native-denied',content:[{type:'text',text:'Analyze'}]});
+  const beforeNativeDenied=created.length;
+  await assert.rejects(h.discuss('other',{assignments:[{harness:'codex',task:'Analyze'},{harness:'dsh',task:'Analyze'}]}),/暂不支持强制只读/);
+  assert.equal(created.length,beforeNativeDenied,'reject unsupported assignments before creating any workers');
+  h.discussions.delete('other');
   // Delegation is for any work the user hands off, not only review.
+  h.discussions.set('other',{requestId:'selected-discussion',content:[{type:'text',text:'Analyze'}],harnesses:['codex','claude-code']});
+  await assert.rejects(h.discuss('other',{assignments:[{harness:'codex',task:'Analyze'}]}),/选中/);
+  await assert.rejects(h.discuss('other',{assignments:[{harness:'dsh',task:'Analyze'},{harness:'codex',task:'Analyze'}]}),/选中/);
+  const selected=await h.discuss('other',{assignments:[{harness:'codex',task:'Analyze'},{harness:'claude-code',task:'Analyze'}]});
+  assert.deepEqual(selected.participants.map(participant=>participant.harness),['codex','claude-code']);
+  h.discussions.delete('other');
   assert.doesNotMatch(delegationInstructions(),/只审查|review\/审查|codex exec review/);
   assert.doesNotMatch(delegationInstructions(),/ create /);
   assert.match(delegationInstructions(),/完成通知/);
@@ -300,5 +339,18 @@ test('session CLI creates a visible independent harness session, reads its resul
   assert.equal(turns.length,turnsBeforeHandoff+2);
   const plainSlash=await h.delegateFromUser({...handoffRequest,requestId:'not-a-skill',prompt:'/tmp/app 修复构建'});
   assert.ok(plainSlash.sessionId,'a leading path that is no skill is delegated directly');
+  await ctx.agents.get(plainSlash.sessionId).whenIdle();
+  const beforeMultiSkill=created.length;
+  const multiSkillRequest={sessionId:'handoff-source',requestId:'multi-skill',harnesses:['codex','claude-code'],prompt:'/handoff 多目标',attachments:[]};
+  await h.delegateFromUser(multiSkillRequest);
+  await ctx.agents.get('handoff-source').whenIdle();
+  for(let i=0;i<200&&created.length<beforeMultiSkill+2;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(created.length,beforeMultiSkill+2);
+  for(const child of created.slice(beforeMultiSkill)){
+   const agent=ctx.agents.get(child.sessionId);await agent.whenIdle();
+   assert.match(agent.session.snapshotEvents().find(event=>event.type==='user/message').data.content[0].text,/多目标\n\n\[来源会话 \/handoff 的结果\]/);
+  }
+  await h.delegateFromUser(multiSkillRequest);
+  assert.equal(created.length,beforeMultiSkill+2);
  } finally { await ctx.fiber.dispose();await rm(root,{recursive:true,force:true}); }
 });

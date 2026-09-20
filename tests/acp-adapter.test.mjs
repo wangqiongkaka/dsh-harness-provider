@@ -351,7 +351,7 @@ test('permissions, forms (secret + custom answers), URL steps, failures and tool
     assert.equal((await f.notes()).find(note => note.new).new._meta, undefined);
     let pending = await interaction(output);
     assert.equal(pending.type, 'approval'); assert.equal(pending.title, 'Run command?'); assert.equal(pending.description, 'Reason: tests\nnpm test');
-    assert.deepEqual(pending.actions.map(action => [action.id, action.effect]), [['allow-once', 'allowOnce'], ['allow-session', 'allowAlways'], ['reject', 'deny']]);
+    assert.deepEqual(pending.actions.map(action => [action.id, action.effect]), [['allow-once', 'allowOnce'], ['allow-session', 'allowAlways'], ['reject', 'denyOnce']]);
     assert.equal((await session.execute({ type: 'interaction.respond', interactionId: pending.interactionId, response: { type: 'approval', actionId: 'bogus' } })).ok, false);
     value(await session.execute({ type: 'interaction.respond', interactionId: pending.interactionId, response: { type: 'approval', actionId: 'allow-session' } }));
     let seen = await until(output, 'turn.completed');

@@ -2,6 +2,17 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## 讨论只读权限（2026-09-20）
+
+- 委派和讨论输入条统一使用多选分段按钮，至少保留一个目标。委派为每个选中类型创建独立会话，附件与回传设置共用，skill 只执行一次后批量交接；重复请求复用原会话。讨论授权记录所选类型，主 Agent 分工必须覆盖所选类型且不得越界，DSH 原生选项禁用。
+
+- `delegation.discussion` 持久标记讨论参与者，创建、恢复与审批统一按该身份限制；普通委派保持原行为。讨论参与者不可嵌套委派、创建讨论或分支、切换权限或配置。
+- ACP 保留 `reject_once` / `reject_always` 语义；讨论自动选择一次性拒绝，缺少该选项则停止。问题自动取消，权限漂移停止会话，失败状态与原因进入汇总且不自动互评。
+- `codex-acp@1.12.0/dist/index.js` 的 `AgentMode.ReadOnly` 实际是 `workspaceWrite`，因此在打包时通过 `scripts/discussion-sandbox.mjs` 对讨论进程强制 `readOnly` 沙箱，并禁用继承 MCP、应用、多 Agent、hooks、插件、电脑/浏览器操作与依赖安装能力；构建会校验补丁接缝，版本不兼容时失败。
+- `claude-agent-acp@0.78.0/dist/acp-agent.js` 的 `createSession` 支持 `_meta.claudeCode.options`：讨论使用 `plan`，同时仅提供 Read / Glob / Grep / WebSearch / WebFetch，禁用继承设置中的 hooks、插件和 MCP，不能将 `plan` 本身当作强制只读。
+- DSH 原生因无法锁定只读，整组分工在创建参与者之前拒绝包含 DSH 的请求。下文历史记录的可选参与者与嵌套行为由本节替代。
+- 验证：`npm run check` 的 67 项测试通过，新增核心用例已在旧实现失败；`node experiments/discussion-native-probe.mjs` 使用本地模型夹具驱动真实 Codex / Claude Code CLI，两者写入均被阻止，Claude 未向模型暴露写入、Shell 或子 Agent 工具。
+
 ## 当前委派与讨论行为（2026-09-19）
 
 - 委派只能由用户通过输入框的 `/delegate` 指令明确发起；模型不再拥有创建委派会话的工具或凭据，subagent 能力不受影响。

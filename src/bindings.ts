@@ -6,6 +6,7 @@ import { nativeSessionRefSchema, harnessModelRefSchema, harnessThinkingOptionIdS
 
 export const harnessChoice = z.enum(['codex', 'claude-code']);
 const delegationSchema = z.object({ parentSessionId: z.string(), requestHash: z.string(), reportBack: z.boolean().optional(), notifiedSeq: z.number().int().optional(),
+  discussion: z.literal(true).optional(),
   /** The isolated checkout the Harness works in (binding `cwd`); `removed` once merged or discarded. */
   worktree: z.object({ repo: z.string(), path: z.string(), base: z.string(), removed: z.boolean().optional() }).strict().optional(),
 }).strict();
@@ -27,6 +28,7 @@ const bindingSchema = z.object({
   delegation: delegationSchema.optional(),
 }).strict().refine(value => !value.nativeRef || value.nativeRef.harnessId === value.harness, 'Harness identity mismatch');
 export type Binding = z.infer<typeof bindingSchema>;
+export const DISCUSSION_PERMISSION = { codex: 'read-only', 'claude-code': 'plan' } as const;
 const nativeDelegationSchema = z.object({
   version: z.literal(1), sessionId: z.string().min(1), harness: z.literal('dsh'), cwd: z.string().min(1), locked: z.boolean(), delegation: delegationSchema,
 }).strict();

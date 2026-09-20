@@ -48,15 +48,23 @@ const delegationAttachmentSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('file'), receiptId: z.string().min(1) }).strict(),
 ]);
 export const delegateFromUserRequest = address.extend({
-  requestId: z.string().min(1).max(128), harness: selection, prompt: z.string().max(64_000), title: z.string().trim().min(1).max(80).optional(),
+  requestId: z.string().min(1).max(128), harness: selection.optional(),
+  harnesses: z.array(selection).min(1, '至少选择一个 Harness').max(3).refine(values => new Set(values).size === values.length, '不能重复选择 Harness').optional(),
+  prompt: z.string().max(64_000), title: z.string().trim().min(1).max(80).optional(),
   reportBack: z.boolean().default(false), worktree: z.boolean().default(false), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
-}).refine(request => request.prompt.trim() || request.attachments.length, { message: '请输入任务或上传附件' })
-  .refine(request => !request.worktree || request.harness !== 'dsh', { message: '独立 worktree 仅支持 Codex / Claude Code' });
+}).refine(request => request.harnesses || request.harness, { message: '至少选择一个 Harness' })
+  .refine(request => !request.harnesses || !request.harness, { message: '不能同时指定 harness 和 harnesses' })
+  .transform(({ harness, harnesses, ...request }) => ({ ...request, harnesses: harnesses ?? [harness!] }))
+  .refine(request => request.prompt.trim() || request.attachments.length, { message: '请输入任务或上传附件' })
+  .refine(request => !request.worktree || !request.harnesses.includes('dsh'), { message: '独立 worktree 仅支持 Codex / Claude Code' });
 export const startDiscussionFromUserRequest = address.extend({
   requestId: z.string().min(1).max(128), prompt: z.string().max(64_000), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
+  harnesses: z.array(z.enum(['codex', 'claude-code'])).min(1, '至少选择一个 Harness').max(2)
+    .refine(values => new Set(values).size === values.length, '不能重复选择 Harness').optional(),
 }).refine(request => request.prompt.trim() || request.attachments.length, { message: '请输入讨论任务或上传附件' });
 // No sessionId yet when a leading skill of the source session runs first; the delegation starts after that turn.
-export const delegationAcceptedSchema = z.object({ sessionId: z.string().optional(), harness: selection, accepted: z.literal(true) });
+export const delegationAcceptedSchema = z.object({ sessionId: z.string().optional(), harness: selection, accepted: z.literal(true),
+  sessions: z.array(z.object({ sessionId: z.string(), harness: selection })).optional() });
 export const discussionAcceptedSchema = z.object({ accepted: z.literal(true) });
 /** Harness-internal subagents of the native session, oldest first: live, else as last seen before its idle process was reclaimed. */
 export const subagentsSchema = z.array(z.object({

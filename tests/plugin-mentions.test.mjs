@@ -104,7 +104,7 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
  const image={type:'image',mediaType:'image/png',data:'AA=='};
  assert.deepEqual(JSON.parse(JSON.stringify(await delegated.claim.submit('处理图片',{},[image]))),{kind:'success',text:'已创建委派会话'});
  const submitted=JSON.parse(JSON.stringify(delegations[0]));delete submitted.requestId;
- assert.deepEqual(submitted,{sessionId:'codex',harness:'codex',prompt:'处理图片',attachments:[image],reportBack:false,worktree:false});
+ assert.deepEqual(submitted,{sessionId:'codex',harnesses:['codex'],prompt:'处理图片',attachments:[image],reportBack:false,worktree:false});
  const discussCandidate=(await commandUi.candidates(session,{query:'dis'}))[0];
  const discussed=commandUi.dispatch({candidate:discussCandidate,session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
  assert.equal(discussed.claim.attachments,true);
@@ -112,7 +112,7 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
  assert.equal((await commandUi.matchEnter(session,'/discuss compare')).claim.name,'discuss');
  assert.deepEqual(JSON.parse(JSON.stringify(await discussed.claim.submit('比较方案',{},[image]))),{kind:'success',text:'已开始讨论'});
  const discussion=JSON.parse(JSON.stringify(discussions[0]));delete discussion.requestId;
- assert.deepEqual(discussion,{sessionId:'codex',prompt:'比较方案',attachments:[image]});
+ assert.deepEqual(discussion,{sessionId:'codex',prompt:'比较方案',attachments:[image],harnesses:['codex','claude-code']});
  assert.equal(await commandUi.matchEnter({sessionId:'codex'},'/compact'),'handled:/compact','the server runs /compact on Codex');
  assert.equal(await commandUi.matchEnter({sessionId:'codex'},'/model gpt-5'),undefined,'a typed /model is sent to Codex as a prompt');
  assert.equal(await commandUi.matchEnter({sessionId:'native'},'/model'),'handled:/model');

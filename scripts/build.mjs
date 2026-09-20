@@ -1,6 +1,7 @@
 import { build } from 'esbuild';
 import { mkdir, copyFile, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { discussionSandbox } from './discussion-sandbox.mjs';
 
 await mkdir('dist', { recursive: true });
 await copyFile('src/delegate-cli.mjs', 'dist/delegate-cli.mjs');
@@ -11,6 +12,9 @@ await copyFile('src/delegate-cli.mjs', 'dist/delegate-cli.mjs');
 const quietBypassNotice = {
   name: 'quiet-bypass-notice',
   setup(pluginBuild) {
+    pluginBuild.onLoad({ filter: /codex-acp[\\/]dist[\\/]index\.js$/ }, async ({ path }) => ({
+      contents: discussionSandbox(await readFile(path, 'utf8')), loader: 'js',
+    }));
     pluginBuild.onLoad({ filter: /claude-agent-sdk[\\/]sdk\.mjs$/ }, async ({ path }) => {
       const source = await readFile(path, 'utf8');
       const notice = /return"canUseTool will not be invoked: permissionMode 'bypassPermissions'[^"]*";/g;

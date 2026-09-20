@@ -31,7 +31,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import type { HarnessPlugin, HarnessSubagent } from './contracts.js';
 import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, type HarnessAccountSnapshot } from './contracts.js';
 import { z } from 'zod';
-import { Bindings, type Binding } from './bindings.js';
+import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT } from './acp-adapter.js';
 import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
@@ -131,7 +131,7 @@ export class HarnessService extends TypertRemoteService {
   // External Harness account quota, one per harness: probing spawns a throwaway CLI process, so it goes stale-while-revalidate.
   private readonly harnessQuotas = new Map<Binding['harness'], HarnessQuotaCache>();
   // One user-authorized discussion per source turn; retries share the same work instead of spawning more sessions.
-  private readonly discussions = new Map<string, { requestId: string; content: ContentBlock[]; inputHash?: string; work?: Promise<DiscussionResult> }>();
+  private readonly discussions = new Map<string, { requestId: string; content: ContentBlock[]; harnesses?: Binding['harness'][]; inputHash?: string; work?: Promise<DiscussionResult> }>();
   // ponytail: in memory; a restart while the source runs the skill drops the hand-off, and the user delegates again.
   private readonly handoffs = new Map<string, { request: z.infer<typeof delegateFromUserRequest>; skill: string; content: ContentBlock[] }>();
   private readonly worktrees: string;
@@ -179,7 +179,7 @@ export class HarnessService extends TypertRemoteService {
         execute: async (args, exec) => { if (!exec.agent) throw new Error('查询需要来源会话'); return JSON.stringify(await this.readDelegation(exec.agent.id, args)); },
       }));
       scope.tools.register(defineTool({
-        name: 'harness_discussion_dispatch', description: '仅当用户在当前轮明确使用 /discuss 开启讨论模式时调用一次。根据任务并发性选择 1–4 个参与者并给出各自分工；1 个直接执行，多个会话会自动互评一轮。等待返回后由你综合最终答案。普通委派不得调用此入口。',
+        name: 'harness_discussion_dispatch', description: '仅当用户在当前轮明确使用 /discuss 开启讨论模式时调用一次。根据任务并发性选择 1–4 个 Codex 或 Claude Code 只读参与者并给出各自分工；DSH 原生暂不支持。1 个直接执行，多个会话会自动互评一轮。等待返回后由你综合最终答案。普通委派不得调用此入口。',
         parameters: { assignments: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
           harness: { type: 'string', required: true, enum: ['dsh', 'codex', 'claude-code'] }, role: { type: 'string' }, task: { type: 'string', required: true },
         } } } },
@@ -241,8 +241,10 @@ export class HarnessService extends TypertRemoteService {
     if (live) return work(live.session);
     if (!binding.nativeRef) throw new Error('尚未保存原生会话身份，无法读取或分支');
     const session = unwrap(await this.adapters[binding.harness].open({ kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef,
+      ...(binding.delegation?.discussion ? { discussion: true as const } : {}),
       ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
-      ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(binding.configs ? { configValues: binding.configs } : {}) }));
+      ...(binding.delegation?.discussion ? { permissionModeId: harnessPermissionModeIdSchema.parse(DISCUSSION_PERMISSION[binding.harness]) }
+        : { ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(binding.configs ? { configValues: binding.configs } : {}) }) }));
     try { return await work(session); } finally { await session.close(); }
   }
 
@@ -412,8 +414,10 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /** Creates an ordinary DSH session, with a stable identity for admission retries. */
-  async delegate(source: string, raw: unknown, admitted?: { content: ContentBlock[]; requestHash: string; worktree?: boolean }) {
+  async delegate(source: string, raw: unknown, admitted?: { content: ContentBlock[]; requestHash: string; worktree?: boolean; discussion?: true }) {
     const request = delegationRequest.parse(raw);
+    if ((await this.bindings.readDelegated(source))?.delegation.discussion) throw new Error('讨论会话不能创建子会话');
+    if (admitted?.discussion && request.harness === 'dsh') throw new Error('DSH 原生暂不支持强制只读讨论');
     const parent = await this.agent(source);
     const cwd = parent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
@@ -423,7 +427,7 @@ export class HarnessService extends TypertRemoteService {
     return this.bindings.serial(`delegate:${sessionId}`, async () => {
       try {
         const existing = await this.bindings.readDelegated(sessionId);
-        if (existing && (existing.delegation.parentSessionId !== source || existing.delegation.requestHash !== requestHash)) {
+        if (existing && (existing.delegation.parentSessionId !== source || existing.delegation.requestHash !== requestHash || existing.delegation.discussion !== admitted?.discussion)) {
           throw new Error('requestId 已用于不同任务，请为新任务提供新标识');
         }
         // Admission locks before followup; while the runner opens its native session, the inbox is already empty
@@ -459,7 +463,7 @@ export class HarnessService extends TypertRemoteService {
             if ('error' in inspection) throw new Error(inspection.error);
             const parentBinding = await this.bindings.read(source);
             const nativeSandbox = this.ctx.get('sessionProjections')?.stateOf(parent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
-            const permission = !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox]
+            const permission = admitted?.discussion ? DISCUSSION_PERMISSION[request.harness] : !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox]
               : parentBinding?.harness === request.harness ? parentBinding.permission
               : parentBinding && parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? FULL_ACCESS[request.harness] : DELEGATED[request.harness];
             if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
@@ -478,6 +482,7 @@ export class HarnessService extends TypertRemoteService {
             else await this.bind(child, sessionId, request.harness, {
               permission: external?.permission ? harnessPermissionModeIdSchema.parse(external.permission) : external?.inspection.permissionModes?.defaultModeId,
               delegation: { parentSessionId: source, requestHash, reportBack: request.reportBack,
+                ...(admitted?.discussion ? { discussion: true as const } : {}),
                 ...(worktree ? { worktree: { repo: worktree.repo, path: worktree.path, base: worktree.base } } : {}) },
               ...(worktree ? { cwd: worktree.cwd } : {}),
             });
@@ -509,15 +514,25 @@ export class HarnessService extends TypertRemoteService {
     const skill = await this.leadingSkill(request.sessionId, request.prompt);
     if (skill) return this.handOffAfterSkill(request, skill);
     const { content, binding } = await this.admitUserPrompt(request);
-    const requestHash = createHash('sha256').update(JSON.stringify(request)).digest('hex');
     try {
-      const result = await this.delegate(request.sessionId, {
-        requestId: request.requestId, harness: request.harness, reportBack: request.reportBack,
-        prompt: request.prompt.trim() || '处理附件任务', ...(request.title ? { title: request.title } : {}),
-      }, { content, requestHash, worktree: request.worktree });
+      const result = await this.delegateToSelected(request, content);
       binding?.commit();
       return result;
     } finally { binding?.[Symbol.dispose](); }
+  }
+
+  private async delegateToSelected(request: z.infer<typeof delegateFromUserRequest>, content: ContentBlock[], prompt = request.prompt.trim() || '处理附件任务') {
+    const requestHash = createHash('sha256').update(JSON.stringify(request)).digest('hex');
+    const sessions = [];
+    for (const harness of request.harnesses) {
+      const requestId = request.harnesses.length === 1 ? request.requestId
+        : `multi-${createHash('sha256').update(JSON.stringify([request.requestId, harness])).digest('hex')}`;
+      const result = await this.delegate(request.sessionId, {
+        requestId, harness, reportBack: request.reportBack, prompt, ...(request.title ? { title: request.title } : {}),
+      }, { content, requestHash, worktree: request.worktree });
+      sessions.push({ sessionId: result.sessionId, harness: result.harness });
+    }
+    return { ...sessions[0]!, sessions, accepted: true as const };
   }
 
   /** The name of the source session's skill that `prompt` starts with, if any. */
@@ -531,7 +546,7 @@ export class HarnessService extends TypertRemoteService {
 
   /** `/delegate /skill task`: the source session runs the skill; its reply goes to the delegated Harness when that turn completes. */
   private async handOffAfterSkill(request: z.infer<typeof delegateFromUserRequest>, skill: string) {
-    const accepted = { harness: request.harness, accepted: true as const };
+    const accepted = { harness: request.harnesses[0]!, accepted: true as const };
     const source = await this.agent(request.sessionId);
     if (userMessageAt(source.session.snapshotEvents(), request.requestId) >= 0) return accepted;
     const pending = this.handoffs.get(request.sessionId);
@@ -570,9 +585,7 @@ export class HarnessService extends TypertRemoteService {
       ? event.data.message.content.flatMap(part => part.type === 'text' ? [part.text] : []) : []).join('\n\n').trim();
     const task = request.prompt.trim().slice(skill.length + 1).trim();
     const prompt = `${task || `按 /${skill} 的结果继续`}\n\n[来源会话 /${skill} 的结果]\n${reply || '（无文字回复）'}`.slice(0, 64_000);
-    await this.delegate(sessionId, {
-      requestId: request.requestId, harness: request.harness, reportBack: request.reportBack, prompt, ...(request.title ? { title: request.title } : {}),
-    }, { content: [...content.slice(0, -1), { type: 'text', text: prompt }], requestHash: createHash('sha256').update(JSON.stringify(request)).digest('hex'), worktree: request.worktree });
+    await this.delegateToSelected(request, [...content.slice(0, -1), { type: 'text', text: prompt }], prompt);
   }
 
   private async admitUserPrompt(request: z.infer<typeof delegateFromUserRequest> | z.infer<typeof startDiscussionFromUserRequest>) {
@@ -594,6 +607,7 @@ export class HarnessService extends TypertRemoteService {
 
   async startDiscussionFromUser(raw: unknown) {
     const request = startDiscussionFromUserRequest.parse(raw);
+    if ((await this.bindings.readDelegated(request.sessionId))?.delegation.discussion) throw new Error('讨论会话不能创建新讨论');
     const source = await this.agent(request.sessionId);
     if (source.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.source.kind === 'user' && 'rpcId' in event.data.source && event.data.source.rpcId === request.requestId)) return { accepted: true as const };
     const active = this.discussions.get(request.sessionId);
@@ -602,11 +616,12 @@ export class HarnessService extends TypertRemoteService {
       throw new Error('当前轮次的讨论仍在进行，请等待完成后再开启新讨论');
     }
     const admitted = await this.admitUserPrompt(request);
-    this.discussions.set(request.sessionId, { requestId: request.requestId, content: admitted.content });
+    this.discussions.set(request.sessionId, { requestId: request.requestId, content: admitted.content, ...(request.harnesses ? { harnesses: request.harnesses } : {}) });
     try {
       const sourceContent = [...admitted.content];
       if (request.prompt.trim() && sourceContent.at(-1)?.type === 'text') sourceContent.pop();
-      admitted.source.followup(createUserMessage({ content: [{ type: 'text', text: `/discuss ${request.prompt.trim() || '处理附件任务'}` }, ...sourceContent], source: { kind: 'user', rpcId: request.requestId } }));
+      const selection = request.harnesses ? `\n\n参与 Harness：${request.harnesses.join('、')}；每个选中的 Harness 至少分配一个参与者，只使用这些 Harness。` : '';
+      admitted.source.followup(createUserMessage({ content: [{ type: 'text', text: `/discuss ${request.prompt.trim() || '处理附件任务'}${selection}` }, ...sourceContent], source: { kind: 'user', rpcId: request.requestId } }));
       await this.ctx.sessions.flush(admitted.source.session);
       admitted.binding?.commit();
       return { accepted: true as const };
@@ -618,9 +633,14 @@ export class HarnessService extends TypertRemoteService {
 
   async discuss(source: string, raw: unknown): Promise<DiscussionResult> {
     const request = discussionRequest.parse(raw);
+    if ((await this.bindings.readDelegated(source))?.delegation.discussion) throw new Error('讨论会话不能创建新讨论');
     await this.agent(source);
     const authorization = this.discussions.get(source);
     if (!authorization) throw new Error('请先由用户使用 /discuss 明确开启讨论模式');
+    if (authorization.harnesses && (request.assignments.some(assignment => !authorization.harnesses!.some(harness => harness === assignment.harness))
+      || authorization.harnesses.some(harness => !request.assignments.some(assignment => assignment.harness === harness)))) {
+      throw new Error('讨论分工必须覆盖每个选中的 Harness，且不能使用未选中的 Harness');
+    }
     const inputHash = createHash('sha256').update(JSON.stringify(request)).digest('hex');
     if (authorization.work) {
       if (authorization.inputHash !== inputHash) throw new Error('本轮讨论已使用不同分工启动，不能再次创建会话');
@@ -631,6 +651,7 @@ export class HarnessService extends TypertRemoteService {
   }
 
   private async runDiscussion(source: string, authorization: { requestId: string; content: ContentBlock[] }, assignments: z.infer<typeof discussionRequest>['assignments']): Promise<DiscussionResult> {
+    if (assignments.some(assignment => assignment.harness === 'dsh')) throw new Error('DSH 原生暂不支持强制只读讨论');
     const participants: Array<{ sessionId: SessionId; harness: 'dsh' | Binding['harness']; role?: string; task: string }> = [];
     for (const [index, assignment] of assignments.entries()) {
       const requestId = `${authorization.requestId}:participant:${index}`;
@@ -638,7 +659,7 @@ export class HarnessService extends TypertRemoteService {
       const prompt = `${role}分工：${assignment.task}`;
       const requestHash = createHash('sha256').update(JSON.stringify([authorization.requestId, index, assignment])).digest('hex');
       const created = await this.delegate(source, { requestId, harness: assignment.harness, prompt, title: `讨论 · ${assignment.role ?? assignment.task}`.slice(0, 80), reportBack: false }, {
-        content: [...authorization.content, { type: 'text', text: `\n\n[讨论分工]\n${prompt}\n独立完成本轮分析；不要等待或联系其他参与者。` }], requestHash,
+        content: [...authorization.content, { type: 'text', text: `\n\n[讨论分工]\n${prompt}\n独立完成本轮分析；不要等待或联系其他参与者。` }], requestHash, discussion: true,
       });
       participants.push({ sessionId: created.sessionId, harness: created.harness, ...(assignment.role ? { role: assignment.role } : {}), task: assignment.task });
     }
@@ -646,6 +667,7 @@ export class HarnessService extends TypertRemoteService {
     const first = await Promise.all(participants.map(async participant => ({ ...participant, ...await this.readDiscussionResult(source, participant.sessionId) })));
     if (participants.length > 1) {
       await Promise.all(participants.map(async (participant, index) => {
+        if (first[index]?.status !== 'completed') return;
         const peers = first.filter((_, peer) => peer !== index).map((entry, peer) => `参与者 ${peer + 1}${entry.role ? `（${entry.role}）` : ''}：\n${entry.text.slice(0, 12_000)}`).join('\n\n');
         await this.ctx.sessionController.prompt({ sessionId: participant.sessionId, requestId: brandString<SessionRequestId>(`${authorization.requestId}:review:${index}`), mode: 'queue',
           content: [{ type: 'text', text: `[讨论互评 · 第 2/2 轮]\n请审阅其他参与者的结果，指出冲突、遗漏或可合并之处，并给出修正后的结论。不要创建新会话。\n\n${peers}` }] }, new AbortController().signal);
@@ -661,7 +683,8 @@ export class HarnessService extends TypertRemoteService {
 
   private async readDiscussionResult(source: string, sessionId: string) {
     const summary = await this.readDelegation(source, { sessionId, limit: 1 });
-    return this.readDelegation(source, { sessionId, offset: Math.max(0, summary.totalChars - 16_000), limit: 16_000, throughSeq: summary.throughSeq });
+    const result = await this.readDelegation(source, { sessionId, offset: Math.max(0, summary.totalChars - 16_000), limit: 16_000, throughSeq: summary.throughSeq });
+    return result.status === 'completed' ? result : { ...result, text: `${result.text}\n\n[讨论参与者未完成：${result.status}]\n${JSON.stringify(result.outcome)}` };
   }
 
   async readDelegation(source: string, raw: unknown) {
@@ -900,6 +923,7 @@ export class HarnessService extends TypertRemoteService {
       const agent = await this.agent(request.sessionId);
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) throw new Error('请使用 DSH 原生权限选择器');
+      if (binding.delegation?.discussion) throw new Error('讨论会话权限已锁定，不能切换权限模式');
       if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending) throw new Error('请等待当前请求结束');
       const inspection = await this.inspection(binding);
       if ('error' in inspection) throw new Error(inspection.error);
@@ -919,6 +943,7 @@ export class HarnessService extends TypertRemoteService {
       const agent = await this.agent(request.sessionId);
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) throw new Error('请使用 DSH 原生配置');
+      if (binding.delegation?.discussion) throw new Error('讨论会话不能修改 Harness 配置');
       if (agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length || binding.pending) throw new Error('请等待当前请求结束');
       const catalog = await this.catalog(binding);
       if ('error' in catalog) throw new Error(catalog.error);
@@ -961,6 +986,7 @@ export class HarnessService extends TypertRemoteService {
     if (args === 'off' && attachments.length) throw new Error('/plan off 不能附带附件');
     const binding = await this.bindings.read(sessionId);
     if (!binding) throw new Error('请使用 DSH 原生计划模式');
+    if (binding.delegation?.discussion) throw new Error('讨论会话权限已锁定，不能切换计划模式');
     const inspection = await this.inspection(binding);
     if ('error' in inspection) throw new Error(inspection.error);
     const modes = inspection.permissionModes;
@@ -1171,6 +1197,7 @@ export class HarnessService extends TypertRemoteService {
       return this.bindings.serial(request.sessionId, async () => {
         const binding = await this.bindings.read(request.sessionId);
         if (!binding) return native.fork(request);
+        if (binding.delegation?.discussion) throw new Error('讨论会话不能创建分支');
         const agent = await this.agent(request.sessionId);
         if (binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先等待当前请求结束');
         let throughTurn: string | undefined;

@@ -42,8 +42,8 @@ type Api = {
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
   plugins(request: {sessionId: string}): Promise<RemoteResult<Plugin[]>>;
   edit(request: {sessionId: string; seq: number; text: string; requestId: string}): Promise<RemoteResult<State>>;
-  delegateFromUser(request: {sessionId: string; requestId: string; harness: State['harness']; prompt: string; reportBack: boolean; worktree: boolean; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId?: string; harness: State['harness']; accepted: true}>>;
-  startDiscussionFromUser(request: {sessionId: string; requestId: string; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
+  delegateFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; reportBack: boolean; worktree: boolean; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId?: string; harness: State['harness']; accepted: true}>>;
+  startDiscussionFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
 };
 const zh = {
   harness: '选择 Harness', model: '选择 Harness 模型', native: 'DSH 原生', defaultModel: '默认模型',
@@ -73,7 +73,7 @@ const zh = {
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
   worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code',
   discuss: '讨论', discussDescription: '由主 Agent 分配一个或多个会话并汇总', discussTask: '讨论任务', discussStarted: '已开始讨论',
-  discussHint: '主 Agent 自动选择 1–4 个会话；多个会话完成后互评一轮', discussExit: '退出讨论模式',
+  discussHint: '可多选；主 Agent 为选中的 Harness 分工并汇总', discussExit: '退出讨论模式', discussNative: 'DSH 原生暂不支持只读讨论',
 };
 const en: Record<keyof typeof zh,string> = {
   harness:'Select Harness', model:'Select Harness model', native:'Native DSH', defaultModel:'Default model',
@@ -103,7 +103,7 @@ const en: Record<keyof typeof zh,string> = {
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
   worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex and Claude Code only',
   discuss:'Discuss', discussDescription:'Let the main agent assign one or more sessions and synthesize', discussTask:'Discussion task', discussStarted:'Discussion started',
-  discussHint:'The main agent selects 1–4 sessions; multiple sessions peer-review once', discussExit:'Exit discussion mode',
+  discussHint:'Select one or more; the main agent assigns the selected Harnesses and synthesizes', discussExit:'Exit discussion mode', discussNative:'Native DSH does not support read-only discussions yet',
 };
 type Key = keyof typeof zh;
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -264,9 +264,11 @@ function useModelProvider(modelProvider: Injected['modelProvider'], sessionId: s
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-type DelegationOptions = { harness: State['harness']; reportBack: boolean; worktree: boolean };
+type DelegationOptions = { harnesses: State['harness'][]; reportBack: boolean; worktree: boolean };
 const delegationOptions = new Map<string, DelegationOptions>();
-const optionsFor = (sessionId: string) => delegationOptions.get(sessionId) ?? { harness: 'codex' as const, reportBack: false, worktree: false };
+const optionsFor = (sessionId: string): DelegationOptions => delegationOptions.get(sessionId) ?? { harnesses: ['codex'], reportBack: false, worktree: false };
+const discussionHarnesses = new Map<string, State['harness'][]>();
+const discussionFor = (sessionId: string): State['harness'][] => discussionHarnesses.get(sessionId) ?? ['codex', 'claude-code'];
 // The host keeps delegation mode only while the draft starts with the hidden `/delegate ` token (or is `/delegate`), so no
 // edit may reach into it, and an empty task has nothing to send. `start` is the selection's offset in the first paragraph.
 function guardDelegateToken(event: Pick<KeyboardEvent, 'key' | 'shiftKey' | 'metaKey' | 'isComposing'>, start: number | undefined, collapsed: boolean, emptyTask: boolean, token: string): boolean {
@@ -291,7 +293,7 @@ let delegationRequestSequence = 0;
 const delegationRequestId = () => globalThis.crypto?.randomUUID?.() ?? `delegate-${Date.now()}-${++delegationRequestSequence}`;
 const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
   const requestId = delegationRequestId();
-  delegationOptions.set(session.sessionId, { harness: 'codex', reportBack: false, worktree: false });
+  delegationOptions.set(session.sessionId, { harnesses: ['codex'], reportBack: false, worktree: false });
   return {
     name: 'delegate', token: '/delegate ', hint: t('delegateTask'), attachments: true,
     async submit(prompt, _actx, attachments) {
@@ -304,10 +306,12 @@ const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): Comm
 };
 const discussionClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
   const requestId = delegationRequestId();
+  discussionHarnesses.set(session.sessionId, ['codex', 'claude-code']);
   return {
     name: 'discuss', token: '/discuss ', hint: t('discussTask'), attachments: true,
     async submit(prompt, _actx, attachments) {
-      await value(remote.startDiscussionFromUser({ sessionId: session.sessionId, requestId, prompt, attachments }));
+      await value(remote.startDiscussionFromUser({ sessionId: session.sessionId, requestId, prompt, attachments, harnesses: discussionFor(session.sessionId) }));
+      discussionHarnesses.delete(session.sessionId);
       return { kind: 'success', text: t('discussStarted') };
     },
   };
@@ -373,19 +377,25 @@ function useTaskModeDock(input: DelegationDockProps['input']) {
   return { dock, emptyTask: attachments === 0 && input.draft.slice(token?.length).trim() === '' };
 }
 
+function TaskHarnessSelector({ selected, onChange, discussion = false, t }: { selected: State['harness'][]; onChange: (selected: State['harness'][]) => void; discussion?: boolean; t: T }) {
+  const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code' };
+  return <div className="hp-delegate-harness" role="group" aria-label={t('harness')}>
+    {(Object.keys(names) as State['harness'][]).map(harness => <button key={harness} type="button" role="checkbox" aria-checked={selected.includes(harness)}
+      disabled={discussion && harness === 'dsh'} title={discussion && harness === 'dsh' ? t('discussNative') : undefined}
+      onClick={() => { const next = selected.includes(harness) ? selected.filter(value => value !== harness) : [...selected, harness]; if (next.length) onChange(next); }}>
+      {selected.includes(harness) && <Check />}{names[harness]}
+    </button>)}
+  </div>;
+}
 function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationDockProps) {
   const [options, setOptions] = useState(() => optionsFor(sessionId));
   const { dock, emptyTask } = useTaskModeDock(input);
   const update = (next: DelegationOptions) => { delegationOptions.set(sessionId, next); setOptions(next); };
-  const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code' };
   return <div ref={dock} className="hp-delegate" data-hp-mode="delegate" data-hp-empty={emptyTask ? '' : undefined} aria-label={t('delegateMode')}>
     <strong>{t('delegateMode')}</strong>
-    <div className="hp-delegate-harness" role="radiogroup" aria-label={t('harness')}>
-      {(Object.keys(names) as State['harness'][]).map(harness => <button key={harness} type="button" role="radio" aria-checked={options.harness === harness}
-        onClick={() => update({ ...options, harness, worktree: harness !== 'dsh' && options.worktree })}>{names[harness]}</button>)}
-    </div>
-    <label className="hp-delegate-report" title={options.harness === 'dsh' ? t('worktreeNative') : t('worktreeHint')}>
-      <input type="checkbox" checked={options.worktree} disabled={options.harness === 'dsh'} onChange={event => update({ ...options, worktree: event.target.checked })} />
+    <TaskHarnessSelector selected={options.harnesses} onChange={harnesses => update({ ...options, harnesses, worktree: !harnesses.includes('dsh') && options.worktree })} t={t} />
+    <label className="hp-delegate-report" title={options.harnesses.includes('dsh') ? t('worktreeNative') : t('worktreeHint')}>
+      <input type="checkbox" checked={options.worktree} disabled={options.harnesses.includes('dsh')} onChange={event => update({ ...options, worktree: event.target.checked })} />
       <span>{t('worktree')}</span>
     </label>
     <label className="hp-delegate-report" title={!options.reportBack ? t('reportBackOff') : undefined}>
@@ -396,18 +406,20 @@ function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationD
       onClick={() => { delegationOptions.delete(sessionId); inputActions.setDraft(input.draft.startsWith('/delegate ') ? input.draft.slice(10) : input.draft); }}>×</button>
   </div>;
 }
-function DiscussionDockActive({ input, inputActions, t }: DelegationDockProps) {
+function DiscussionDockActive({ input, sessionId, inputActions, t }: DelegationDockProps) {
   const { dock, emptyTask } = useTaskModeDock(input);
+  const [selected, setSelected] = useState(() => discussionFor(sessionId));
   return <div ref={dock} className="hp-delegate" data-hp-mode="discuss" data-hp-empty={emptyTask ? '' : undefined} aria-label={t('discuss')}>
-    <strong>{t('discuss')}</strong><span className="hp-discuss-hint">{t('discussHint')}</span>
+    <strong title={t('discussHint')}>{t('discuss')}</strong>
+    <TaskHarnessSelector selected={selected} onChange={harnesses => { discussionHarnesses.set(sessionId, harnesses); setSelected(harnesses); }} discussion t={t} />
     <button type="button" className="hp-delegate-exit" aria-label={t('discussExit')} title={t('discussExit')}
-      onClick={() => inputActions.setDraft(input.draft.startsWith('/discuss ') ? input.draft.slice(9) : input.draft)}>×</button>
+      onClick={() => { discussionHarnesses.delete(sessionId); inputActions.setDraft(input.draft.startsWith('/discuss ') ? input.draft.slice(9) : input.draft); }}>×</button>
   </div>;
 }
 function DelegationDock(props: DelegationDockProps) {
-  if (props.input.claim?.name === 'delegate') return <DelegationDockActive {...props} />;
+  if (props.input.claim?.name === 'delegate') return <DelegationDockActive key={props.sessionId} {...props} />;
   if (props.input.claim?.name !== 'discuss') return null;
-  return <DiscussionDockActive {...props} />;
+  return <DiscussionDockActive key={props.sessionId} {...props} />;
 }
 
 const RADIUS = 5.5, CIRCUMFERENCE = 2 * Math.PI * RADIUS;
@@ -962,12 +974,14 @@ ${nativeContextColors}
    like the host's disabled one (the keydown guard blocks Enter). */
 [data-composer-seat]:has(.hp-delegate[data-hp-empty]) [data-composer-card] button[class$="_primary"]{opacity:.4;cursor:default;pointer-events:none}
 .hp-delegate-harness{display:flex;padding:2px;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover)}
-.hp-delegate-harness button{height:26px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer}
+.hp-delegate-harness button{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer}
+.hp-delegate-harness button:disabled{opacity:.4;cursor:not-allowed}
+.hp-delegate-harness button svg{width:13px;height:13px;flex:none}
 .hp-delegate-harness button[aria-checked=true]{background:var(--dsw-specific-menu);color:var(--dsw-alias-label-primary)}
 .hp-delegate-harness button:focus-visible,.hp-delegate-exit:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px}
 .hp-delegate-report{display:flex;align-items:center;gap:6px;margin-left:auto;white-space:nowrap;cursor:pointer}.hp-delegate-report input{margin:0}
 .hp-delegate-report+.hp-delegate-report{margin-left:0}.hp-delegate-report:has(input:disabled){opacity:.5;cursor:not-allowed}
-.hp-discuss-hint{flex:1;min-width:0;color:var(--dsw-alias-label-tertiary)}
+.hp-delegate[data-hp-mode=discuss] .hp-delegate-exit{margin-left:auto}
 .hp-delegate-exit{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:18px;cursor:pointer}.hp-delegate-exit:hover{background:var(--dsw-alias-interactive-bg-hover)}
 @media(max-width:600px){.hp-delegate{flex-wrap:wrap}.hp-delegate-report{margin-left:0}.hp-delegate-exit{margin-left:auto}}
 `;

@@ -184,7 +184,13 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
     },
     // The same system-prompt append the SDK adapter used; ACP forwards it through the agent's own options channel. Host
     // instructions (delegation) ride along, so they stay out of the user's messages and survive context compaction.
-    sessionMeta: (_kind, instructions) => ({ systemPrompt: { append: feedbackInstructions + (instructions ?? '') } }),
+    sessionMeta: (_kind, instructions, discussion) => ({ systemPrompt: { append: feedbackInstructions + (instructions ?? '') },
+      ...(discussion ? { claudeCode: { options: {
+        tools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'], allowDangerouslySkipPermissions: false,
+        settingSources: [], settings: { disableAllHooks: true }, plugins: [],
+        extraArgs: { 'strict-mcp-config': '' },
+      } } } : {}),
+    }),
     legacyThinkingOptions: { auto: 'default', off: 'default' },
     titleCommand: title => `/rename ${title}`,
     inspectAccount: async () => {

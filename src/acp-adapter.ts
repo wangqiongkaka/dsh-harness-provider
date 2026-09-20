@@ -41,7 +41,7 @@ export interface AcpProfile {
    * `_meta` for session/new and session/load: the agent's own options channel (system prompt, SDK options). A profile
    * that defines it carries the Host's session instructions there. Instructions never enter the user's prompt.
    */
-  sessionMeta?(kind: 'create' | 'resume', instructions?: string): Record<string, unknown> | undefined;
+  sessionMeta?(kind: 'create' | 'resume', instructions?: string, discussion?: true): Record<string, unknown> | undefined;
   /** Ids persisted by the previous, non-ACP adapters mapped onto the agent's ids. */
   legacyPermissionModes?: Record<string, string>;
   legacyThinkingOptions?: Record<string, string>;
@@ -552,7 +552,7 @@ class AcpSession implements HarnessSession {
     const replay: acp.SessionNotification[] = [];
     let commands: acp.AvailableCommand[] | undefined;
     let sessionId = input.kind === 'resume' ? input.nativeRef.nativeSessionId : undefined;
-    const process_ = await AcpProcess.connect(profile, options.environment, input.cwd, {
+    const process_ = await AcpProcess.connect(profile, { ...options.environment, DSH_DISCUSSION_READ_ONLY: input.discussion ? '1' : undefined }, input.cwd, {
       update: notification => {
         if (session) { session.#notify(notification); return; }
         if (sessionId === undefined) return;
@@ -565,7 +565,7 @@ class AcpSession implements HarnessSession {
       fault: cause => { if (session) session.#faulted(toError(cause, 'ACP agent exited')); },
     }, input.instructions);
     try {
-      const meta = profile.sessionMeta?.(input.kind, input.instructions);
+      const meta = profile.sessionMeta?.(input.kind, input.instructions, input.discussion);
       let opened: Opened;
       if (input.kind === 'create') {
         const created = await request<acp.NewSessionResponse>(process_.agent, 'session/new', { cwd: input.cwd, mcpServers: [], ...(meta ? { _meta: meta } : {}) });
@@ -985,7 +985,7 @@ class AcpSession implements HarnessSession {
     const interaction: HostApprovalInteraction = {
       type: 'approval', interactionId: hostInteractionIdSchema.parse(randomUUID()), turnId: active.hostId, title, ...(description ? { description } : {}), subject: { type: 'nativeAction' },
       actions: params.options.map(option => ({ id: option.optionId, label: option.name,
-        effect: option.kind === 'allow_once' ? 'allowOnce' : option.kind === 'allow_always' ? 'allowAlways' : 'deny' })),
+        effect: option.kind === 'allow_once' ? 'allowOnce' : option.kind === 'allow_always' ? 'allowAlways' : option.kind === 'reject_once' ? 'denyOnce' : 'denyAlways' })),
     };
     return this.#ask(active, interaction, 'permission', signal) as Promise<acp.RequestPermissionResponse>;
   }
@@ -996,7 +996,7 @@ class AcpSession implements HarnessSession {
     if (params.mode === 'url') {
       const url = 'url' in params ? String(params.url) : '';
       const interaction: HostApprovalInteraction = { type: 'approval', interactionId: hostInteractionIdSchema.parse(randomUUID()), turnId: active.hostId, title, description: url,
-        subject: { type: 'nativeAction' }, actions: [{ id: 'accept', label: 'Continue after completing the browser step', effect: 'allowOnce' }, { id: 'decline', label: 'Cancel', effect: 'deny' }] };
+        subject: { type: 'nativeAction' }, actions: [{ id: 'accept', label: 'Continue after completing the browser step', effect: 'allowOnce' }, { id: 'decline', label: 'Cancel', effect: 'denyOnce' }] };
       return this.#ask(active, interaction, 'url', signal, undefined, 'elicitationId' in params ? String(params.elicitationId) : undefined) as Promise<acp.CreateElicitationResponse>;
     }
     if (params.mode !== 'form') return Promise.resolve({ action: 'cancel' });

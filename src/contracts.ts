@@ -75,6 +75,7 @@ export interface HostUsage {
 }
 
 interface SessionHints {
+  discussion?: true;
   cwd: string; environment?: Record<string, string | undefined>;
   model?: HarnessModelRef; thinkingOptionId?: HarnessThinkingOptionId; permissionModeId?: HarnessPermissionModeId;
   configValues?: Record<string, HarnessConfigValue>;
@@ -110,7 +111,7 @@ export type HostQuestion = HostChoiceQuestion | HostTextQuestion;
 export interface HostQuestionInteraction {
   type: 'question'; interactionId: HostInteractionId; turnId: HostTurnId; itemId?: HostItemId; title?: string; questions: HostQuestion[]; expiresAt?: string;
 }
-export type HostApprovalEffect = 'allowOnce' | 'allowForSession' | 'allowAlways' | 'deny';
+export type HostApprovalEffect = 'allowOnce' | 'allowForSession' | 'allowAlways' | 'denyOnce' | 'denyAlways';
 export interface HostApprovalAction { id: string; label: string; effect: HostApprovalEffect }
 export interface HostApprovalInteraction {
   type: 'approval'; interactionId: HostInteractionId; turnId: HostTurnId; title: string; description?: string;

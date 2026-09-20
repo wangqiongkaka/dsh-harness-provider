@@ -140,6 +140,11 @@ test('Harness sessions keep /goal /plan /compact, add /clear, hide the other DSH
   await run('codex','/plan');assert.equal(await mode(),'plan');
   await run('codex','/plan');assert.equal(await mode(),'default');
   assert.deepEqual(sent('codex'),[]);
+  for(const id of ['codex','claude']) {
+   const binding=await ctx.harness.bindings.read(id);
+   await ctx.harness.bindings.write({...binding,permission:id==='codex'?'read-only':'plan',delegation:{parentSessionId:'parent',requestHash:'discussion',discussion:true}});
+   await assert.rejects(ctx.commands.execute(agents[id],'/plan off',[],signal),/讨论/);
+  }
 
   await ctx.commands.execute(agents.native,'/compact',[],signal);
   assert.deepEqual(executed,['native /compact']);

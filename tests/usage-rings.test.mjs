@@ -99,7 +99,8 @@ window.reset=(mode,task)=>{
  editor.focus();
 };
 // Safari composes without a keydown first; with the token's style on the selection, Lexical composes inside the token's node.
-window.inheritTokenStyle=()=>editor.update(()=>$getSelection().setStyle('color: var(--dsw-alias-state-warn-label)'),{discrete:true});`,resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'browser',format:'iife',jsx:'automatic',
+window.inheritTokenStyle=()=>editor.update(()=>$getSelection().setStyle('color: var(--dsw-alias-state-warn-label)'),{discrete:true});
+window.selectedHarnesses=mode=>mode==='delegate'?optionsFor('s').harnesses:discussionFor('s');`,resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'browser',format:'iife',jsx:'automatic',
   alias:{react:require.resolve('react'),'react/jsx-runtime':require.resolve('react/jsx-runtime'),'react-dom/client':require.resolve('react-dom/client'),lexical:lexical('lexical'),'@lexical/plain-text':lexical('@lexical/plain-text')}});
  const browser=await chromium.launch({headless:true});
  try {
@@ -144,15 +145,39 @@ window.inheritTokenStyle=()=>editor.update(()=>$getSelection().setStyle('color: 
   await page.evaluate(()=>window.inheritTokenStyle());
   const cdp=await page.context().newCDPSession(page);
   for(const text of ['w','wo'])await cdp.send('Input.imeSetComposition',{text,selectionStart:text.length,selectionEnd:text.length});
-  await cdp.send('Input.insertText',{text:'我'});await settle();
+  await settle();
   const composed=await page.locator('[contenteditable] p>span').first().evaluate(span=>{
    const text=span.firstChild,range=document.createRange();range.setStart(text,'/delegate '.length);range.setEnd(text,text.length);
    const box=span.getBoundingClientRect(),rest=range.getBoundingClientRect(),style=getComputedStyle(span);
    return {text:span.textContent.replace(/\u200b/g,''),width:Math.round(box.width),rest:Math.round(rest.width),left:box.left===span.closest('[contenteditable]').getBoundingClientRect().left,color:style.color,overflow:style.overflow};
   });
-  assert.equal(composed.text,'/delegate 我','the IME composed inside the token node');
+  assert.equal(composed.text,'/delegate wo','the IME composes inside the token node');
   assert.ok(composed.rest>0);
   assert.deepEqual({width:composed.width,left:composed.left,overflow:composed.overflow},{width:composed.rest,left:true,overflow:'clip'},'only the composed text shows, from the start of the line');
   assert.notEqual(composed.color,'rgba(0, 0, 0, 0)');
+  await cdp.send('Input.insertText',{text:'我'});await settle();
+  assert.equal(await text(),'/delegate 我');
+  await page.keyboard.press('Backspace');await settle();
+  assert.equal((await text()).replace(/\u200b/g,''),'/delegate ','输入法提交后可以删掉最后一个字符');
+  // Both real mode docks allow independent toggles and keep at least one recipient.
+  await reset('task');
+  const selector=page.locator('.hp-delegate-harness');
+  assert.equal(await selector.getByRole('checkbox',{name:'Codex',exact:true}).getAttribute('aria-checked'),'true');
+  await selector.getByRole('checkbox',{name:'Claude Code',exact:true}).click();
+  assert.deepEqual(await page.evaluate(()=>window.selectedHarnesses('delegate')),['codex','claude-code']);
+  await selector.getByRole('checkbox',{name:'Codex',exact:true}).click();
+  await selector.getByRole('checkbox',{name:'Claude Code',exact:true}).click();
+  assert.deepEqual(await page.evaluate(()=>window.selectedHarnesses('delegate')),['claude-code'],'the last selected target cannot be cleared');
+  await selector.getByRole('checkbox',{name:'native',exact:true}).click();
+  assert.deepEqual(await page.evaluate(()=>window.selectedHarnesses('delegate')),['claude-code','dsh']);
+  assert.equal(await page.getByRole('checkbox',{name:'worktree',exact:true}).isDisabled(),true);
+  await reset('task','discuss');
+  assert.equal(await selector.getByRole('checkbox',{name:'native',exact:true}).isDisabled(),true);
+  assert.equal(await selector.getByRole('checkbox',{name:'Codex',exact:true}).getAttribute('aria-checked'),'true');
+  assert.equal(await selector.getByRole('checkbox',{name:'Claude Code',exact:true}).getAttribute('aria-checked'),'true');
+  await selector.getByRole('checkbox',{name:'Codex',exact:true}).click();
+  assert.deepEqual(await page.evaluate(()=>window.selectedHarnesses('discuss')),['claude-code']);
+  await selector.getByRole('checkbox',{name:'Codex',exact:true}).click();
+  assert.deepEqual(await page.evaluate(()=>window.selectedHarnesses('discuss')),['claude-code','codex']);
  } finally {await browser.close();}
 });

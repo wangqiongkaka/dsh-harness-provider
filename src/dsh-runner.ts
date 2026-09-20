@@ -5,7 +5,7 @@ import type { UserMessage, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostUsage } from './contracts.js';
 import { hostTurnIdSchema } from './contracts.js';
-import { Bindings, type Binding } from './bindings.js';
+import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { SecretQuestions } from './secret-questions.js';
 import { harnessInput } from './media.js';
 import { DshOutput } from './dsh-output.js';
@@ -132,12 +132,15 @@ export class DshRunner {
     const input = await harnessInput(this.ctx, messages, signal);
     if (!input.length) throw new Error('Harness prompt is empty');
     const delegation = this.delegation;
+    const discussion = binding.delegation?.discussion;
+    if (discussion) binding.permission = DISCUSSION_PERMISSION[binding.harness] as Binding['permission'];
     let live = this.live.get(agent.id);
     if (!live) {
       // The adapter places the instructions: the agent's system prompt, or Codex's developer instructions at launch.
-      const hints = { ...(delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) }, instructions: delegationInstructions() } : {}),
+      const hints = { ...(discussion ? { discussion, instructions: '当前是只读讨论会话。只分析和提出建议；不能修改文件、执行有副作用的操作、创建子会话或请求用户授权。' }
+        : delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) }, instructions: delegationInstructions() } : {}),
         ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
-        ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(binding.configs ? { configValues: binding.configs } : {}),
+        ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(!discussion && binding.configs ? { configValues: binding.configs } : {}),
         ...(binding.usage ? { usage: binding.usage } : {}) };
       const session = unwrap(await this.adapters[binding.harness].open(binding.nativeRef
         ? { kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef, ...hints }
@@ -152,7 +155,10 @@ export class DshRunner {
         this.retainedSubagents.delete(agent.id);
         try { await session.close(); } finally { if (this.live.get(agent.id) === owned) this.live.delete(agent.id); }
       }, 'harness: native session');
-      try { await this.saveState(binding, session.initialState); }
+      try {
+        if (discussion && session.initialState.effectivePermissionModeId !== DISCUSSION_PERMISSION[binding.harness]) throw new Error('讨论会话无法确认只读权限，已停止');
+        await this.saveState(binding, session.initialState);
+      }
       catch (error) {
         // An identity mismatch must not leave a reusable live session behind.
         this.live.delete(agent.id);
@@ -243,13 +249,14 @@ export class DshRunner {
           }
         }
       }
+      if (discussion) await Promise.allSettled(questions);
       if (interactionError) throw interactionError;
       signal.throwIfAborted();
     } catch (error) {
       // A projection/storage/transport failure must not leave native tools running.
       if (binding.pending && !submitted) {
         delete binding.pending; await this.bindings.write(binding);
-      } else if (binding.pending) {
+      } else if (binding.pending || discussion) {
         cancel();
         await cancelWork;
         try { await current.session.close(); } finally { this.live.delete(agent.id); }
@@ -268,6 +275,9 @@ export class DshRunner {
   }
 
   private async saveState(binding: Binding, state: HarnessSessionState): Promise<void> {
+    if (binding.delegation?.discussion && state.effectivePermissionModeId !== undefined && state.effectivePermissionModeId !== DISCUSSION_PERMISSION[binding.harness]) {
+      throw new Error('讨论会话权限发生变化，已停止');
+    }
     if (state.nativeRef) {
       if (state.nativeRef.harnessId !== binding.harness) throw new Error('Harness returned a different identity');
       if (binding.nativeRef && binding.nativeRef.nativeSessionId !== state.nativeRef.nativeSessionId) throw new Error('Harness changed native session identity');
@@ -281,6 +291,17 @@ export class DshRunner {
   }
 
   private async answer(agent: Agent, interaction: HostInteraction, signal: AbortSignal, session: HarnessSession, output: DshOutput): Promise<void> {
+    if ((await this.bindings.readDelegated(agent.id))?.delegation.discussion) {
+      signal.throwIfAborted();
+      let response: HostInteractionResponse;
+      if (interaction.type === 'approval') {
+        const action = interaction.actions.find(action => action.effect === 'denyOnce');
+        if (!action) throw new Error('讨论会话不支持安全拒绝本次权限请求，已停止');
+        response = { type: 'approval', actionId: action.id };
+      } else response = { type: 'question', answers: {}, cancelled: true };
+      unwrap(await session.execute({ type: 'interaction.respond', interactionId: interaction.interactionId, response }));
+      return;
+    }
     if (interaction.type === 'question' && interaction.questions.some(q => q.type === 'text' && q.secret)) {
       const response = await this.secrets.ask(agent.id, interaction, signal);
       if (!response) return;
