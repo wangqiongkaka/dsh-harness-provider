@@ -62,12 +62,12 @@ test('the @ plugin source lists Harness plugins after files and inserts the nati
  assert.equal(await source.codec.serialize(pick.insert.ref,signal),'[@notion](plugin://notion@openai-curated)');
 });
 
-test('the DSH / command source keeps file, goal, plan and compact beside delegate and discuss in Harness sessions', async () => {
+test('the DSH / command source keeps file, goal, plan, compact and localized clear beside delegate and discuss in Harness sessions', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({entryPoints:[resolve('src/client.tsx')],bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
- const rows=['file','model','goal','plan','compact','export'];
+ const rows=['file','model','goal','plan','compact','clear','export'];
  class CommandUi {
   async candidates(session,{query=''}){return rows.filter(name=>!query||name.includes(query)).map(name=>({name,session:session.sessionId,section:['file','goal','plan'].includes(name)?'添加':'指令'}));}
   dispatch(pick){return 'handled:'+pick.candidate.name;} matchSpace(_session,token){return 'handled:'+token;} async matchEnter(_session,line){return 'handled:'+line;}
@@ -81,14 +81,15 @@ test('the DSH / command source keeps file, goal, plan and compact beside delegat
   async startDiscussionFromUser(request){discussions.push(request);return {ok:true,value:{accepted:true}};},
  }};
  const ctx={
-  remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>({delegate:'委派',delegateDescription:'创建独立会话执行任务',delegateTask:'任务',delegateCreated:'已创建委派会话',discuss:'讨论',discussDescription:'由主 Agent 分配多个会话并汇总',discussTask:'讨论任务',discussStarted:'已开始讨论',commands:'指令'})[key]??key},effect(fn){fn();},
+  remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>({clear:'清理',clearDescription:'清理上下文',delegate:'委派',delegateDescription:'创建独立会话执行任务',delegateTask:'任务',delegateCreated:'已创建委派会话',discuss:'讨论',discussDescription:'由主 Agent 分配多个会话并汇总',discussTask:'讨论任务',discussStarted:'已开始讨论',commands:'指令'})[key]??key},effect(fn){fn();},
   inject(keys,apply){if(keys.includes('commandUi'))apply({commandUi,remote,effect(fn){disposers.push(fn());}});},
  };
  await module.exports.apply(ctx);
  const names=async id=>Array.from(await commandUi.candidates({sessionId:id},{query:''}),row=>row.name);
- assert.deepEqual(await names('codex'),['file','goal','plan','compact','delegate','discuss']);
+ assert.deepEqual(await names('codex'),['file','goal','plan','compact','delegate','discuss','clear']);
  const merged=await commandUi.candidates({sessionId:'codex'},{query:''});
- assert.deepEqual(Array.from(merged.filter(row=>['compact','delegate','discuss'].includes(row.name)),row=>row.section),['指令','指令','指令']);
+ assert.deepEqual(Array.from(merged.filter(row=>['compact','delegate','discuss','clear'].includes(row.name)),row=>row.section),['指令','指令','指令','指令']);
+ assert.deepEqual(JSON.parse(JSON.stringify(merged.find(row=>row.name==='clear'))),{name:'clear',session:'codex',section:'指令',label:'清理',description:'清理上下文'});
  const session={sessionId:'codex'},candidate=(await commandUi.candidates(session,{query:'del'}))[0];
  const delegated=commandUi.dispatch({candidate,session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
  assert.equal(delegated.claim.attachments,true);
@@ -109,9 +110,9 @@ test('the DSH / command source keeps file, goal, plan and compact beside delegat
  assert.equal(await commandUi.matchEnter({sessionId:'codex'},'/compact'),'handled:/compact','the server runs /compact on Codex');
  assert.equal(await commandUi.matchEnter({sessionId:'codex'},'/model gpt-5'),undefined,'a typed /model is sent to Codex as a prompt');
  assert.equal(await commandUi.matchEnter({sessionId:'native'},'/model'),'handled:/model');
- assert.deepEqual(await names('native'),['file','model','goal','plan','compact','delegate','discuss','export']);
+ assert.deepEqual(await names('native'),['file','model','goal','plan','compact','delegate','discuss','clear','export']);
  assert.equal(await commandUi.matchEnter({sessionId:'native'},'/compact'),'handled:/compact');
- assert.deepEqual(await names('flaky'),['file','model','goal','plan','compact','delegate','discuss','export'],'an unreadable session keeps the DSH menu');
+ assert.deepEqual(await names('flaky'),['file','model','goal','plan','compact','delegate','discuss','clear','export'],'an unreadable session keeps the DSH menu');
  await commandUi.candidates({sessionId:'flaky'},{query:''});
  assert.deepEqual(reads,['codex','native','flaky','flaky'],'one read per session; a failed read is retried');
  for(const dispose of disposers)dispose?.();

@@ -49,7 +49,7 @@ test('public command wrapper preserves native routing, deduplicates external adm
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });
 
-test('Harness sessions keep /goal /plan /compact on the Harness, hide the other DSH commands, and hide session mentions',async()=>{
+test('Harness sessions keep /goal /plan /compact, add /clear, hide the other DSH commands, and hide session mentions',async()=>{
  const root=await mkdtemp(join(tmpdir(),'dsh-native-slash-'));
  const ctx=new Context();
  const agents=Object.fromEntries(['claude','codex','native'].map(id=>[id,{id,status:'idle',inbox:{nextTurn:[],nextStep:[]},session:{header:{cwd:root},snapshotEvents:()=>[]},sent:[],followup(message){this.sent.push(message);}}]));
@@ -90,7 +90,7 @@ test('Harness sessions keep /goal /plan /compact on the Harness, hide the other 
   await ctx.harness.select({sessionId:'native',harness:'dsh'});
   const signal=new AbortController().signal;
   const listed=async id=>(await ctx.commands.list(agents[id])).map(command=>command.name);
-  assert.deepEqual(await listed('claude'),['compact','goal','plan']);
+  assert.deepEqual(await listed('claude'),['compact','goal','plan','clear']);
   assert.deepEqual(await listed('native'),names);
   const skills=async id=>(await ctx.sessionSkillCatalog.list({sessionId:id},signal)).skills.map(entry=>entry.name);
   assert.deepEqual(await skills('claude'),['review'],'native entries the kept rows cover are not listed twice');
@@ -104,6 +104,24 @@ test('Harness sessions keep /goal /plan /compact on the Harness, hide the other 
   assert.deepEqual(await run('claude','/goal ship it',[{type:'image',mediaType:'image/png',data:png}]),{kind:'success'});
   assert.deepEqual(sent('claude'),[['/compact'],['/goal ship it','image']]);
   assert.equal(await ctx.commands.execute(agents.claude,'/export',[],signal),undefined,'a hidden DSH command stays a prompt');
+
+  // /clear drops the native identity and context-only state; the next prompt creates a fresh native session.
+  const binding=await ctx.harness.bindings.read('claude');
+  Object.assign(binding,{nativeRef:{harnessId:'claude-code',nativeSessionId:'old',formatVersion:1},usage:{contextUsedTokens:12,totalTokens:20},turns:[{turn:1,key:'native-1'}]});
+  await ctx.harness.bindings.write(binding);
+  await assert.rejects(ctx.commands.execute(agents.claude,'/clear now',[],signal),/不接受参数或附件/);
+  await assert.rejects(ctx.commands.execute(agents.claude,'/clear',[{type:'image',mediaType:'image/png',data:png}],signal),/不接受参数或附件/);
+  let closed=0;
+  ctx.harness.runner.live.set('claude',{session:{close:async()=>{closed++;}}});
+  ctx.harness.runner.retainedSubagents.set('claude',[{id:'old-agent'}]);
+  assert.deepEqual(await run('claude','/clear'),{kind:'success'});
+  assert.equal(closed,1);
+  assert.equal(ctx.harness.runner.live.has('claude'),false);
+  assert.equal(ctx.harness.runner.retainedSubagents.has('claude'),false);
+  assert.deepEqual(await ctx.harness.bindings.read('claude'),{
+   version:1,sessionId:'claude',harness:'claude-code',cwd:root,locked:true,
+  });
+  assert.deepEqual(sent('claude'),[['/compact'],['/goal ship it','image']],'clear is handled by the host, not sent as a prompt');
 
   // Claude Code: /plan toggles the plan permission mode and returns to the mode it left.
   await ctx.harness.selectPermission({sessionId:'claude',permission:'acceptEdits'});

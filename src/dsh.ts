@@ -25,7 +25,7 @@ import type {} from '@deepseek-ai/dsh-agent-presets/types';
 import type {} from '@deepseek-ai/dsh-subagent';
 import type {} from '@deepseek-ai/dsh-session-query';
 import type {} from '@deepseek-ai/dsh-commands';
-import type { CommandExecution, CommandSubmitAttachment } from '@deepseek-ai/dsh-commands/types';
+import type { CommandDescriptor, CommandExecution, CommandSubmitAttachment } from '@deepseek-ai/dsh-commands/types';
 import type {} from '@deepseek-ai/dsh-session-reference';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import type { HarnessPlugin, HarnessSubagent } from './contracts.js';
@@ -41,7 +41,8 @@ import { DelegationBridge, delegationRequest, delegationReadRequest, discussionR
 import { createWorktree, mergeWorktree, removeWorktree, worktreeChanged } from './worktree.js';
 
 /** DSH commands a Harness session keeps: the row stays DSH's, the work runs on the Harness's own command or mode. */
-const HARNESS_COMMANDS = new Set(['goal', 'plan', 'compact']);
+const HARNESS_COMMANDS = new Set(['goal', 'plan', 'compact', 'clear']);
+const CLEAR_COMMAND: CommandDescriptor = { name: 'clear', description: 'Clear the Harness context' };
 
 export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions', 'attachments', 'fileUploads'];
 export const configSchema = z.object({
@@ -207,14 +208,16 @@ export class HarnessService extends TypertRemoteService {
         });
       }, 'harness: session skill catalog');
     });
-    // A Harness session keeps only the DSH commands every Harness can carry out (`/goal`, `/plan`, `/compact`), run on the
+    // A Harness session keeps only the DSH commands every Harness can carry out (`/goal`, `/plan`, `/compact`, `/clear`), run on the
     // Harness itself; the rest act on DSH's agent loop and stay hidden, so their `/…` line reaches the Harness as a prompt.
     // The Remote gateway awaits these methods, so the async overrides keep their wire shape.
     ctx.inject(['commands'], scope => {
       const commands = scope.commands;
       const list = commands.list.bind(commands), execute = commands.execute.bind(commands);
-      override(scope, commands, 'list', (async (agent: Parameters<typeof list>[0]) =>
-        await this.boundHarness(agent.id) ? list(agent).filter(command => HARNESS_COMMANDS.has(command.name)) : list(agent)) as unknown as typeof list, 'harness: DSH commands');
+      override(scope, commands, 'list', (async (agent: Parameters<typeof list>[0]) => {
+        const original = list(agent);
+        return await this.boundHarness(agent.id) ? [...original.filter(command => HARNESS_COMMANDS.has(command.name)), ...(original.some(command => command.name === 'clear') ? [] : [CLEAR_COMMAND])] : original;
+      }) as unknown as typeof list, 'harness: DSH commands');
       override(scope, commands, 'execute', async (agent, line, attachments, signal) => {
         if (!await this.boundHarness(agent.id)) return execute(agent, line, attachments, signal);
         const [, name = '', args = ''] = /^\/(\S+)\s*([\s\S]*)$/.exec(line.trim()) ?? [];
@@ -931,7 +934,8 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /**
-   * `/goal` and `/compact` reach the Harness as typed, so its own command runs. `/plan` switches the Harness's plan mode
+   * `/goal` and `/compact` reach the Harness as typed, so its own command runs. `/clear` starts a fresh native context.
+   * `/plan` switches the Harness's plan mode
    * (Claude Code's `plan` permission mode, Codex's plan collaboration mode): bare toggles, `off` leaves, text enters and sends it.
    */
   private async harnessCommand(sessionId: string, name: string, line: string, args: string, attachments: readonly CommandSubmitAttachment[], signal: AbortSignal): Promise<void> {
@@ -939,6 +943,20 @@ export class HarnessService extends TypertRemoteService {
     type Content = Parameters<Context['sessionController']['prompt']>[0]['content'];
     const send = (content: readonly ({ type: 'text'; text: string } | CommandSubmitAttachment)[]) => this.ctx.sessionController.prompt({
       sessionId: SessionId(sessionId), requestId: brandString<SessionRequestId>(`harness-${randomUUID()}`), mode: 'queue', content: content as Content }, signal);
+    if (name === 'clear') {
+      if (args || attachments.length) throw new Error('用法：/clear（不接受参数或附件）');
+      await this.bindings.serial(sessionId, async () => {
+        const agent = await this.agent(sessionId), binding = await this.bindings.read(sessionId);
+        if (!binding) throw new Error('请使用 DSH 原生上下文管理');
+        if (binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先结束当前请求并处理未确认结果');
+        const live = this.runner.live.get(sessionId);
+        if (live) { await live.session.close(); this.runner.live.delete(sessionId); }
+        this.runner.retainedSubagents.delete(sessionId);
+        delete binding.nativeRef; delete binding.usage; delete binding.turns; delete binding.pendingNative;
+        await this.bindings.write(binding);
+      });
+      return;
+    }
     if (name !== 'plan') { await send([{ type: 'text', text: line }, ...attachments]); return; }
     if (args === 'off' && attachments.length) throw new Error('/plan off 不能附带附件');
     const binding = await this.bindings.read(sessionId);

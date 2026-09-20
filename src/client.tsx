@@ -68,6 +68,7 @@ const zh = {
   'subagent.running': '运行中', 'subagent.completed': '已完成', 'subagent.failed': '失败', 'subagent.cancelled': '已取消',
   plugins: '插件',
   edit: '编辑', editCancel: '取消', editSend: '发送', editHint: '发送后从这条消息重新执行，之后的原生上下文会撤销；工作区文件不会还原。',
+  clear: '清理', clearDescription: '清理上下文',
   delegate: '委派', delegateMode: '委派模式', delegateDescription: '创建独立会话执行任务', delegateTask: '当前处于委派模式：描述任务，将交给所选 Harness 在新的独立会话中执行；输入 / 可先用当前会话的 skill（如交接）', delegateCreated: '已创建委派会话', delegatePrepared: '正在当前会话执行 skill，完成后自动创建委派会话', commands: '指令',
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
   worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code',
@@ -97,6 +98,7 @@ const en: Record<keyof typeof zh,string> = {
   'subagent.running':'Running', 'subagent.completed':'Completed', 'subagent.failed':'Failed', 'subagent.cancelled':'Cancelled',
   plugins:'Plugins',
   edit:'Edit', editCancel:'Cancel', editSend:'Send', editHint:'Sending reruns from this message and drops the native context after it; workspace files are not restored.',
+  clear:'Clear', clearDescription:'Clear context',
   delegate:'Delegate', delegateMode:'Delegation mode', delegateDescription:'Create an independent session for this task', delegateTask:'Delegation mode: describe the task for the selected Harness to run in a new session; type / to run one of this session\'s skills (such as a hand-off) first', delegateCreated:'Delegation session created', delegatePrepared:'Running the skill in this session; the delegation starts when it finishes', commands:'Commands',
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
   worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex and Claude Code only',
@@ -1195,7 +1197,7 @@ export async function apply(ctx: Context): Promise<void> {
       name:'conversation.input.left',id:'harness-selector',order:-100,locale:'harness',inject:()=>api,
     },HarnessSelect));
   });
-  // `/` in a Harness session keeps the DSH rows a Harness carries out: attaching files, and goal / plan / compact, which the
+  // `/` in a Harness session keeps the DSH rows a Harness carries out: attaching files, and goal / plan / compact / clear, which the
   // server runs on the Harness. The rest act on DSH's agent (the server already hides its commands); a typed `/model`
   // reaches the Harness as a prompt instead of DSH's model picker.
   ctx.inject(['commandUi', 'remote.harness'], scope => {
@@ -1211,12 +1213,13 @@ export async function apply(ctx: Context): Promise<void> {
     const external = async (sessionId: string) => (await harnessOf(scope.remote.harness, sessionId).catch(() => 'dsh')) !== 'dsh';
     const candidates = runtime.candidates.bind(runtime), dispatch = runtime.dispatch.bind(runtime);
     const matchSpace = runtime.matchSpace.bind(runtime), matchEnter = runtime.matchEnter.bind(runtime);
-    const kept = new Set(['file', 'goal', 'plan', 'compact']);
+    const kept = new Set(['file', 'goal', 'plan', 'compact', 'clear']);
     const replacements: Source = {
       candidates: async (session, request, ...rest) => {
         if (delegateSkillMenus.has(session.sessionId)) return [];
         const original = await candidates(session, request, ...rest);
-        const rows = await external(session.sessionId) ? original.filter(row => kept.has(row.name)) : [...original];
+        const rows = await external(session.sessionId) ? original.filter(row => kept.has(row.name)).map(row => row.name === 'clear'
+          ? { ...row, label: t('clear'), description: t('clearDescription'), section: t('commands') } : row) : [...original];
         const query = request.query.toLowerCase();
         const commands = [
           { name: 'delegate', label: t('delegate'), description: t('delegateDescription'), icon: PluginIcon, section: t('commands') },
