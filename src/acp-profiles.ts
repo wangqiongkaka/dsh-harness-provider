@@ -178,7 +178,9 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
     harnessId: 'claude-code',
     spawn: raw => {
       const env = withUserShellEnvironment({ ...raw });
-      return { command: process.execPath, args: [bundled('claude-agent-acp.mjs')], env: withNodeOnPath({ ...env, CLAUDE_CODE_EXECUTABLE: executable(env), CLAUDE_AGENT_SDK_CLIENT_APP: `${pkg.name}/${pkg.version}` }) };
+      // The SDK spawns the CLI as CLAUDE_CODE_ENTRYPOINT=sdk-ts, which drops the Artifact tools (and with them /design's
+      // canvas) unless CLAUDE_CODE_ARTIFACT is truthy. Default it on; a user-set value still wins.
+      return { command: process.execPath, args: [bundled('claude-agent-acp.mjs')], env: withNodeOnPath({ CLAUDE_CODE_ARTIFACT: '1', ...env, CLAUDE_CODE_EXECUTABLE: executable(env), CLAUDE_AGENT_SDK_CLIENT_APP: `${pkg.name}/${pkg.version}` }) };
     },
     // The same system-prompt append the SDK adapter used; ACP forwards it through the agent's own options channel. Host
     // instructions (delegation) ride along, so they stay out of the user's messages and survive context compaction.
