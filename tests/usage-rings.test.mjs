@@ -48,7 +48,7 @@ test('quota remaining and context used have opposite arcs but the same scarcity 
  } finally {await browser.close();}
 });
 
-test('delegation mode rings only its own composer card in orange', async () => {
+test('delegation and discussion modes share composer styling with distinct colors', async () => {
  const source=await readFile('src/client.tsx','utf8');
  const bundle=await build({stdin:{contents:source+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
@@ -56,24 +56,26 @@ test('delegation mode rings only its own composer card in orange', async () => {
  const browser=await chromium.launch({headless:true});
  try {
   const page=await browser.newPage();
-  const seat=(dock,id)=>`<div data-composer-seat><div>${dock}</div><div><div data-composer-card id="${id}"><div contenteditable><p><span style="color: var(--dsw-alias-state-warn-label);">/delegate </span><span>实现登录</span></p></div></div></div></div>`;
-  await page.setContent(`<style>:root{--dsw-alias-state-warn-label:rgb(255, 128, 0)}${module.exports.styles}</style>`
+  const seat=(dock,id,command='/delegate ')=>`<div data-composer-seat><div>${dock}</div><div><div data-composer-card id="${id}"><div contenteditable><p><span style="color: var(--dsw-alias-state-warn-label);">${command}</span><span>实现登录</span></p></div></div></div></div>`;
+  await page.setContent(`<style>:root{--dsw-alias-state-warn-label:rgb(255, 128, 0);--dsw-static-blue-450:rgb(77, 107, 254)}${module.exports.styles}</style>`
    +seat('<div class="hp-delegate" data-hp-mode="delegate"><strong>委派模式</strong></div>','delegating')
-   +seat('<div class="hp-delegate"><strong>讨论</strong></div>','discussing')+seat('','plain'));
+   +seat('<div class="hp-delegate" data-hp-mode="discuss"><strong>讨论</strong></div>','discussing','/discuss ')+seat('','plain'));
   const shadow=id=>page.locator('#'+id).evaluate(node=>getComputedStyle(node).boxShadow);
   assert.match(await shadow('delegating'),/rgb\(255, 128, 0\)/);
-  assert.equal(await shadow('discussing'),'none');assert.equal(await shadow('plain'),'none');
+  assert.match(await shadow('discussing'),/rgb\(77, 107, 254\)/);assert.equal(await shadow('plain'),'none');
   assert.equal(await page.locator('.hp-delegate[data-hp-mode=delegate]>strong').evaluate(node=>getComputedStyle(node).color),'rgb(255, 128, 0)');
-  // The /delegate token stays in the draft (and the submitted command) but is not shown in delegation mode.
+  assert.equal(await page.locator('.hp-delegate[data-hp-mode=discuss]>strong').evaluate(node=>getComputedStyle(node).color),'rgb(77, 107, 254)');
+  // Mode tokens stay in the draft (and the submitted command) but are not shown in either mode.
   const token=id=>page.locator(`#${id} p>span`).first().evaluate(node=>({width:node.getBoundingClientRect().width,color:getComputedStyle(node).color}));
   assert.deepEqual(await token('delegating'),{width:0,color:'rgba(0, 0, 0, 0)'});
   assert.equal(await page.locator('#delegating [contenteditable]').innerText(),'/delegate 实现登录');
-  assert.notEqual((await token('discussing')).width,0);assert.equal((await token('discussing')).color,'rgb(255, 128, 0)');
+  assert.deepEqual(await token('discussing'),{width:0,color:'rgba(0, 0, 0, 0)'});
+  assert.equal(await page.locator('#discussing [contenteditable]').innerText(),'/discuss 实现登录');
  } finally {await browser.close();}
 });
 
 // The host composer is Lexical with plain-text bindings, which deletes on keydown itself.
-test('delegation mode keeps the hidden token and blocks empty sends in a Lexical editor', async () => {
+test('task modes keep the hidden token and block empty sends in a Lexical editor', async () => {
  const source=await readFile('src/client.tsx','utf8');
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const conversation=resolve('node_modules/@deepseek-ai/dsh-client-ui-conversation'), lexical=name=>resolve(conversation,'node_modules',name);
@@ -84,14 +86,16 @@ import {registerClaimDecoration} from '${conversation}/src/client/input/editor/c
 document.head.append(Object.assign(document.createElement('style'),{textContent:styles}));
 const editor=createEditor({namespace:'composer',onError(error){throw error;}});
 editor.setRootElement(document.querySelector('[contenteditable]'));
-registerPlainText(editor);registerClaimDecoration(editor,()=>'/delegate ');
+let token='/delegate ';
+registerPlainText(editor);registerClaimDecoration(editor,()=>token);
 editor.registerCommand(KEY_ENTER_COMMAND,event=>{event?.preventDefault();document.body.dataset.sent=String(Number(document.body.dataset.sent??0)+1);return true;},COMMAND_PRIORITY_CRITICAL);
 const root=createRoot(document.querySelector('#dock'));
-window.reset=task=>{
+window.reset=(mode,task)=>{
  delete document.body.dataset.sent;
- const input={phase:'claimed',claim:{name:'delegate',token:'/delegate '},draft:'/delegate '+task,attachmentIds:[],draftRev:1,occurrences:[],queue:[]};
+ token=mode==='discuss'?'/discuss ':'/delegate ';
+ const input={phase:'claimed',claim:{name:mode,token},draft:token+task,attachmentIds:[],draftRev:1,occurrences:[],queue:[]};
  root.render(<DelegationDock sessionId="s" input={input} inputActions={{setDraft(){}}} t={key=>key} />);
- editor.update(()=>{const paragraph=$createParagraphNode().append($createTextNode('/delegate ').setStyle('color: var(--dsw-alias-state-warn-label)'));if(task)paragraph.append($createTextNode(task));$getRoot().clear().append(paragraph);paragraph.selectEnd();},{discrete:true});
+ editor.update(()=>{const paragraph=$createParagraphNode().append($createTextNode(token).setStyle('color: var(--dsw-alias-state-warn-label)'));if(task)paragraph.append($createTextNode(task));$getRoot().clear().append(paragraph);paragraph.selectEnd();},{discrete:true});
  editor.focus();
 };
 // Safari composes without a keydown first; with the token's style on the selection, Lexical composes inside the token's node.
@@ -104,7 +108,7 @@ window.inheritTokenStyle=()=>editor.update(()=>$getSelection().setStyle('color: 
   await page.addScriptTag({content:bundle.outputFiles[0].text});
   const text=()=>page.locator('[contenteditable]').innerText();
   const settle=()=>page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,50)));
-  const reset=async task=>{await page.evaluate(task=>window.reset(task),task);await page.locator('.hp-delegate[data-hp-mode=delegate]').waitFor();await settle();};
+  const reset=async(task,mode='delegate')=>{await page.evaluate(({mode,task})=>window.reset(mode,task),{mode,task});await page.locator(`.hp-delegate[data-hp-mode=${mode}]`).waitFor();await settle();};
   await reset('ab');
   for(let i=0;i<5;i++)await page.keyboard.press('Backspace');
   assert.equal(await text(),'/delegate ','held Backspace stops at the token');
@@ -129,6 +133,13 @@ window.inheritTokenStyle=()=>editor.update(()=>$getSelection().setStyle('color: 
   assert.equal(await page.locator('[data-composer-card] button').evaluate(node=>getComputedStyle(node).pointerEvents),'auto');
   await page.keyboard.press('Enter');
   assert.equal(await page.evaluate(()=>document.body.dataset.sent),'1');
+  await reset('ab','discuss');
+  for(let i=0;i<5;i++)await page.keyboard.press('Backspace');
+  assert.equal(await text(),'/discuss ','discussion holds its mode token');
+  await reset('','discuss');
+  assert.equal(await page.locator('[data-composer-card] button').evaluate(node=>getComputedStyle(node).pointerEvents),'none','an empty discussion greys out send');
+  await page.keyboard.press('Enter');
+  assert.equal(await page.evaluate(()=>document.body.dataset.sent),undefined,'Enter does not start an empty discussion');
   await reset('');
   await page.evaluate(()=>window.inheritTokenStyle());
   const cdp=await page.context().newCDPSession(page);

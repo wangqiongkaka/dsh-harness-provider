@@ -192,7 +192,7 @@ test('the model seat follows the Harness of the main-view session and task modes
  const html=renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'claimed',claim:{name:'delegate',token:'/delegate '},draft:'/delegate task',attachmentIds:[],draftRev:1,occurrences:[],queue:[]}}));
  assert.match(html,/委派模式/);assert.match(html,/data-hp-mode="delegate"/);assert.match(html,/DSH 原生/);assert.match(html,/Codex/);assert.match(html,/Claude Code/);assert.match(html,/完成后回传到当前会话/);assert.match(html,/type="checkbox"/);
  const discussionHtml=renderToStaticMarkup(React.createElement(Dock,{...common,input:{phase:'claimed',claim:{name:'discuss',token:'/discuss '},draft:'/discuss task',attachmentIds:[],draftRev:1,occurrences:[],queue:[]}}));
- assert.match(discussionHtml,/讨论/);assert.match(discussionHtml,/1–4/);assert.doesNotMatch(discussionHtml,/type="checkbox"/);
+ assert.match(discussionHtml,/讨论/);assert.match(discussionHtml,/1–4/);assert.match(discussionHtml,/data-hp-mode="discuss"/);assert.doesNotMatch(discussionHtml,/type="checkbox"/);
  api.changed('other','claude-code');
  assert.equal(seats.get('conversation.input.model')??0,0,'a Harness on a background session leaves the DSH model seat');
  api.changed('draft','claude-code');
@@ -222,7 +222,7 @@ test('sidebar marks active turns as breathing, completed sessions as static, and
  await settle();
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
  const css=styles.join('\n');
- assert.match(css,/data-hp-harness="codex"[^}]+width:14px;height:14px;background:#fff[^}]+mask:url/);
+ assert.match(css,/data-hp-harness="codex"[^}]+width:14px;height:14px;background:#10A37F[^}]+mask:url/);
  assert.match(css,/\[data-hp-running\]>span:first-child>\*\{display:none\}/,'the breathing Harness logo replaces native running dots');
  assert.match(css,/\[data-hp-running\]>span:first-child::before\{animation:hp-logo-breathe 1\.4s ease-in-out infinite\}/);
  assert.match(css,/@media \(prefers-reduced-motion:reduce\)\{\[data-hp-running\][^}]+animation:none/);

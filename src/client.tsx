@@ -313,8 +313,7 @@ const discussionClaim = (remote: Api, session: ClientSessionContext, t: T): Comm
   };
 };
 
-function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationDockProps) {
-  const [options, setOptions] = useState(() => optionsFor(sessionId));
+function useTaskModeDock(input: DelegationDockProps['input']) {
   const dock = useRef<HTMLDivElement>(null);
   const token = input.claim?.token;
   const attachments = input.attachmentIds.length;
@@ -371,9 +370,14 @@ function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationD
       seat.removeEventListener('keydown',onKeyDown,true); document.removeEventListener('selectionchange',onSelection);
     };
   }, [token,attachments]);
+  return { dock, emptyTask: attachments === 0 && input.draft.slice(token?.length).trim() === '' };
+}
+
+function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationDockProps) {
+  const [options, setOptions] = useState(() => optionsFor(sessionId));
+  const { dock, emptyTask } = useTaskModeDock(input);
   const update = (next: DelegationOptions) => { delegationOptions.set(sessionId, next); setOptions(next); };
   const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code' };
-  const emptyTask = attachments === 0 && input.draft.slice(token?.length).trim() === '';
   return <div ref={dock} className="hp-delegate" data-hp-mode="delegate" data-hp-empty={emptyTask ? '' : undefined} aria-label={t('delegateMode')}>
     <strong>{t('delegateMode')}</strong>
     <div className="hp-delegate-harness" role="radiogroup" aria-label={t('harness')}>
@@ -392,14 +396,18 @@ function DelegationDockActive({ input, sessionId, inputActions, t }: DelegationD
       onClick={() => { delegationOptions.delete(sessionId); inputActions.setDraft(input.draft.startsWith('/delegate ') ? input.draft.slice(10) : input.draft); }}>×</button>
   </div>;
 }
+function DiscussionDockActive({ input, inputActions, t }: DelegationDockProps) {
+  const { dock, emptyTask } = useTaskModeDock(input);
+  return <div ref={dock} className="hp-delegate" data-hp-mode="discuss" data-hp-empty={emptyTask ? '' : undefined} aria-label={t('discuss')}>
+    <strong>{t('discuss')}</strong><span className="hp-discuss-hint">{t('discussHint')}</span>
+    <button type="button" className="hp-delegate-exit" aria-label={t('discussExit')} title={t('discussExit')}
+      onClick={() => inputActions.setDraft(input.draft.startsWith('/discuss ') ? input.draft.slice(9) : input.draft)}>×</button>
+  </div>;
+}
 function DelegationDock(props: DelegationDockProps) {
   if (props.input.claim?.name === 'delegate') return <DelegationDockActive {...props} />;
   if (props.input.claim?.name !== 'discuss') return null;
-  return <div className="hp-delegate" aria-label={props.t('discuss')}>
-    <strong>{props.t('discuss')}</strong><span className="hp-discuss-hint">{props.t('discussHint')}</span>
-    <button type="button" className="hp-delegate-exit" aria-label={props.t('discussExit')} title={props.t('discussExit')}
-      onClick={() => props.inputActions.setDraft(props.input.draft.startsWith('/discuss ') ? props.input.draft.slice(9) : props.input.draft)}>×</button>
-  </div>;
+  return <DiscussionDockActive {...props} />;
 }
 
 const RADIUS = 5.5, CIRCUMFERENCE = 2 * Math.PI * RADIUS;
@@ -940,15 +948,17 @@ ${nativeContextColors}
 .hp-edit-error{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
 .hp-delegate{display:flex;align-items:center;gap:10px;box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance));max-width:var(--dsh-composer-card-max-width);margin:0 auto;padding:7px 10px;border-bottom:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .hp-delegate>strong{color:var(--dsw-alias-label-primary);font-weight:600}
-.hp-delegate[data-hp-mode=delegate]>strong{color:var(--dsw-alias-state-warn-label);white-space:nowrap}
-/* Delegation mode rings the composer card of the same seat in the orange of the /delegate token. */
-[data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]) [data-composer-card]{--dsw-elevation-stroke-color:var(--dsw-alias-state-warn-label);box-shadow:0 0 0 1.5px var(--dsw-alias-state-warn-label),var(--dsw-elevation-soft,0 0 #0000)}
-/* The dock names the mode, so the composer hides the /delegate token; the draft (and the submitted command) keeps it.
+.hp-delegate[data-hp-mode=delegate],[data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]){--hp-mode-color:var(--dsw-alias-state-warn-label)}
+.hp-delegate[data-hp-mode=discuss],[data-composer-seat]:has(.hp-delegate[data-hp-mode=discuss]){--hp-mode-color:var(--dsw-static-blue-450)}
+.hp-delegate[data-hp-mode]>strong{color:var(--hp-mode-color);white-space:nowrap}
+/* Task modes ring the composer card of the same seat in their command color. */
+[data-composer-seat]:has(.hp-delegate[data-hp-mode]) [data-composer-card]{--dsw-elevation-stroke-color:var(--hp-mode-color);box-shadow:0 0 0 1.5px var(--hp-mode-color),var(--dsw-elevation-soft,0 0 #0000)}
+/* The dock names the mode, so the composer hides its command token; the draft (and the submitted command) keeps it.
    A zero-width box whose text overflows to the left keeps the caret, at the token's end, where the task starts. */
-[data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]) [data-composer-card] [contenteditable] p:first-child>span:first-child[style*="--dsw-alias-state-warn-label"]{display:inline-flex;width:var(--hp-token-rest,0px);justify-content:flex-end;white-space:pre;color:transparent!important;vertical-align:top}
+[data-composer-seat]:has(.hp-delegate[data-hp-mode]) [data-composer-card] [contenteditable] p:first-child>span:first-child[style*="--dsw-alias-state-warn-label"]{display:inline-flex;width:var(--hp-token-rest,0px);justify-content:flex-end;white-space:pre;color:transparent!important;vertical-align:top}
 /* Text composed into the token's node shows after the clipped token; the clip margin keeps the caret at its end visible. */
 [data-composer-seat]:has(.hp-delegate[data-hp-merged]) [data-composer-card] [contenteditable] p:first-child>span:first-child[style*="--dsw-alias-state-warn-label"]{overflow:clip;overflow-clip-margin:2px;color:inherit!important}
-/* The host only sees the hidden token, so an empty delegation task would still look sendable; its send button greys out
+/* The host only sees the hidden token, so an empty task mode would still look sendable; its send button greys out
    like the host's disabled one (the keydown guard blocks Enter). */
 [data-composer-seat]:has(.hp-delegate[data-hp-empty]) [data-composer-card] button[class$="_primary"]{opacity:.4;cursor:default;pointer-events:none}
 .hp-delegate-harness{display:flex;padding:2px;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover)}
@@ -1025,7 +1035,7 @@ const CLAUDE_PATH = 'm4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-
 const svg = (viewBox: string, path: string) => `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${viewBox}"><path d="${path}"/></svg>`)}")`;
 const logos: Record<State['harness'], { mask: string; color: string }> = {
   dsh: { color: '#4D6BFE', mask: svg('0 0 23.16 17.04', FISH_LOGO_PATH) },
-  codex: { color: '#fff', mask: svg('0 0 24 24', OPENAI_PATH) },
+  codex: { color: '#10A37F', mask: svg('0 0 24 24', OPENAI_PATH) },
   'claude-code': { color: '#D97757', mask: svg('0 0 24 24', CLAUDE_PATH) },
 };
 const delegatedMask = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><mask id="m"><circle cx="5" cy="5" r="5" fill="#fff"/><path d="M3 3l4 4M7 4v3H4" stroke="#000" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="5" cy="5" r="5" mask="url(#m)"/></svg>')}")`;
