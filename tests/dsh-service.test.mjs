@@ -36,7 +36,7 @@ test('thinking selection validates against the catalog, persists, and quota read
   const childEvents=[
    {type:'user/message',data:{content:[{type:'text',text:'Map the repo\nthoroughly'}]}},
    {type:'assistant/message',data:{message:{content:[{type:'reasoning',text:'plan'},{type:'text',text:'Looking'},{type:'tool-call',id:'c1',name:'bash',arguments:'{"command":"ls"}'},{type:'tool-call',id:'c2',name:'read',arguments:'{"file_path":"a.ts"}'}]}}},
-   {type:'tool/result',data:{message:{content:[{type:'tool-result',toolCallId:'c1',content:[{type:'text',text:'src'}],isError:false}]}}},
+   {type:'tool/result',data:{message:{role:'tool',source:{kind:'tool'},toolCallId:'c1',content:[{type:'text',text:'src'}],isError:false}}},
    {type:'turn/end',data:{reason:{kind:'completed'}}},
   ];
   ctx.provide('subagents',{listDescendants:async id=>id==='started'?[{kind:'child',id:'child',parentId:'started',depth:1,mode:'one-shot',label:'explorer'},{kind:'diagnostic',id:'bad',reason:'corrupt'},{kind:'child',id:'grandchild',parentId:'child',depth:2,mode:'one-shot'}]:[]});

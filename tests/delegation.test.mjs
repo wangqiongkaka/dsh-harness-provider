@@ -115,7 +115,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   await cli('create',request);assert.equal(turns.length,1);
   await h.notifyDelegation(first.sessionId);
   await ctx.agents.get('parent').whenIdle();
-  const notifications=ctx.agents.get('parent').session.snapshotEvents().filter(e=>e.type==='user/message' && e.data.source.kind==='plugin');
+  const notifications=ctx.agents.get('parent').session.snapshotEvents().filter(e=>e.type==='user/message' && e.data.source.kind==='dsh-harness-provider');
   assert.equal(notifications.length,0,'reportBack=false does not wake the source session');
   assert.equal(ctx.tools.get('harness_delegate'),undefined);assert.ok(ctx.tools.get('harness_delegate_read'));
   const readOnlyEnvironment=await h.delegation.environment('parent');
@@ -167,7 +167,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   permissionPresets.names.push('read-only','workspace-write');
   let stopNativeNotice;
   const nativeNotice=new Promise(resolve=>{stopNativeNotice=ctx.on('agent/inbox/inserted',({agent,message})=>{
-   if(agent.id==='other'&&message.source.kind==='plugin'&&message.source.summary.startsWith('DSH delegation '))resolve(message);
+   if(agent.id==='other'&&message.source.kind==='dsh-harness-provider'&&message.source.summary.startsWith('DSH delegation '))resolve(message);
   });});
   const nativeChild=await h.delegate('other',{...request,requestId:'native-source',reportBack:true});
   await ctx.agents.get(nativeChild.sessionId).whenIdle();
@@ -203,7 +203,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   assert.equal((await h.delegate('other',{requestId:'native-dsh',harness:'dsh',prompt:'Handle this with DSH',reportBack:true})).sessionId,dshChild.sessionId);
   assert.equal(nativePrompts.length,nativePromptCount);
   await h.notifyDelegation(dshChild.sessionId);await nativeAgent.whenIdle();
-  assert.ok(nativeAgent.session.snapshotEvents().some(event=>event.type==='agent/inbox/spliced'&&event.data.inserted?.some(message=>message.source.kind==='plugin'&&message.source.summary.startsWith(`DSH delegation ${dshChild.sessionId}:`))));
+  assert.ok(nativeAgent.session.snapshotEvents().some(event=>event.type==='agent/inbox/spliced'&&event.data.inserted?.some(message=>message.source.kind==='dsh-harness-provider'&&message.source.summary.startsWith(`DSH delegation ${dshChild.sessionId}:`))));
   assert.deepEqual(renamed.at(-1),{sessionId:dshChild.sessionId,title:'DSH 原生 · Handle this with DSH'});
   // A crash before admission leaves an unlocked record; if the user then uses the child, retry must not append the task.
   renameUnavailable=true;

@@ -21,7 +21,7 @@ import type {} from '@deepseek-ai/dsh-attachment';
 import type {} from '@deepseek-ai/dsh-client-file-upload';
 import type { FileUploadReceiptId } from '@deepseek-ai/dsh-client-file-upload/types';
 import type {} from '@deepseek-ai/dsh-session-title';
-import type {} from '@deepseek-ai/dsh-agent-presets/types';
+import type {} from '@deepseek-ai/dsh-agent-preset-registry/types';
 import type {} from '@deepseek-ai/dsh-subagent';
 import type {} from '@deepseek-ai/dsh-session-query';
 import type {} from '@deepseek-ai/dsh-commands';
@@ -106,7 +106,7 @@ export function nativeSubagent(child: { id: string; parentId: string | null; lab
         tools.set(block.id, entry); entries.push(entry);
       }
     } else if (event.type === 'tool/result') {
-      const result = event.data.message.content[0], entry = tools.get(result.toolCallId);
+      const result = event.data.message, entry = tools.get(result.toolCallId);
       if (entry) Object.assign(entry, { status: result.isError ? 'failed' : 'completed', output: textOf(result.content).slice(0, SUBAGENT_OUTPUT_LIMIT) || null });
     } else if (event.type === 'turn/end') end = event.data.reason.kind;
   }
@@ -159,7 +159,7 @@ export class HarnessService extends TypertRemoteService {
       if (!binding) return next();
       await this.runner.run(payload, binding);
       return { kind: 'enter', messages: [] };
-    });
+    }, { prepend: true }); // Own the step before native middleware can append context to the empty completion.
     ctx.on('agent/inbox/inserted', ({ agent }) => { this.runner.drainSteering(agent); });
     ctx.on('session/event', (session, event) => {
       if (event.type === 'turn/end') {
@@ -278,8 +278,8 @@ export class HarnessService extends TypertRemoteService {
         const live = this.runner.live.get(sessionId);
         if (live) { await live.session.close(); this.runner.live.delete(sessionId); }
         const marker = `Harness recovery ${binding.pending}`;
-        if (!agent.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.source.kind === 'plugin' && event.data.source.form === 'notice' && event.data.source.summary === marker)) {
-          agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice', summary: marker },
+        if (!agent.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.source.kind === 'dsh-harness-provider' && event.data.source.form === 'notice' && event.data.source.summary === marker)) {
+          agent.session.append('user/message', createUserMessage({ source: { kind: 'dsh-harness-provider', form: 'notice', summary: marker },
             content: [{ type: 'text', text: confirmed ? detail : '用户已手动解除暂停，保留原生上下文；上次请求结果仍不明确，未重发。' }] }), { surfaceOp: 'append' });
           await this.ctx.sessions.flush(agent.session);
         }
@@ -314,7 +314,7 @@ export class HarnessService extends TypertRemoteService {
     await this.bindings.write(binding);
   }
   private async notice(agent: Awaited<ReturnType<HarnessService['agent']>>, summary: string, text: string) {
-    agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice', summary },
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'dsh-harness-provider', form: 'notice', summary },
       content: [{ type: 'text', text }] }), { surfaceOp: 'append' });
     await this.ctx.sessions.flush(agent.session);
   }
@@ -729,10 +729,10 @@ export class HarnessService extends TypertRemoteService {
       const parent = await this.agent(parentId);
       if (this.stopped) return;
       const marker = `DSH delegation ${id}:${end.seq}`;
-      const delivered = (message: { source: unknown }) => { const source = message.source as { kind?: string; summary?: string }; return source.kind === 'plugin' && source.summary === marker; };
+      const delivered = (message: { source: unknown }) => { const source = message.source as { kind?: string; summary?: string }; return source.kind === 'dsh-harness-provider' && source.summary === marker; };
       if (!parent.inbox.nextTurn.some(delivered) && !parent.inbox.nextStep.some(delivered)
         && !parent.session.snapshotEvents().some(event => event.type === 'user/message' && delivered(event.data))) {
-        parent.followup(createUserMessage({ source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice', summary: marker },
+        parent.followup(createUserMessage({ source: { kind: 'dsh-harness-provider', form: 'notice', summary: marker },
           content: [{ type: 'text', text: `委派会话 ${id} 已结束，状态：${end.data.reason.kind}。请使用委派查询入口分页读取完整结果，然后继续原任务。不要重复创建该任务。` }] }));
         await this.ctx.sessions.flush(parent.session);
       }
@@ -1121,11 +1121,11 @@ export class HarnessService extends TypertRemoteService {
       ?? ctx.get('agentDefaultModel')?.currentSelection().provider;
     const settings = ctx.get('settings');
     if (!provider || !settings) return null;
-    // Settings only carry what the user wrote; a provider configured with just `apiKeyEnv` keeps the endpoint and
-    // credential variable it ships with, and dropping them would hide the whole quota chip.
-    const section = provider === 'deepseek-official'
-      ? (settings.get('llm-deepseek') ?? undefined) as { baseURL?: string; apiKeyEnv?: string } | undefined
-      : ((settings.get('llm-pi-ai') ?? {}) as { providers?: Record<string, { baseURL?: string; apiKeyEnv?: string }> }).providers?.[provider];
+    const registration = ctx.get('llm')?.listConfigurableProviders().find(entry => entry.provider === provider);
+    if (!registration) return null;
+    let config = settings.describe().find(entry => entry.ns === registration.settingsNs)?.value;
+    for (const key of registration.settingsPath) config = (config as Record<string, unknown> | undefined)?.[key];
+    const section = config as { baseURL?: string; apiKeyEnv?: string } | undefined;
     const route = nativeQuotaRoute(provider, section);
     // llm-deepseek also accepts DEEPSEEK_BASE_URL, below its own settings section but above the shipped default.
     if (provider === 'deepseek-official' && !section?.baseURL) route.baseURL = process.env.DEEPSEEK_BASE_URL ?? route.baseURL;

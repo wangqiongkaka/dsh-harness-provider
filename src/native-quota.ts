@@ -52,8 +52,8 @@ export function parseDeepSeekBalance(raw: unknown, source: string): Quota {
 export type NativeRoute = { provider?: string; baseURL?: string; apiKey: string; source: string };
 /**
  * Default endpoint and credential variable each supported provider already carries, keyed by provider route id.
- * The host only hands the plugin the fields a user wrote into settings, so a provider configured with just
- * `apiKeyEnv` (the common case) has no baseURL here and the quota probe must fall back to these defaults.
+ * Provider catalog defaults may be absent from the host's live settings fields;
+ * a route with only `apiKeyEnv` uses its provider's default endpoint.
  * Sources: `@earendil-works/pi-ai` dist/providers/{zai-coding-cn,zai,deepseek}.js and
  * `@deepseek-ai/dsh-llm-deepseek` src/config.ts.
  */

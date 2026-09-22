@@ -11,6 +11,13 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { SessionEventMap } from '@deepseek-ai/dsh-session';
 import type { HostItem, HostItemSnapshot, HostItemUpdate } from './contracts.js';
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Harness lifecycle and delegation notices recorded in the session. */
+    'dsh-harness-provider': { kind: 'dsh-harness-provider'; form: 'notice'; summary: string };
+  }
+}
+
 /**
  * The host footer counts a turn only when every assistant message of it reports usage; the Harness reports one per turn,
  * so the rows before the last one report zero.
@@ -27,6 +34,7 @@ export class DshOutput {
   /** Whether the open step already holds an assistant message, and its calls still awaiting results. */
   private stepMessages = false;
   private openCalls = 0;
+  private readonly waitingItems: Array<{ item: HostItem; completion?: { snapshot: HostItemSnapshot; interrupted: boolean } }> = [];
   constructor(private readonly ctx: Context, private readonly agent: Agent,
     private position: { turn: number; step: number },
     private readonly revision: () => number,
@@ -37,12 +45,14 @@ export class DshOutput {
 
   start(item: HostItem): void {
     if (this.active.has(item.itemId)) throw new Error('Duplicate Harness item');
-    this.flush();
+    if (!this.openCalls) this.flush();
     const prose = item.type === 'agentMessage' || item.type === 'reasoning';
-    if (prose) this.enter();
+    if (prose && !this.openCalls) this.enter();
     const entry = { item: structuredClone(item), stream: new AssistantStreamAccumulator(),
       attemptId: LlmAttemptId(`harness:${randomUUID()}`), index: 0, position: this.position };
     this.active.set(item.itemId, entry);
+    // Keep every durable message behind the pending tool result, including prose and notices.
+    if (this.openCalls) { this.waitingItems.push({ item: entry.item }); return; }
     if (prose) {
       this.emit({ type: 'start', attemptId: entry.attemptId, revision: this.revision(), ...this.position });
       this.push(item.itemId, { type: 'block-start', index: 0, blockType: item.type === 'reasoning' ? 'reasoning' : 'text' });
@@ -58,7 +68,9 @@ export class DshOutput {
     const item = entry.item;
     if (update.type === 'text.append' && (item.type === 'agentMessage' || item.type === 'reasoning')) {
       item.text += update.text;
-      this.push(id, { type: item.type === 'reasoning' ? 'reasoning-delta' : 'text-delta', index: 0, text: update.text });
+      if (!this.waitingItems.some(pending => pending.item.itemId === id)) {
+        this.push(id, { type: item.type === 'reasoning' ? 'reasoning-delta' : 'text-delta', index: 0, text: update.text });
+      }
     } else if (update.type === 'output.append' && item.type === 'commandExecution') item.output = (item.output ?? '') + update.text;
     else if (update.type === 'output.replace' && item.type === 'toolExecution') item.output = update.output;
     else if (update.type === 'fileChanges.replace' && item.type === 'fileChange') item.changes = update.changes;
@@ -69,6 +81,11 @@ export class DshOutput {
   async complete(snapshot: HostItemSnapshot, interrupted = false): Promise<void> {
     const item = snapshot.item;
     if (!this.active.has(item.itemId)) this.start(item);
+    const waiting = this.waitingItems.find(pending => pending.item.itemId === item.itemId);
+    if (waiting) {
+      waiting.completion = { snapshot, interrupted };
+      return;
+    }
     const entry = this.active.get(item.itemId)!;
     if (entry.item.type !== item.type) throw new Error('Harness item changed type');
     if (item.type === 'agentMessage' || item.type === 'reasoning') {
@@ -84,21 +101,31 @@ export class DshOutput {
     } else if (item.type === 'contextCompaction' || item.type === 'subagentDelegation') {
       this.flush();
       this.agent.session.append('user/message', createUserMessage({
-        source: { kind: 'plugin', plugin: 'dsh-harness-provider', form: 'notice',
+        source: { kind: 'dsh-harness-provider', form: 'notice',
           summary: item.type === 'contextCompaction' ? 'Harness context compaction' : 'Harness subagent activity' },
         content: [{ type: 'text', text: JSON.stringify(snapshot) }],
       }), { surfaceOp: 'append' });
     } else {
       this.flush();
-      this.openCalls--;
       this.agent.session.append('tool/result', { ...this.position,
         message: createToolResultMessage({ callId: ToolCallId(item.itemId),
           content: await toolOutput(this.ctx, item), isError: snapshot.outcome.status !== 'succeeded' }),
         meta: { harnessItem: JSON.parse(JSON.stringify(item.type === 'toolExecution' && item.output?.content.some(part => part.type !== 'text') ? { ...item, output: undefined } : item)), outcome: JSON.parse(JSON.stringify(snapshot.outcome)),
           ...editDiffs(item) },
       }, { surfaceOp: 'append' });
+      this.openCalls--;
     }
     this.active.delete(item.itemId);
+    await this.drain();
+  }
+
+  private async drain(): Promise<void> {
+    while (this.openCalls === 0 && this.waitingItems.length) {
+      const next = this.waitingItems.shift()!;
+      this.active.delete(next.item.itemId);
+      this.start(next.item);
+      if (next.completion) await this.complete(next.completion.snapshot, next.completion.interrupted);
+    }
   }
 
   /** A Harness question as DSH's native `ask_user_question` row: waiting while the user answers, then the answers or the verdict. */
@@ -107,23 +134,30 @@ export class DshOutput {
     const call = { type: 'tool-call' as const, id: ToolCallId(`question:${id}`), name: 'ask_user_question', arguments: JSON.stringify({ questions }) };
     this.call(call);
     const position = this.position;
-    const result = (text: string, error?: { name: string; code: string }) => (this.openCalls--, this.agent.session.append('tool/result', { ...position,
-      message: createToolResultMessage({ callId: call.id, content: [{ type: 'text', text }], isError: !!error }), ...(error ? { error } : {}) }, { surfaceOp: 'append' }));
+    const result = async (text: string, error?: { name: string; code: string }) => {
+      this.agent.session.append('tool/result', { ...position,
+        message: createToolResultMessage({ callId: call.id, content: [{ type: 'text', text }], isError: !!error }), ...(error ? { error } : {}) }, { surfaceOp: 'append' });
+      this.openCalls--;
+      await this.drain();
+    };
+    let answer: T;
     try {
-      const answer = await ask();
-      result(JSON.stringify({ answers: answer.answers }));
-      return answer;
+      answer = await ask();
     } catch (error) {
       const failure = error as { name?: unknown; code?: unknown; message?: unknown };
       // DSH names the user's dismissal ASK_CANCELLED and an interrupt ASK_ABORTED; anything else keeps its own identity.
-      result(typeof failure.message === 'string' ? failure.message : String(error),
+      await result(typeof failure.message === 'string' ? failure.message : String(error),
         { name: typeof failure.name === 'string' ? failure.name : 'Error', code: typeof failure.code === 'string' ? failure.code : failure.name === 'AbortError' ? 'ASK_ABORTED' : 'UNKNOWN' });
       throw error;
     }
+    await result(JSON.stringify({ answers: answer.answers }));
+    return answer;
   }
 
   async interrupt(): Promise<void> {
-    for (const entry of [...this.active.values()]) await this.complete({ item: entry.item, outcome: { status: 'cancelled' } }, true);
+    for (const entry of [...this.active.values()]) {
+      if (this.active.has(entry.item.itemId)) await this.complete({ item: entry.item, outcome: { status: 'cancelled' } }, true);
+    }
   }
   /** Commit the deferred agent message with the turn's token usage; without one, a surface-less attempt still carries the count. */
   async finish(usage?: TokenUsage): Promise<void> {
@@ -145,22 +179,19 @@ export class DshOutput {
       outcome: { kind: 'committed', eventType: 'assistant/message', seq: event.seq } });
   }
   /**
-   * The host footer counts a turn's usage only when each step holds exactly one assistant message, and a call's result must
-   * land in the call's step. So every message opens a new step once the current one has no call pending (DSH also shows a
-   * step's latest assistant message only), and a call started while others still run joins their step with its
-   * `tool/call` alone: Codex runs calls in parallel, and the step's message already stands for them.
+   * Native calls may overlap, but their durable records settle one at a time.
+   * Each step has one assistant advertisement and its result, as required by
+   * the session lifecycle validator and exact token accounting.
    */
   private enter(): void {
     if (this.stepMessages && this.openCalls === 0) this.next();
     this.stepMessages = true;
   }
   private call(call: ReturnType<typeof toolCall>): void {
-    if (!this.stepMessages || this.openCalls === 0) {
-      this.enter();
-      this.agent.session.append('assistant/message', { ...this.position,
-        message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [], usage: ZERO,
-      }, { surfaceOp: 'append' });
-    }
+    this.enter();
+    this.agent.session.append('assistant/message', { ...this.position,
+      message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [], usage: ZERO,
+    }, { surfaceOp: 'append' });
     this.agent.session.append('tool/call', { ...this.position, callId: call.id, name: call.name, arguments: call.arguments });
     this.openCalls++;
   }

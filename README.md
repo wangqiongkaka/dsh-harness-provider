@@ -23,7 +23,7 @@
 ## 前置条件
 
 - Node.js 22 或更高版本。
-- 已安装 DSH 0.1.6-alpha.2 或更高版本，并使用 Web Profile。更早的版本中，Harness 会话的模型选择器和右侧栏“子代理”卡片的插件来源说明无法正常显示。
+- 使用 DSH 0.1.7-alpha.1 的 Web Profile，本插件按该版本的消息来源、工具结果、预设注册表和实时配置接口构建与验证。
 - 已安装并完成登录或环境配置的 [Codex CLI](https://developers.openai.com/codex/cli/) 或 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)。
 
 ## 安装
@@ -159,6 +159,8 @@ DSH Host
 
 两个 Harness 共用同一个 ACP 适配层，差异集中在 `src/acp-profiles.ts`。插件不向 Agent 声明文件系统或终端能力，也不传入 MCP 服务器；工具始终由各 CLI 在自己的权限策略下执行。
 
+Harness 的工具仍可并行执行，DSH 中的工具记录按启动顺序逐项登记和结算；后一项等待前一项结算后才显示，保证每项调用都有完整的日志关联，并保留冷恢复和轮次用量统计。原生模型的额度查询按提供商注册的配置行与字段路径读取当前配置，支持自定义配置行名。
+
 ## 开发
 
 开发需要一个已构建的 `deepseek-harness` 参考仓库，默认位于 `../../deepseek-harness`。也可以通过 `DSH_REFERENCE_ROOT` 指定路径。
@@ -170,6 +172,8 @@ npm run check
 ```
 
 `npm run dev:link` 会链接参考仓库中的 `@deepseek-ai/*` 包，每次运行 `npm install` 后都需要重新执行。`npm run check` 依次执行类型检查、构建和全部测试。
+
+在 DSH `0.1.7-alpha.1` 参考构建上，`npm run check` 已通过类型检查、构建和 72 项测试，覆盖新版工具结果、通知来源、实时额度配置、并行调用日志、取消与会话冷恢复。本次未替换已安装的 Web 插件，未执行真实 CLI/API 和隔离 Web Profile 的端到端验证；组件静态渲染仍有 React `useLayoutEffect` 警告。
 
 其他验证命令：
 

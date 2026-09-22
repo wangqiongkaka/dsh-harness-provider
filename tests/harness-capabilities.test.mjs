@@ -28,12 +28,12 @@ test('images/files use verified attachment storage and image tool output retains
     const output=new DshOutput(ctx,agent,{turn:1,step:1},()=>1,()=>({provider:'test',model:'test'}));
     await output.complete({item:{type:'toolExecution',itemId:'image',toolName:'view',arguments:{},output:{content:[{type:'text',text:'image output'},{type:'image',mimeType:'image/png',base64Data:png}]}},outcome:{status:'succeeded'}});
     const result=records.find(r=>r.type==='tool/result');
-    const parts=result.data.message.content[0].content;
+    const parts=result.data.message.content;
     assert.equal(parts[0].text,'image output');assert.equal(parts[1].type,'image');
     assert.ok((await ctx.attachments.readImage(parts[1].attachment)).data.length);
     assert.equal(JSON.stringify(records).includes(png),false);
     await output.complete({item:{type:'toolExecution',itemId:'file-image',toolName:'view',arguments:{},output:{content:[{type:'imageFile',path:ctx.attachments.imageHostPath(content[0].attachment)}]}},outcome:{status:'succeeded'}});
-    assert.equal(records.filter(r=>r.type==='tool/result').at(-1).data.message.content[0].content[0].type,'image');
+    assert.equal(records.filter(r=>r.type==='tool/result').at(-1).data.message.content[0].type,'image');
   } finally { await ctx.fiber.dispose(); await rm(root,{recursive:true,force:true}); }
 });
 

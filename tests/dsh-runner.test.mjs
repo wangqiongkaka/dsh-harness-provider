@@ -7,7 +7,7 @@ import { Context } from '@deepseek-ai/cordis';
 import Agents from '@deepseek-ai/dsh-agent';
 import Loop from '@deepseek-ai/dsh-agent-loop';
 import Llm, { createUserMessage } from '@deepseek-ai/dsh-llm';
-import Sessions, { SessionId } from '@deepseek-ai/dsh-session';
+import Sessions, { Session, SessionId } from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
 import Tools from '@deepseek-ai/dsh-tools';
@@ -129,11 +129,11 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   assert.deepEqual(frames.filter(f=>f.type==='chunk' && f.chunk.type==='reasoning-delta').map(f=>f.chunk.text),['Checking the workspace','Checking the workspace']);
   assert.deepEqual(agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='reasoning').map(e=>e.data.message.content[0].text),['Checking the workspace','Checking the workspace']);
   assert.equal((await bindings.read(id)).pending,undefined);
-  // The footer needs exactly one assistant message per step: sequential calls take a step each, parallel calls share one.
+  // Native calls overlap, but their persisted lifecycles settle in separate steps.
   await prompt(agent,'tools');
   const callTurn=agent.session.snapshotEvents().filter(e=>e.data?.turn===3);
-  assert.deepEqual(callTurn.filter(e=>e.type==="assistant/message").map(e=>e.data.step),[1,2,3,4],'one assistant message per step');
-  assert.deepEqual(callTurn.filter(e=>e.type==="tool/call").map(e=>[e.data.step,JSON.parse(e.data.arguments).command]),[[1,'ls'],[2,'pwd'],[3,'cat a'],[3,'cat b']]);
+  assert.deepEqual(callTurn.filter(e=>e.type==="assistant/message").map(e=>e.data.step),[1,2,3,4,5],'every call has its own step');
+  assert.deepEqual(callTurn.filter(e=>e.type==="tool/call").map(e=>[e.data.step,JSON.parse(e.data.arguments).command]),[[1,'ls'],[2,'pwd'],[3,'cat a'],[4,'cat b']]);
   assert.equal(turnUsage(agent.session.snapshotEvents(),3)?.totalTokens,1050,'a turn with parallel calls shows its usage');
   validateStoredEvents(agent.session.header,structuredClone(agent.session.snapshotEvents()));
   await first.ctx.fiber.dispose();await first.adapter.close();
@@ -209,10 +209,49 @@ test('Harness questions and edits land on DSH native ask_user_question and edit 
  await output.complete({item:{type:'toolExecution',itemId:'e',toolName:'edit',arguments:{file_path:'/a.txt',old_string:'old',new_string:'new'}},outcome:{status:'succeeded'}});
  const calls=appended.filter(e=>e.type==='tool/call'),results=appended.filter(e=>e.type==='tool/result');
  assert.deepEqual(calls.map(e=>[e.data.name,JSON.parse(e.data.arguments).questions?.[0].id]),[['ask_user_question','q'],['ask_user_question','q'],['edit',undefined]]);
- assert.deepEqual(JSON.parse(results[0].data.message.content[0].content[0].text),answer);
+ assert.deepEqual(JSON.parse(results[0].data.message.content[0].text),answer);
  assert.deepEqual(results[1].data.error,{name:'UserQuestionError',code:'ASK_CANCELLED'});
- assert.equal(results[1].data.message.content[0].isError,true);
+ assert.equal(results[1].data.message.isError,true);
  assert.deepEqual(results[2].data.meta.diffs,[{path:'/a.txt',oldText:'old',newText:'new'}]);
+});
+
+test('工具运行期间的正文和通知不会拆开调用与结果',async()=>{
+ for(const mode of ['complete','cancel','question']){
+ const cancel=mode==='cancel';
+ const ctx=new Context();
+ try{
+  for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+  await ctx.plugin(Loop,{agents:[]});
+  const {agent}=await ctx.agents.create({sessionId:SessionId('overlapping-prose'),meta:{cwd:tmpdir()}});
+  agent.session.append('turn/start',{turn:1});
+  agent.session.append('step/start',{turn:1,step:1});
+  const output=new DshOutput(ctx,agent,{turn:1,step:1},()=>1,()=>({provider:'fixture',model:'fixture'}));
+  const command={type:'commandExecution',itemId:'exec-overlap',command:'pwd'};
+  const prose={type:'agentMessage',itemId:'progress',text:'执行中'};
+  const answer=Promise.withResolvers();
+  const question=mode==='question'?output.question('overlap',[],()=>answer.promise):undefined;
+  if(!question) output.start(command);
+  output.start(prose);
+  output.update(prose.itemId,{type:'text.append',text:'，请稍候'});
+  await output.complete({item:{...prose,text:'执行中，请稍候'},outcome:{status:'succeeded'}});
+  await output.complete({item:{type:'contextCompaction',itemId:'notice'},outcome:{status:'succeeded'}});
+  if(question){answer.resolve({answers:[]});await question;}
+  else if(!cancel) await output.complete({item:{...command,output:'ok'},outcome:{status:'succeeded'}});
+  await output.finish();
+  agent.session.append('step/end',{turn:1,step:output.step});
+  agent.session.append('turn/end',{turn:1,reason:{kind:'completed'}});
+  const messages=agent.session.deriveMessages();
+  const call=messages.findIndex(m=>m.content.some(b=>b.type==='tool-call'));
+  assert.equal(messages[call+1].toolCallId,question?'question:overlap':command.itemId,'工具调用的下一条消息必须是对应结果');
+  assert.equal(messages[call+1].isError,cancel);
+  assert.equal(messages[call+2].content[0].text,'执行中，请稍候');
+  const assistants=agent.session.snapshotEvents().filter(e=>e.type==='assistant/message');
+  assert.deepEqual(assistants.map(e=>e.data.step),[1,2]);
+  validateStoredEvents(agent.session.header,structuredClone(agent.session.snapshotEvents()));
+  const restored=Session.fromRestore(agent.id,structuredClone(agent.session.snapshotEvents()),agent.session.header,0,'detached');
+  assert.deepEqual(restored.deriveMessages(),messages,'重新加载后的模型历史保持配对和正文');
+ }finally{await ctx.fiber.dispose();}
+ }
 });
 
 test('delegation instructions go to the adapter, not the user input, so a leading /skill and the native title stay the user\'s',{timeout:10000},async()=>{
