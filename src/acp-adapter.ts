@@ -518,6 +518,7 @@ class AcpSession implements HarnessSession {
   readonly #catalogs: Catalogs;
   readonly #onClosed: () => void;
   #state: HarnessSessionState;
+  #initialized = false;
   #usage: HostUsage | null;
   #totals = { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 };
   #commands: HarnessSkill[] = [];
@@ -580,6 +581,7 @@ class AcpSession implements HarnessSession {
       session.#rawCommands = skills;
       for (const { sessionId: owner, update } of replay) if (!session.#trackTask(update) && !session.#routeSubagent(owner, update)) session.#transcript.replay(update);
       await session.#applyHints(input);
+      session.#initialized = true;
       return session;
     } catch (cause) { await process_.close(); throw cause; }
   }
@@ -715,7 +717,11 @@ class AcpSession implements HarnessSession {
     }
     if (state !== this.#state) this.#publish(state);
   }
-  #publish(state: HarnessSessionState): void { this.#state = state; this.#emit({ type: 'session.state.changed', state }); }
+  #publish(state: HarnessSessionState): void {
+    this.#state = state;
+    // initialState owns setup changes; replaying them after open can falsely revoke discussion permissions.
+    if (this.#initialized) this.#emit({ type: 'session.state.changed', state });
+  }
 
   async #start(command: TurnStartCommand): Promise<HarnessResult<{ turnId: HostTurnId }>> {
     if (this.#active) return failed('sessionBusy', 'Turn is active', true);

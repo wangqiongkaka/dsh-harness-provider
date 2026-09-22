@@ -5,6 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AcpAdapter, modelRef } from '../dist/acp-adapter.js';
 import { codexPlugins, codexTurnOutcomes } from '../dist/acp-profiles.js';
+import { Context } from '@deepseek-ai/cordis';
+import Agents from '@deepseek-ai/dsh-agent';
+import Loop from '@deepseek-ai/dsh-agent-loop';
+import Llm, { createUserMessage } from '@deepseek-ai/dsh-llm';
+import Sessions from '@deepseek-ai/dsh-session';
+import Projections from '@deepseek-ai/dsh-session-projection';
+import Prompt from '@deepseek-ai/dsh-system-prompt';
+import Tools from '@deepseek-ai/dsh-tools';
+import { Bindings } from '../dist/bindings.js';
+import { DshRunner } from '../dist/dsh-runner.js';
 
 // A stateful ACP agent written with the official SDK: its history survives across processes through a JSON file so
 // session/load can replay it, and every host answer it receives is checked before the turn ends.
@@ -198,6 +208,39 @@ async function until(iterator, type) {
 }
 const events = (seen, type) => seen.filter(entry => entry.kind === 'event' && entry.event.type === type).map(entry => entry.event);
 const interaction = async iterator => { while (true) { const next = await iterator.next(); if (next.value.kind === 'interaction') return next.value.interaction; } };
+
+test('discussion create and resume do not replay pre-open permission states after applying model and thinking hints', { timeout: 20000 }, async () => {
+  const f = await fixture(), ctx = new Context();
+  const adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  const bindings = new Bindings(join(f.root, 'bindings'));
+  try {
+    for (const plugin of [Llm, Sessions, Projections, Prompt, Tools, Agents]) await ctx.plugin(plugin);
+    const runner = new DshRunner(ctx, bindings, { codex: adapter });
+    ctx.on('agent/pre-step', async payload => {
+      await runner.run(payload, await bindings.read(payload.agent.id));
+      return { kind: 'enter', messages: [] };
+    });
+    await ctx.plugin(Loop, { agents: [] });
+    const { agent } = await ctx.agents.create({ sessionId: 'discussion-hints', meta: { cwd: f.root } });
+    await bindings.write({ version: 1, sessionId: agent.id, harness: 'codex', cwd: f.root, locked: true,
+      model: modelRef('opus[1m]'), thinking: 'low', permission: 'read-only',
+      delegation: { parentSessionId: 'parent', requestHash: 'hash', discussion: true } });
+    for (const text of ['first', 'resumed']) {
+      agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }));
+      await agent.whenIdle();
+      const reason = agent.session.snapshotEvents().filter(event => event.type === 'turn/end').at(-1).data.reason;
+      assert.equal(reason.kind, 'completed', JSON.stringify(reason));
+      const binding = await bindings.read(agent.id);
+      assert.equal(binding.permission, 'read-only');
+      assert.equal(binding.model.id, modelRef('opus[1m]').id);
+      assert.equal(binding.thinking, 'low');
+      assert.equal(binding.pending, undefined);
+      await runner.live.get(agent.id).session.close();
+      runner.live.delete(agent.id);
+    }
+    assert.deepEqual((await f.notes()).filter(note => note.prompt && !note.prompt.startsWith('/rename ')).map(note => note.prompt), ['first', 'resumed']);
+  } finally { await ctx.fiber.dispose(); await adapter.close(); await f.close(); }
+});
 
 test('inspection reads catalogs, modes and skills from a throwaway session; quota comes from the profile', { timeout: 20000 }, async () => {
   const f = await fixture();
