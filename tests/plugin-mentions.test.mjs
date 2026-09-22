@@ -248,7 +248,10 @@ test('the subagents guide card names the plugin that provides it and opens the t
  module.exports.setTaskMode('draft',module.exports.delegationClaim({}, {sessionId:'draft'},t));
  const html=renderToStaticMarkup(React.createElement(cards[0].component,props));
  assert.match(html,/子代理/);assert.match(html,/由 dsh-harness-provider 插件提供/);
- assert.match(renderToStaticMarkup(React.createElement(cards[0].component,{...props,description:'查看子代理'})),/查看子代理/,'a description still shows while the host lists one');
+ assert.match(html,/<span class="hp-guide-row"><span class="hp-guide-title">子代理<\/span><span class="hp-guide-line" title="由 dsh-harness-provider 插件提供">由 dsh-harness-provider 插件提供<\/span><\/span>/);
+ assert.match(renderToStaticMarkup(React.createElement(cards[0].component,{...props,description:'查看子代理'})),/<\/span><span class="hp-guide-line">查看子代理<\/span>/,'description occupies its own row below the title and provider');
+ assert.match(html,/<svg width="22" height="22"/,'compact cards keep the small icon');
+ assert.match(renderToStaticMarkup(React.createElement(cards[0].component,{...props,description:'查看子代理'})),/<svg width="26" height="26"/,'described cards use the host icon size');
  cards[0].component(props).props.onClick();
  assert.deepEqual(JSON.parse(JSON.stringify(opened)),[['harness-subagents',{replaceTab:true}]]);
 });
