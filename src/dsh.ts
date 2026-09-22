@@ -1260,25 +1260,25 @@ export function accountQuota(snapshot: HarnessAccountSnapshot | null, source: st
   return { kind: 'windows', source, plan: snapshot.plan ?? null, windows };
 }
 
-/** When a cached quota stops describing the account: the earliest window reset; balances and unknowns never expire. */
-const quotaExpiry = (quota: Quota) => Math.min(Infinity,
-  ...(quota?.kind === 'windows' ? quota.windows.map(window => window.resetsAt ? Date.parse(window.resetsAt) : NaN).filter(at => !Number.isNaN(at)) : []));
+/** A window past its reset starts over: nothing used, next reset unknown until the next probe. */
+const settleResets = (quota: Quota, now: number): Quota => quota?.kind !== 'windows' ? quota : { ...quota,
+  windows: quota.windows.map(window => window.resetsAt && Date.parse(window.resetsAt) <= now ? { ...window, usedPercent: 0, resetsAt: null } : window) };
 
 /**
  * Account quota of an external Harness. Every probe spawns a throwaway CLI process (codex app-server or a Claude SDK
- * query), so a probe runs only when a read finds no value (the first one of a run) or a window has reset since, and
- * after each finished turn in the background — when usage actually changed. Switching sessions and the client's
- * polling interval otherwise only read the cache. A failed probe is remembered as "no data" until the next turn.
+ * query), so a probe runs only when a read finds no value (the first one of a run) and after each finished turn in the
+ * background — when usage actually changed. A window whose reset time has passed reads as unused instead of probing.
+ * Switching sessions and the client's polling interval otherwise only read the cache. A failed probe keeps the
+ * previous value, or is remembered as "no data" until the next turn.
  */
 export class HarnessQuotaCache {
-  #entry?: { value: Quota; expiresAt: number };
+  #entry?: { value: Quota };
   #refreshing?: Promise<Quota>;
   constructor(private readonly probe: () => Promise<Quota>, private readonly now: () => number = () => Date.now()) {}
 
-  /** The cached quota; with none, or once a window reset, waits for one probe that concurrent reads share. */
+  /** The cached quota with passed resets applied; with none, waits for one probe that concurrent reads share. */
   read(): Promise<Quota> {
-    const entry = this.#entry;
-    if (entry && this.now() < entry.expiresAt) return Promise.resolve(entry.value);
+    if (this.#entry) return Promise.resolve(settleResets(this.#entry.value, this.now()));
     return this.#refreshing ?? this.#refresh();
   }
 
@@ -1288,11 +1288,8 @@ export class HarnessQuotaCache {
   }
 
   #refresh(): Promise<Quota> {
-    const refreshing = this.probe().then(value => { this.#entry = { value, expiresAt: quotaExpiry(value) }; }, () => {
-      // Keep a still-valid value; otherwise record "no data" so failures do not re-probe on every read.
-      const entry = this.#entry;
-      if (!entry || this.now() >= entry.expiresAt) this.#entry = { value: null, expiresAt: Infinity };
-    }).then(() => this.#entry!.value).finally(() => { if (this.#refreshing === refreshing) this.#refreshing = undefined; });
+    const refreshing = this.probe().then(value => { this.#entry = { value }; }, () => { this.#entry ??= { value: null }; })
+      .then(() => settleResets(this.#entry!.value, this.now())).finally(() => { if (this.#refreshing === refreshing) this.#refreshing = undefined; });
     return this.#refreshing = refreshing;
   }
 }
