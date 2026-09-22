@@ -112,7 +112,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   assert.deepEqual(calls.map(e=>e.data.name),['bash','bash']);
   assert.equal(JSON.parse(calls[0].data.arguments).command,'pwd');
   assert.equal(JSON.parse(calls[0].data.arguments).description,'确认工作目录');
-  const callSource=agent.session.snapshotEvents().find(e=>e.type==='assistant/message' && e.data.message.content[0].type==='tool-call').data.message.source;
+  const callSource=agent.session.snapshotEvents().find(e=>e.type==='assistant/message' && e.data.message.content.some(block=>block.type==='tool-call')).data.message.source;
   // The turn-usage panel shows provider / model, so the model is its display name rather than the encoded ref.
   assert.deepEqual([callSource.provider,callSource.model],['codex','Fixture 1M']);
   assert.equal(frames.filter(f=>f.type==='chunk' && f.chunk.type==='text-delta').length,4);
@@ -125,14 +125,19 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   // DSH's step row shows only a step's latest assistant message, so prose is never followed by another message in its step.
   const messages=agent.session.snapshotEvents().filter(e=>e.type==='assistant/message');
   assert.deepEqual(messages.filter((e,i)=>e.data.message.content[0].type!=='tool-call' && messages.slice(i+1).some(later=>later.data.turn===e.data.turn && later.data.step===e.data.step)).map(e=>e.data.message.content[0].text),[]);
-  assert.deepEqual(messages.filter(e=>e.data.turn===1).map(e=>[e.data.step,e.data.message.content[0].type]),[[1,'reasoning'],[2,'text'],[3,'tool-call'],[4,'text']]);
+  assert.deepEqual(messages.filter(e=>e.data.turn===1).map(e=>[e.data.step,e.data.message.content[0].type]),[[1,'reasoning'],[2,'text'],[3,'reasoning'],[4,'text']]);
+  // A thinking-enabled model replays this history next to its own turns, and it rejects a tool use
+  // that arrives without a preceding thinking block: every recorded call advertises one.
+  assert.deepEqual(messages.filter(e=>e.data.message.content.some(block=>block.type==='tool-call')).map(e=>e.data.message.content.map(block=>block.type)),[['reasoning','tool-call'],['reasoning','tool-call']],'a call never reaches the session without its reasoning');
   assert.deepEqual(frames.filter(f=>f.type==='chunk' && f.chunk.type==='reasoning-delta').map(f=>f.chunk.text),['Checking the workspace','Checking the workspace']);
-  assert.deepEqual(agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='reasoning').map(e=>e.data.message.content[0].text),['Checking the workspace','Checking the workspace']);
+  assert.deepEqual(agent.session.snapshotEvents().filter(e=>e.type==='assistant/message' && e.data.message.content[0].type==='reasoning' && e.data.message.content[0].text).map(e=>e.data.message.content[0].text),['Checking the workspace','Checking the workspace']);
   assert.equal((await bindings.read(id)).pending,undefined);
   // Native calls overlap, but their persisted lifecycles settle in separate steps.
   await prompt(agent,'tools');
   const callTurn=agent.session.snapshotEvents().filter(e=>e.data?.turn===3);
   assert.deepEqual(callTurn.filter(e=>e.type==="assistant/message").map(e=>e.data.step),[1,2,3,4,5],'every call has its own step');
+  assert.deepEqual(callTurn.filter(e=>e.type==="assistant/message").map(e=>e.data.message.content.map(block=>block.type)),
+    [...Array.from({length:4},()=>['reasoning','tool-call']),['text']],'parallel calls advertise their reasoning too');
   assert.deepEqual(callTurn.filter(e=>e.type==="tool/call").map(e=>[e.data.step,JSON.parse(e.data.arguments).command]),[[1,'ls'],[2,'pwd'],[3,'cat a'],[4,'cat b']]);
   assert.equal(turnUsage(agent.session.snapshotEvents(),3)?.totalTokens,1050,'a turn with parallel calls shows its usage');
   validateStoredEvents(agent.session.header,structuredClone(agent.session.snapshotEvents()));

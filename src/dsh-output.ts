@@ -182,6 +182,12 @@ export class DshOutput {
    * Native calls may overlap, but their durable records settle one at a time.
    * Each step has one assistant advertisement and its result, as required by
    * the session lifecycle validator and exact token accounting.
+   *
+   * Every advertisement opens with an empty reasoning block: a thinking-enabled
+   * model replays the session history beside its own turns, and DeepSeek's
+   * Messages API rejects a `tool_use` that arrives without a preceding
+   * `thinking`, so a call recorded without one fails the next native request of
+   * the session. The block holds no text, so the transcript keeps the call alone.
    */
   private enter(): void {
     if (this.stepMessages && this.openCalls === 0) this.next();
@@ -190,7 +196,8 @@ export class DshOutput {
   private call(call: ReturnType<typeof toolCall>): void {
     this.enter();
     this.agent.session.append('assistant/message', { ...this.position,
-      message: createAssistantMessage({ source: this.source(), content: [call] }), stream: [], usage: ZERO,
+      message: createAssistantMessage({ source: this.source(),
+        content: [{ type: 'reasoning' as const, text: '' }, call] }), stream: [], usage: ZERO,
     }, { surfaceOp: 'append' });
     this.agent.session.append('tool/call', { ...this.position, callId: call.id, name: call.name, arguments: call.arguments });
     this.openCalls++;
