@@ -74,12 +74,10 @@ const zh = {
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
   worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code',
   pickModel: '{harness} 的模型与推理强度', pickLast: '沿用上次',
-  settingsNav: 'Harness', settingsIntro: '接入 Codex / Claude Code 的默认行为。修改立即保存到当前 Profile 的配置文件；可执行文件、进展反馈说明、讨论等待上限和调试输出在原生进程下次启动时生效。',
+  settingsNav: 'Harness', settingsIntro: '接入 Codex / Claude Code 的默认行为。修改立即保存到当前 Profile 的配置文件；进展反馈说明、讨论等待上限和调试输出在原生进程下次启动时生效。',
   settingsReadOnly: '当前连接不能修改配置，以下内容只读。', settingsUnavailable: '当前 Profile 没有提供本插件的配置。', settingsReset: '恢复默认',
-  settingsRejected: '未保存：取值无效或超出范围。', settingsAuto: '自动查找',
-  'settingsGroup.programs': '程序', 'settingsGroup.sessions': '会话', 'settingsGroup.delegation': '委派与讨论', 'settingsGroup.feedback': '进展反馈', 'settingsGroup.advanced': '高级',
-  'setting.codexCommand': 'Codex 可执行文件', 'setting.codexCommand.hint': '命令名或绝对路径，也用于额度、插件和轮次记录查询。',
-  'setting.claudeCommand': 'Claude Code 可执行文件', 'setting.claudeCommand.hint': '留空时依次使用环境变量 CODEXHOST_CLAUDE_COMMAND、PATH 中的 claude 和常见安装位置。',
+  settingsRejected: '未保存：取值无效或超出范围。',
+  'settingsGroup.sessions': '会话', 'settingsGroup.delegation': '委派与讨论', 'settingsGroup.feedback': '进展反馈', 'settingsGroup.advanced': '高级',
   'setting.idleCloseSeconds': '空闲回收（秒）', 'setting.idleCloseSeconds.hint': '会话不在屏幕上且空闲超过该时长后关闭原生进程，下一轮按原生会话恢复；仍有后台任务时保留。',
   'setting.delegateHarnesses': '委派默认目标', 'setting.delegateHarnesses.hint': '进入委派模式时预选的 Harness。',
   'setting.delegateReportBack': '委派默认回传', 'setting.delegateReportBack.hint': '进入委派模式时预选“完成后回传到当前会话”。',
@@ -129,12 +127,10 @@ const en: Record<keyof typeof zh,string> = {
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
   worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex and Claude Code only',
   pickModel:'{harness} model and effort', pickLast:'Last used',
-  settingsNav:'Harness', settingsIntro:'Defaults for Codex and Claude Code. Changes save to this profile\'s configuration at once; executables, the progress feedback contract, the discussion wait and debug output apply when a native process next starts.',
+  settingsNav:'Harness', settingsIntro:'Defaults for Codex and Claude Code. Changes save to this profile\'s configuration at once; the progress feedback contract, the discussion wait and debug output apply when a native process next starts.',
   settingsReadOnly:'This connection cannot change configuration; the values below are read-only.', settingsUnavailable:'This profile does not serve the plugin\'s configuration.', settingsReset:'Reset',
-  settingsRejected:'Not saved: the value is invalid or out of range.', settingsAuto:'Find automatically',
-  'settingsGroup.programs':'Programs', 'settingsGroup.sessions':'Sessions', 'settingsGroup.delegation':'Delegation and discussion', 'settingsGroup.feedback':'Progress feedback', 'settingsGroup.advanced':'Advanced',
-  'setting.codexCommand':'Codex executable', 'setting.codexCommand.hint':'Command name or absolute path; also used for quota, plugin and turn-record reads.',
-  'setting.claudeCommand':'Claude Code executable', 'setting.claudeCommand.hint':'When empty: CODEXHOST_CLAUDE_COMMAND, then claude on PATH, then the usual install locations.',
+  settingsRejected:'Not saved: the value is invalid or out of range.',
+  'settingsGroup.sessions':'Sessions', 'settingsGroup.delegation':'Delegation and discussion', 'settingsGroup.feedback':'Progress feedback', 'settingsGroup.advanced':'Advanced',
   'setting.idleCloseSeconds':'Idle close (seconds)', 'setting.idleCloseSeconds.hint':'An off-screen session idle this long closes its native process and resumes on the next turn; background tasks keep it open.',
   'setting.delegateHarnesses':'Default delegation targets', 'setting.delegateHarnesses.hint':'Harnesses preselected when delegation mode opens.',
   'setting.delegateReportBack':'Report back by default', 'setting.delegateReportBack.hint':'Preselects "Report back to this session when complete".',
@@ -862,11 +858,11 @@ type SettingsSectionProps = PropsRuntime<'settings.section'> & PropsLocale<'harn
 type SettingField = keyof Settings;
 
 /** Text kept locally while typing and committed on blur or Enter, so every keystroke is not a profile write. */
-function DraftInput({ value, label, numeric, multiline, placeholder, disabled, onCommit }: { value: string; label: string; numeric?: boolean; multiline?: boolean; placeholder?: string; disabled: boolean; onCommit: (text: string) => void }) {
+function DraftInput({ value, label, numeric, multiline, disabled, onCommit }: { value: string; label: string; numeric?: boolean; multiline?: boolean; disabled: boolean; onCommit: (text: string) => void }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
   const commit = () => { if (draft !== value) onCommit(draft); };
-  const common = { value: draft, disabled, placeholder, 'aria-label': label, onBlur: commit };
+  const common = { value: draft, disabled, 'aria-label': label, onBlur: commit };
   return multiline ? <textarea {...common} rows={12} onChange={event => setDraft(event.target.value)} />
     : <input {...common} className={numeric ? 'hp-set-number' : undefined} inputMode={numeric ? 'numeric' : undefined} onChange={event => setDraft(event.target.value)}
       onKeyDown={event => { if (event.key === 'Enter') commit(); else if (event.key === 'Escape') setDraft(value); }} />;
@@ -897,9 +893,6 @@ export function HarnessSettingsSection({ useHarnessSettings, form, t }: Settings
     </div>
     <div className="hp-set-control">{control}</div>
   </div>;
-  // Clearing a text field returns it to its default rather than storing an empty override.
-  const text = (field: 'codexCommand' | 'claudeCommand', placeholder?: string) => <DraftInput value={value[field] ?? ''} label={label(field)} placeholder={placeholder} disabled={disabled}
-    onCommit={draft => settle(field, draft.trim() ? form.set(field, draft.trim()) : form.unset(field))} />;
   const number = (field: SettingField) => <DraftInput numeric value={String(value[field])} label={label(field)} disabled={disabled} onCommit={draft => {
     const parsed = Number(draft.trim());
     if (!draft.trim() || !Number.isInteger(parsed) || parsed < 0) setFailed(field); else settle(field, form.set(field, parsed));
@@ -910,7 +903,6 @@ export function HarnessSettingsSection({ useHarnessSettings, form, t }: Settings
     <h2 className="hp-set-page">{t('settingsNav')}</h2>
     <p className="hp-set-intro">{t('settingsIntro')}</p>
     {disabled && <p className="hp-set-intro" role="note">{t('settingsReadOnly')}</p>}
-    {group('settingsGroup.programs', <>{row('codexCommand', text('codexCommand'))}{row('claudeCommand', text('claudeCommand', t('settingsAuto')))}</>)}
     {group('settingsGroup.sessions', row('idleCloseSeconds', number('idleCloseSeconds')))}
     {group('settingsGroup.delegation', <>
       {row('delegateHarnesses', <TaskHarnessSelector selected={value.delegateHarnesses ?? ['codex']} disabled={disabled} t={t} onChange={next => settle('delegateHarnesses', form.set('delegateHarnesses', next))} />)}

@@ -311,8 +311,9 @@ test('the Harness settings page follows Agent presets in Settings, renders the l
  const React=require('react'),{renderToStaticMarkup}=require('react-dom/server');
  const t=key=>key;
  const html=renderToStaticMarkup(React.createElement(section.component,{useHarnessSettings:select=>select(snapshot),form,t}));
- for (const group of ['settingsGroup.programs','settingsGroup.sessions','settingsGroup.delegation','settingsGroup.feedback','settingsGroup.advanced']) assert.match(html,new RegExp(`aria-label="${group}"`));
- assert.match(html,/value="\/opt\/codex"/);assert.match(html,/placeholder="settingsAuto"/);
+ for (const group of ['settingsGroup.sessions','settingsGroup.delegation','settingsGroup.feedback','settingsGroup.advanced']) assert.match(html,new RegExp(`aria-label="${group}"`));
+ // The executables stay configurable in the profile patch but are not shown on the page.
+ assert.doesNotMatch(html,/settingsGroup\.programs|codexCommand|claudeCommand|\/opt\/codex/);
  assert.match(html,/<textarea[^>]*disabled=""[^>]*>\[CUSTOM FEEDBACK\]<\/textarea>/,'the text is kept but not editable while the contract is off');
  assert.equal((html.match(/settingsReset/g)??[]).length,1,'only the overridden field offers a reset');
  assert.match(html,/role="switch" aria-checked="true" aria-label="setting.delegateReportBack"/);

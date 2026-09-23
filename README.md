@@ -127,8 +127,6 @@ dsh --profile web
 
 | 分组 | 配置项 | 默认值 | 生效时机 |
 | --- | --- | --- | --- |
-| 程序 | `codexCommand` Codex 可执行文件（也用于额度、插件和轮次记录查询） | `codex` | 原生进程下次启动 |
-| 程序 | `claudeCommand` Claude Code 可执行文件；留空时使用 `CODEXHOST_CLAUDE_COMMAND`，再从 PATH、常见安装目录和版本管理器目录中查找 | 自动查找 | 原生进程下次启动 |
 | 会话 | `idleCloseSeconds` 空闲回收（秒） | 60 | 下一次空闲扫描 |
 | 委派与讨论 | `delegateHarnesses` / `delegateReportBack` / `delegateWorktree` 委派默认目标、回传、独立 worktree | Codex / 关 / 关 | 下次进入委派模式 |
 | 委派与讨论 | `discussHarnesses` 讨论默认参与者 | Codex + Claude Code | 下次进入讨论模式 |
@@ -139,7 +137,13 @@ dsh --profile web
 | 高级 | `catalogCacheSeconds` / `quotaCacheSeconds` / `pluginCacheSeconds` / `recoveryCheckSeconds` 模型目录、原生额度（最少 10）、插件目录缓存与恢复核对间隔（秒） | 60 / 60 / 30 / 30 | 下一次缓存填充 |
 | 高级 | `acpStderr` 将 ACP Agent 的 stderr 输出到 DSH，仅用于排查启动问题；输出可能包含提示词或凭据（环境变量 `DSH_HARNESS_ACP_STDERR=1` 同样有效） | 关 | 原生进程下次启动 |
 
-讨论参与者的只读权限、跨 Harness 委派的权限映射和协议上限不开放配置。插件状态目录 `root`（默认 `$DSH_HOME/harness-plugin`，未设置 `DSH_HOME` 时为 `~/.dsh/harness-plugin`）只能在 `cordis.patch.yml` 中修改，修改后插件重新加载：
+讨论参与者的只读权限、跨 Harness 委派的权限映射和协议上限不开放配置。以下配置项不在设置页展示，只能在 `cordis.patch.yml` 中修改：
+
+| 配置项 | 默认值 | 说明 |
+| --- | --- | --- |
+| `codexCommand` | `codex` | Codex 可执行文件，也用于额度、插件和轮次记录查询；原生进程下次启动时生效 |
+| `claudeCommand` | 自动查找 | Claude Code 可执行文件；未设置时使用环境变量 `CLAUDE_COMMAND_PATH`，再从 PATH、常见安装目录和版本管理器目录中查找；原生进程下次启动时生效 |
+| `root` | `$DSH_HOME/harness-plugin` | 插件状态目录；未设置 `DSH_HOME` 时为 `~/.dsh/harness-plugin`；修改后插件重新加载 |
 
 ```yaml
 - id: harness-plugin
