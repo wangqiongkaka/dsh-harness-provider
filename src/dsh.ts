@@ -142,7 +142,7 @@ export class HarnessService extends TypertRemoteService {
     this.bindings = new Bindings(root);
     this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : method === 'discuss' ? this.discuss(source, input)
       : method === 'models' ? this.delegationModels(source) : this.readDelegation(source, input), () => settings().discussionTimeoutMinutes * 60_000);
-    this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation, undefined, () => settings().idleCloseSeconds * 1000);
+    this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation, undefined, () => settings().idleCloseSeconds * 1000, () => settings().branchContextChars);
     ctx.effect(() => ctx.typert.register({ package: contribution.package, face: 'host', schemas: [], invocations: contribution.descriptors, model: { services: [], events: [], objects: [] } }), 'harness: Remote contracts');
     ctx.effect(() => async () => {
       this.stopped = true;
@@ -322,8 +322,9 @@ export class HarnessService extends TypertRemoteService {
     delete binding.usage;
     await this.bindings.write(binding);
   }
-  private async notice(agent: Awaited<ReturnType<HarnessService['agent']>>, summary: string, text: string) {
-    agent.session.append('user/message', createUserMessage({ source: { kind: 'dsh-harness-provider', form: 'notice', summary },
+  private async notice(agent: Awaited<ReturnType<HarnessService['agent']>>, summary: string, text: string, rewindFromSeq?: number) {
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'dsh-harness-provider', form: 'notice', summary,
+      ...(rewindFromSeq === undefined ? {} : { rewindFromSeq }) },
       content: [{ type: 'text', text }] }), { surfaceOp: 'append' });
     await this.ctx.sessions.flush(agent.session);
   }
@@ -333,8 +334,10 @@ export class HarnessService extends TypertRemoteService {
     return this.bindings.serial(sessionId, async () => {
       const agent = await this.agent(sessionId), binding = await this.bindings.read(sessionId);
       if (!binding) throw new Error('请先结束当前请求并处理未确认结果');
+      const fromTurn = binding.turns?.at(-1)?.turn;
+      const fromSeq = agent.session.snapshotEvents().find(event => event.type === 'turn/start' && event.data.turn === fromTurn)?.seq;
       await this.rewind(agent, binding);
-      await this.notice(agent, '对话已回滚', '已撤销最后一轮原生对话上下文，工作区文件保持原状。上方原记录保留供查阅，后续对话从回滚位置继续。');
+      await this.notice(agent, '对话已回滚', '已撤销最后一轮原生对话上下文，工作区文件保持原状。上方原记录保留供查阅，后续对话从回滚位置继续。', fromSeq);
       return this.view(binding);
     });
   }
@@ -361,7 +364,8 @@ export class HarnessService extends TypertRemoteService {
       const content = [...(text.trim() ? [{ type: 'text' as const, text }] : []), ...target.data.content.filter(part => part.type !== 'text')];
       if (!content.length) throw new RemoteError('gateway/bad-request', '请输入文字或保留附件', {});
       await this.rewind(agent, binding, index);
-      await this.notice(agent, '消息已编辑', '已撤销该消息及之后的原生对话上下文，并按编辑后的内容重新执行；工作区文件保持原状。上方原记录保留供查阅。');
+      const fromSeq = events.find(event => event.type === 'turn/start' && event.data.turn === head.data.turn)?.seq ?? head.seq;
+      await this.notice(agent, '消息已编辑', '已撤销该消息及之后的原生对话上下文，并按编辑后的内容重新执行；工作区文件保持原状。上方原记录保留供查阅。', fromSeq);
       prompt.forEach((event, offset) => {
         agent.followup(createUserMessage({ content: event === target ? content : event.data.content,
           source: { kind: 'user', rpcId: event === target ? requestId : `${requestId}#${offset}` } }));
@@ -403,7 +407,7 @@ export class HarnessService extends TypertRemoteService {
     }
     this.checks.delete(sessionId);
     const nativeDelegation = binding ? undefined : await this.bindings.readDelegated(sessionId);
-    if (binding || nativeDelegation || !this.fresh(agent)) return this.view(binding, nativeDelegation?.locked);
+    if (binding || nativeDelegation || !this.fresh(agent)) return this.view(binding, nativeDelegation?.locked || (!binding && !this.unstarted(agent)));
     // A fresh session starts on the Harness picked last time; failures fall back to native silently.
     const remembered = (await this.bindings.readDefaults()).harness;
     if (!remembered || remembered === 'dsh' || !agent.session.header.cwd) return this.view();
@@ -810,12 +814,15 @@ export class HarnessService extends TypertRemoteService {
     return this.bindings.serial(request.sessionId, async () => {
       const agent = await this.agent(request.sessionId);
       const current = await this.bindings.read(request.sessionId);
-      if (await this.bindings.readDelegated(request.sessionId) || current?.locked || !this.fresh(agent)) throw new Error('开始对话后不能切换 Harness，请新建会话');
+      if (await this.bindings.readDelegated(request.sessionId) || current?.locked || !this.unstarted(agent)) throw new Error('开始对话后不能切换 Harness，请新建会话或从消息新建分支');
       const defaults = await this.bindings.readDefaults();
       await this.bindings.writeDefaults({ ...defaults, harness: request.harness });
-      let binding: Binding | undefined;
+      // A branch keeps its forked native session while it stays on the source's Harness; on another Harness the inherited
+      // history goes along as a transcript, and native DSH reads the inherited events directly.
+      const inherited = agent.session.inheritedEventCount ?? 0;
+      let binding: Binding | undefined = current?.harness === request.harness ? current : undefined;
       if (request.harness === 'dsh') await this.bindings.remove(request.sessionId);
-      else binding = await this.bind(agent, request.sessionId, request.harness);
+      else binding ??= await this.bind(agent, request.sessionId, request.harness, inherited ? { carry: { throughSeq: inherited } } : {});
       // ponytail: DSH 0.1.6 only exposes preset-event invalidation; use a skill-specific event when available.
       // Re-announce the unchanged preset; no preset selection or durable event is written.
       const preset = this.ctx.get('sessionProjections')?.stateOf(agent.session, 'agentPreset') ?? agent.session.header.agentPreset;
@@ -828,9 +835,15 @@ export class HarnessService extends TypertRemoteService {
     return agent.status !== 'running' && agent.inbox.nextTurn.length === 0 && agent.inbox.nextStep.length === 0
       && !agent.session.snapshotEvents().some(event => event.type === 'turn/start' || event.type === 'user/message');
   }
+  /** No prompt of its own yet: a new session, or a branch that has only its inherited history; its Harness can still change. */
+  private unstarted(agent: Awaited<ReturnType<HarnessService['agent']>>): boolean {
+    const inherited = agent.session.inheritedEventCount ?? 0;
+    return agent.status !== 'running' && agent.inbox.nextTurn.length === 0 && agent.inbox.nextStep.length === 0
+      && !agent.session.snapshotEvents().some(event => event.seq >= inherited && (event.type === 'turn/start' || event.type === 'user/message'));
+  }
 
   /** Bind a fresh session to a Harness, seeding permission from the native sandbox and model / thinking from the last pick. */
-  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation' | 'cwd' | 'model' | 'thinking'>> = {}): Promise<Binding> {
+  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation' | 'cwd' | 'model' | 'thinking' | 'carry'>> = {}): Promise<Binding> {
     const cwd = agent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
     const binding: Binding = { version: 1, sessionId, harness, cwd, locked: false };
@@ -1242,7 +1255,6 @@ export class HarnessService extends TypertRemoteService {
       if (this.runner.pendingSteering(request.sessionId).some(matches) || agent.inbox.nextTurn.some(matches) || agent.inbox.nextStep.some(matches)
         || agent.session.snapshotEvents().some(event => event.type === 'user/message' && matches(event.data))) return { accepted: true };
       if (binding.pending && agent.status !== 'running') throw new RemoteError('gateway/bad-request', '上次 Harness 请求结果未确认，已暂停发送以避免重复执行', {});
-      if (!binding.locked) { binding.locked = true; await this.bindings.write(binding); }
       signal.throwIfAborted();
       const receiptIds = request.content.flatMap(part => part.type === 'file' ? [part.receiptId] : []);
       const admission = request.content.map(part => {
@@ -1255,11 +1267,18 @@ export class HarnessService extends TypertRemoteService {
       signal.throwIfAborted();
       if (ctx.agents.get(agent.id) !== agent) throw new Error('会话已关闭');
       const receiptBinding = receiptIds.length ? ctx.fileUploads.bindPrompt(agent, receiptIds, request.requestId) : undefined;
+      let sent = false;
+      const wasLocked = binding.locked;
       try {
         const message = createUserMessage({ content, source: { kind: 'user', rpcId: request.requestId,
           ...(request.clientTimeZone ? { clientTimeZone: request.clientTimeZone } : {}) } });
+        if (!binding.locked) { binding.locked = true; await this.bindings.write(binding); }
         if (request.mode === 'steer') agent.steer(message); else agent.followup(message);
+        sent = true;
         receiptBinding?.commit();
+      } catch (error) {
+        if (!sent && !wasLocked) { binding.locked = false; await this.bindings.write(binding); }
+        throw error;
       } finally { receiptBinding?.[Symbol.dispose](); }
       return { accepted: true };
     });
@@ -1270,6 +1289,14 @@ export class HarnessService extends TypertRemoteService {
         if (binding.delegation?.discussion) throw new Error('讨论会话不能创建分支');
         const agent = await this.agent(request.sessionId);
         if (binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先等待当前请求结束');
+        if (request.atSeq !== undefined && binding.carry && request.atSeq < binding.carry.throughSeq) {
+          // This prefix predates the current Harness, so it has no native turn to fork.
+          const child = await native.fork(request);
+          await this.bindings.serial(child.sessionId, async () => this.bindings.write({ ...binding, sessionId: child.sessionId,
+            locked: false, nativeRef: undefined, turns: undefined, usage: undefined, delegation: undefined,
+            carry: { throughSeq: request.atSeq! + 1 } }));
+          return child;
+        }
         let throughTurn: string | undefined;
         if (request.atSeq !== undefined) {
           const boundary = agent.session.snapshotEvents().find(event => event.type === 'turn/end' && event.seq >= request.atSeq!);
@@ -1291,7 +1318,8 @@ export class HarnessService extends TypertRemoteService {
         const child = await native.fork(request);
         await this.bindings.serial(child.sessionId, async () => {
           const cut = throughTurn ? (binding.turns ?? []).findIndex(entry => entry.key === throughTurn) + 1 : binding.turns?.length;
-          await this.bindings.write({ ...binding, sessionId: child.sessionId, nativeRef, delegation: undefined, turns: binding.turns?.slice(0, cut) });
+          // Unlocked: until its first message the branch may switch to another Harness.
+          await this.bindings.write({ ...binding, sessionId: child.sessionId, locked: false, nativeRef, delegation: undefined, turns: binding.turns?.slice(0, cut) });
         });
         return child;
       });

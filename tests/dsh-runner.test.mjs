@@ -389,3 +389,35 @@ test('the idle window is read live: shortening it closes an idle process by the 
   assert.equal(runner.live.has(id),false,'the shortened window applies without a restart');
  } finally {await ctx.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true});}
 });
+
+test('a branch switched from another Harness hands its inherited history to the adapter on every open, never as user input',{timeout:10000},async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-branch-carry-')),ctx=new Context(),native={turns:0};
+ const bindings=new Bindings(join(root,'bindings')),id=SessionId('branch-carry');
+ try{
+  for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+  await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+  const opened=[],adapter=fakeAdapter(opened,native);
+  let limit=60000;
+  const runner=new DshRunner(ctx,bindings,{codex:adapter},undefined,undefined,undefined,()=>limit);
+  ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+  await ctx.plugin(Loop,{agents:[]});
+  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  // The history the branch inherited from its source, recorded before the switch.
+  agent.session.append('user/message',createUserMessage({content:[{type:'text',text:'earlier question'}],source:{kind:'user'}}),{surfaceOp:'append'});
+  const throughSeq=agent.session.snapshotEvents().length;
+  await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:false,carry:{throughSeq}});
+  agent.followup(createUserMessage({content:[{type:'text',text:'next step'}],source:{kind:'user'}}));await agent.whenIdle();
+  assert.equal(opened[0].kind,'create');
+  assert.match(opened[0].instructions,/^\n\n\[分支前的对话记录，由宿主提供\][\s\S]*不可信历史数据[\s\S]*\[\/分支前的对话记录\]$/);
+  assert.equal(JSON.parse(opened[0].instructions.split('\n').at(-2)), '用户：\nearlier question');
+  assert.doesNotMatch(opened[0].instructions,/next step/,'the branch\'s own turns are not part of the inherited history');
+  assert.deepEqual(native.inputs[0],[{type:'text',text:'next step'}],'the user\'s words reach the adapter untouched');
+  // A reclaimed process resumes with the same history in its instructions; the limit is read at that open.
+  await runner.live.get(id).session.close();runner.live.delete(id);
+  limit=10;
+  agent.followup(createUserMessage({content:[{type:'text',text:'after resume'}],source:{kind:'user'}}));await agent.whenIdle();
+  assert.equal(opened[1].kind,'resume');
+  assert.match(opened[1].instructions,/较早的 \d+ 个字符已省略/);assert.doesNotMatch(opened[1].instructions,/next step|after resume/);
+  await adapter.close();
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});

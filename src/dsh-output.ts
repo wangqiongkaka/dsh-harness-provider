@@ -14,7 +14,7 @@ import type { HostItem, HostItemSnapshot, HostItemUpdate } from './contracts.js'
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** Harness lifecycle and delegation notices recorded in the session. */
-    'dsh-harness-provider': { kind: 'dsh-harness-provider'; form: 'notice'; summary: string };
+    'dsh-harness-provider': { kind: 'dsh-harness-provider'; form: 'notice'; summary: string; rewindFromSeq?: number };
   }
 }
 

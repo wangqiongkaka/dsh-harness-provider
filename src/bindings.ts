@@ -26,6 +26,11 @@ const bindingSchema = z.object({
   pendingNative: z.string().optional(),
   turns: z.array(z.object({ turn: z.number().int(), key: z.string() })).optional(),
   delegation: delegationSchema.optional(),
+  /**
+   * A branch switched to this Harness from its source's: the DSH history before `throughSeq` goes to the Harness as a
+   * transcript in its session instructions, rebuilt from the session on every open, since no native session carries it.
+   */
+  carry: z.object({ throughSeq: z.number().int().nonnegative() }).strict().optional(),
 }).strict().refine(value => !value.nativeRef || value.nativeRef.harnessId === value.harness, 'Harness identity mismatch');
 export type Binding = z.infer<typeof bindingSchema>;
 export const DISCUSSION_PERMISSION = { codex: 'read-only', 'claude-code': 'plan' } as const;

@@ -48,7 +48,7 @@ type Api = {
 };
 const zh = {
   harness: '选择 Harness', model: '选择 Harness 模型', native: 'DSH 原生', defaultModel: '默认模型',
-  retry: '重试', locked: '开始对话后 Harness 固定；切换请新建会话',
+  retry: '重试', locked: '开始对话后 Harness 固定；可新建会话，或从消息新建分支后在发送前切换',
   recovery: '上次请求结果未确认，已暂停发送以避免重复执行。', loading: '加载中',
   menuModel: '模型', menuEffort: '强度', effortDefault: '默认', emptyModels: '没有可用模型', emptyEfforts: '当前模型不支持调整强度',
   fastMode: '快速模式', collaborationMode: '协作模式', enabled: '开启', disabled: '关闭',
@@ -91,6 +91,7 @@ const zh = {
   'setting.toolOutputChars': '工具输出上限（字符）', 'setting.toolOutputChars.hint': '单个工具输出超过该长度时截断显示。',
   'setting.peerReviewChars': '讨论互评摘录（字符）', 'setting.peerReviewChars.hint': '互评时每位参与者的结果交给其他参与者的最大长度。',
   'setting.discussionResultChars': '讨论结果读取（字符）', 'setting.discussionResultChars.hint': '汇总时读取每位参与者结果末尾的长度，最多 64,000。',
+  'setting.branchContextChars': '分支携带记录上限（字符）', 'setting.branchContextChars.hint': '分支切换到另一个 Harness 时，交给它的分支前对话记录保留最近的这么多字符，最多 120,000。',
   'setting.catalogCacheSeconds': '模型目录缓存（秒）', 'setting.catalogCacheSeconds.hint': '模型、推理强度和权限模式列表的缓存时长；0 表示每次重新读取。',
   'setting.quotaCacheSeconds': '额度缓存（秒）', 'setting.quotaCacheSeconds.hint': 'DSH 原生模型账户额度的缓存时长，最少 10 秒。',
   'setting.pluginCacheSeconds': '插件目录缓存（秒）', 'setting.pluginCacheSeconds.hint': '@ 菜单中 Harness 插件列表的缓存时长。',
@@ -101,7 +102,7 @@ const zh = {
 };
 const en: Record<keyof typeof zh,string> = {
   harness:'Select Harness', model:'Select Harness model', native:'Native DSH', defaultModel:'Default model',
-  retry:'Retry', locked:'Harness is fixed after the first prompt. Start a new session to switch.',
+  retry:'Retry', locked:'Harness is fixed after the first prompt. Start a new session, or branch from a message and switch before sending.',
   recovery:'The previous request was not confirmed. Sending is paused to avoid duplicate execution.', loading:'Loading',
   menuModel:'Model', menuEffort:'Effort', effortDefault:'Default', emptyModels:'No models available', emptyEfforts:'This model has no effort levels',
   fastMode:'Fast mode', collaborationMode:'Collaboration mode', enabled:'On', disabled:'Off',
@@ -144,6 +145,7 @@ const en: Record<keyof typeof zh,string> = {
   'setting.toolOutputChars':'Tool output limit (characters)', 'setting.toolOutputChars.hint':'Longer tool output is truncated in the transcript.',
   'setting.peerReviewChars':'Peer review excerpt (characters)', 'setting.peerReviewChars.hint':'How much of each participant\'s result the others review.',
   'setting.discussionResultChars':'Discussion result read (characters)', 'setting.discussionResultChars.hint':'How much of the end of each result the synthesis reads; at most 64,000.',
+  'setting.branchContextChars':'Branch history limit (characters)', 'setting.branchContextChars.hint':'When a branch switches Harness, the most recent part of the earlier conversation it hands over; at most 120,000.',
   'setting.catalogCacheSeconds':'Model catalog cache (seconds)', 'setting.catalogCacheSeconds.hint':'Cache for model, effort and permission lists; 0 reads them every time.',
   'setting.quotaCacheSeconds':'Quota cache (seconds)', 'setting.quotaCacheSeconds.hint':'Cache for native DSH account quota; at least 10 seconds.',
   'setting.pluginCacheSeconds':'Plugin catalog cache (seconds)', 'setting.pluginCacheSeconds.hint':'Cache for the Harness plugins in the @ menu.',
@@ -664,7 +666,7 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
     void read(sessionId).then(next => { if (generation.current === version) { setState(next); changed(sessionId, next.harness); } })
       .catch(error => { if (generation.current === version) setError(error instanceof Error ? error.message : String(error)); });
     return () => { generation.current++; };
-  }, [sessionId,summary?.running,read,changed]);
+  }, [sessionId,summary?.running,summary?.blank,read,changed]);
   // Switching the session's model provider changes whose account the quota describes, so the provider joins the
   // dependencies: a switch re-reads at once, while the interval still covers a window moving on its own.
   const provider = useModelProvider(modelProvider, sessionId);
@@ -680,7 +682,8 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
     finally { if (generation.current === version) setBusy(false); }
   }
   const current = state?.harness ?? 'dsh';
-  const disabled = !state || busy || state.locked || !!summary?.running || summary?.blank === false;
+  // The service decides: a started session is locked, while a branch stays switchable until its own first message.
+  const disabled = !state || busy || state.locked || !!summary?.running;
   return <div className="hp-root" aria-busy={busy || !state}>
     <div ref={root} className="hp-anchor">
       <button type="button" className="hp-chip" aria-label={t('harness')} aria-haspopup="menu" aria-expanded={open} title={disabled && state ? t('locked') : undefined}
@@ -916,7 +919,7 @@ export function HarnessSettingsSection({ useHarnessSettings, form, t }: Settings
         onCommit={draft => settle('progressFeedbackText', form.set('progressFeedbackText', draft))} />, true)}
     </>)}
     {group('settingsGroup.advanced', <>
-      {(['requestTimeoutSeconds', 'sessionLoadTimeoutSeconds', 'discussionTimeoutMinutes', 'toolOutputChars', 'peerReviewChars', 'discussionResultChars',
+      {(['requestTimeoutSeconds', 'sessionLoadTimeoutSeconds', 'discussionTimeoutMinutes', 'toolOutputChars', 'peerReviewChars', 'discussionResultChars', 'branchContextChars',
         'catalogCacheSeconds', 'quotaCacheSeconds', 'pluginCacheSeconds', 'recoveryCheckSeconds'] as const).map(field => row(field, number(field)))}
       {row('acpStderr', toggle('acpStderr'))}
     </>)}

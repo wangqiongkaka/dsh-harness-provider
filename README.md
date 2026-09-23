@@ -15,7 +15,7 @@
 - 流式显示回复、Claude Code 思考、命令、文件操作、网页访问、计划、提问和审批；Codex 的 reasoning summary 不展示。
 - 支持图片输入、工具图片输出和本地文件附件。
 - 显示上下文用量、账户额度（原生会话切换模型厂商后立即刷新；Codex / Claude Code 额度对话一轮后同步，旧值先行展示）、输出速度、token 和缓存命中。
-- 支持停止、运行中追加消息、分支、回滚和异常恢复。
+- 支持停止、运行中追加消息、分支、回滚和异常恢复；分支在发送第一条消息前可切换到其他 Harness。
 - 可手动将独立任务委派到新的 DSH 原生、Codex 或 Claude Code 会话。
 - 可手动开启讨论模式，由主 Agent 按任务并发性分配一个或多个会话并汇总结论。
 - Codex / Claude Code 会话不在屏幕上且空闲 1 分钟后自动关闭其原生进程（仍有后台任务时保留），下一轮对话按原生会话恢复（首条消息多几秒冷启动）。
@@ -44,7 +44,13 @@ dsh --profile web
 3. 按需选择模型、推理强度和权限模式。
 4. 发送第一条消息。
 
-第一条消息发送后，当前会话的 Harness 将被锁定；如需切换，请新建会话。新会话会沿用上次选择的 Harness，以及该 Harness 最近使用且仍可用的模型和推理强度。
+第一条消息发送后，当前会话的 Harness 将被锁定；如需切换，请新建会话，或从消息新建分支。新会话会沿用上次选择的 Harness，以及该 Harness 最近使用且仍可用的模型和推理强度。
+
+从消息新建的分支先沿用原会话的 Harness；在分支里发送第一条消息之前，可以在输入栏切换 Harness：
+
+- 保持原 Harness：沿用原生会话分支，上下文完整。
+- 切到 DSH 原生：直接使用分支继承的会话记录。
+- 切到另一个 Codex / Claude Code：原生会话无法跨 Harness 复制，分支前的对话（用户消息、回复和工具名称，不含工具参数及输出）作为引用数据交给新会话，不进入用户消息；已回滚或编辑撤销的内容不会携带。超过“分支携带记录上限”时只保留最近部分。原会话中的工具细节和原生内部状态不会带过去，切走后再切回原 Harness 也改用这种方式。
 
 运行中的主要行为：
 
@@ -134,6 +140,7 @@ dsh --profile web
 | 高级 | `requestTimeoutSeconds` / `sessionLoadTimeoutSeconds` ACP 请求、会话加载与分支超时（秒） | 60 / 120 | 下一次请求 |
 | 高级 | `discussionTimeoutMinutes` 讨论等待上限（分钟） | 30 | 原生进程下次启动 |
 | 高级 | `toolOutputChars` / `peerReviewChars` / `discussionResultChars` 工具输出、讨论互评摘录、讨论结果读取（字符，后者最多 64,000） | 64,000 / 12,000 / 16,000 | 下一次使用 |
+| 高级 | `branchContextChars` 分支切换到其他 Harness 时携带的对话记录上限（字符，最多 120,000） | 60,000 | 原生进程下次启动 |
 | 高级 | `catalogCacheSeconds` / `quotaCacheSeconds` / `pluginCacheSeconds` / `recoveryCheckSeconds` 模型目录、原生额度（最少 10）、插件目录缓存与恢复核对间隔（秒） | 60 / 60 / 30 / 30 | 下一次缓存填充 |
 | 高级 | `acpStderr` 将 ACP Agent 的 stderr 输出到 DSH，仅用于排查启动问题；输出可能包含提示词或凭据（环境变量 `DSH_HARNESS_ACP_STDERR=1` 同样有效） | 关 | 原生进程下次启动 |
 

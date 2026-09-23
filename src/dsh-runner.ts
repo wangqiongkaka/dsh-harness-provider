@@ -11,6 +11,7 @@ import { harnessInput } from './media.js';
 import { DshOutput } from './dsh-output.js';
 import { modelValue } from './acp-adapter.js';
 import { delegationInstructions, type DelegationBridge } from './delegation.js';
+import { branchTranscript } from './branch-context.js';
 
 export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
@@ -68,7 +69,7 @@ export class DshRunner {
   private readonly idleCloseMs: () => number;
   constructor(private readonly ctx: Context, private readonly bindings: Bindings,
     private readonly adapters: Record<Binding['harness'], HarnessAdapter>, private readonly delegation?: DelegationBridge, readonly secrets = new SecretQuestions(),
-    idleClose: number | (() => number) = IDLE_CLOSE_MS) {
+    idleClose: number | (() => number) = IDLE_CLOSE_MS, private readonly branchContextChars: () => number = () => 60_000) {
     this.idleCloseMs = typeof idleClose === 'function' ? idleClose : () => idleClose;
     // A Harness process holds the native conversation, so it lives as long as the session does; idling that long
     // buys nothing and keeps a CLI process (and its memory) resident, so it is closed and resumed on the next turn.
@@ -141,9 +142,12 @@ export class DshRunner {
     if (discussion) binding.permission = DISCUSSION_PERMISSION[binding.harness] as Binding['permission'];
     let live = this.live.get(agent.id);
     if (!live) {
-      // The adapter places the instructions: the agent's system prompt, or Codex's developer instructions at launch.
+      // The adapter places the instructions: the agent's system prompt, or Codex's developer instructions at launch. A branch
+      // switched from another Harness gets its inherited history there on every open, since its native session lacks it.
+      const carried = binding.carry ? branchTranscript(agent.session.snapshotEvents(), binding.carry.throughSeq, this.branchContextChars()) : '';
       const hints = { ...(discussion ? { discussion, instructions: '当前是只读讨论会话。只分析和提出建议；不能修改文件、执行有副作用的操作、创建子会话或请求用户授权。' }
-        : delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) }, instructions: delegationInstructions() } : {}),
+        : delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) }, instructions: delegationInstructions() + carried }
+        : carried ? { instructions: carried } : {}),
         ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
         ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(!discussion && binding.configs ? { configValues: binding.configs } : {}),
         ...(binding.usage ? { usage: binding.usage } : {}) };

@@ -29,6 +29,8 @@ export const Config = Schema.object({
   peerReviewChars: count(1_000, 12_000),
   // One page of a delegation read; the read request caps a page at 64,000 characters.
   discussionResultChars: count(1_000, 16_000, 64_000),
+  // A switched branch's history rides in the session instructions (Codex: an environment variable), so it stays bounded.
+  branchContextChars: count(1_000, 60_000, 120_000),
   catalogCacheSeconds: count(0, 60),
   // Account probes are rate-limited upstream.
   quotaCacheSeconds: count(10, 60),
