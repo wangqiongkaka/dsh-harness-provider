@@ -9,7 +9,7 @@ import { query, type Query, type SDKUserMessage, type SpawnOptions } from '@anth
 export type QueryFactory = typeof query;
 import pkg from '../package.json' with { type: 'json' };
 
-export const CLAUDE_COMMAND_ENV = 'CODEXHOST_CLAUDE_COMMAND';
+export const CLAUDE_COMMAND_ENV = 'CLAUDE_COMMAND_PATH';
 const CLIENT_APP = `${pkg.name}/${pkg.version}`;
 
 // ── Executable and environment ──────────────────────────────────────────────────────────────────────────────────────
@@ -65,7 +65,7 @@ function versionManagerDirectories(environment: NodeJS.ProcessEnv, home: string)
 }
 
 /**
- * The configured command (CODEXHOST_CLAUDE_COMMAND) when set, searched only on PATH if it is a bare name; otherwise
+ * The configured command (CLAUDE_COMMAND_PATH) when set, searched only on PATH if it is a bare name; otherwise
  * `claude` on PATH, then the usual install locations. A configured command never falls back to another installation.
  */
 export function resolveClaudeExecutable(environment: NodeJS.ProcessEnv, command?: string): string {

@@ -13,7 +13,7 @@ export const Config = Schema.object({
   /** Plugin state directory; not live, since sidecars would have to move with it. */
   root: Schema.string(),
   codexCommand: Schema.string().default('codex').volatile(),
-  /** Unset: `CODEXHOST_CLAUDE_COMMAND`, then `claude` on PATH and the usual install locations. */
+  /** Unset: `CLAUDE_COMMAND_PATH`, then `claude` on PATH and the usual install locations. */
   claudeCommand: Schema.string().volatile(),
   idleCloseSeconds: count(5, 60),
   delegateHarnesses: Schema.array(Schema.union(['dsh', 'codex', 'claude-code'])).default(['codex']).volatile(),

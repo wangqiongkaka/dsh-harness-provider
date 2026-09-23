@@ -36,7 +36,7 @@ enabled = false
 `);
 await writeFile(join(claudeHome,'settings.json'),JSON.stringify({model:'claude-sonnet-4-6',permissions:{defaultMode:'default'}}));
 const environment={PATH:process.env.PATH,HOME:root,CODEX_HOME:codexHome,CLAUDE_CONFIG_DIR:claudeHome,OPENAI_API_KEY:'fixture-only',ANTHROPIC_API_KEY:'fixture-only',ANTHROPIC_BASE_URL:proxy.baseUrl,
- CODEXHOST_CLAUDE_COMMAND:process.env.CLAUDE_COMMAND ?? '/opt/homebrew/bin/claude',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',
+ CLAUDE_COMMAND_PATH:process.env.CLAUDE_COMMAND ?? '/opt/homebrew/bin/claude',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',
  CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:'1',DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',NO_PROXY:'127.0.0.1,localhost'};
 const profiles={codex:()=>codexProfile({command:process.env.CODEX_COMMAND ?? '/opt/homebrew/bin/codex',environment}),'claude-code':()=>claudeProfile({environment})};
 const adapters=[];

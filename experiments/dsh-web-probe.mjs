@@ -51,7 +51,7 @@ enabled = false
 await writeFile(join(claudeHome,'settings.json'),JSON.stringify({model:'claude-sonnet-4-6',permissions:{defaultMode:'default'}}));
 const env={PATH:process.env.PATH,HOME:root,DSH_HOME:dshHome,DSH_TELEMETRY_DISABLED:'1',CODEX_HOME:codexHome,
  ...(process.env.COREPACK_HOME ? {COREPACK_HOME:process.env.COREPACK_HOME} : {}),
- CODEXHOST_CLAUDE_COMMAND:process.env.CLAUDE_COMMAND ?? '/opt/homebrew/bin/claude',CLAUDE_CONFIG_DIR:claudeHome,
+ CLAUDE_COMMAND_PATH:process.env.CLAUDE_COMMAND ?? '/opt/homebrew/bin/claude',CLAUDE_CONFIG_DIR:claudeHome,
  OPENAI_API_KEY:'fixture-only',ANTHROPIC_API_KEY:'fixture-only',ANTHROPIC_BASE_URL:claudeProxy.baseUrl,
  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:'1',
  DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',NO_PROXY:'127.0.0.1,localhost',
