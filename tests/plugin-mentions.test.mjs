@@ -87,7 +87,7 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
  const image={type:'image',mediaType:'image/png',data:'AA=='};
  assert.deepEqual(JSON.parse(JSON.stringify(await delegation.submit('处理图片',{},[image]))),{kind:'success',text:'已创建委派会话'});
  const submitted=JSON.parse(JSON.stringify(delegations[0]));delete submitted.requestId;
- assert.deepEqual(submitted,{sessionId:'codex',harnesses:['codex'],prompt:'处理图片',attachments:[image],reportBack:false,worktree:false});
+ assert.deepEqual(submitted,{sessionId:'codex',harnesses:['codex'],prompt:'处理图片',attachments:[image],reportBack:false,worktree:false,picks:{}});
  module.exports.setTaskMode(session.sessionId);
  const discussCandidate=(await commandUi.candidates(session,{query:'dis'}))[0];
  const discussed=commandUi.dispatch({candidate:discussCandidate,session,position:'leading',via:'menu',action:'pick',span:{start:0,end:4,draftRev:0}});
@@ -195,6 +195,36 @@ test('the model seat follows the Harness of the main-view session and task modes
  assert.equal(seats.get('conversation.composer.dock'),0,'a DSH session keeps the host context meter');
 });
 
+test('the delegation dock offers a model and effort pick per selected Codex / Claude Code target and sends only those picks', async () => {
+ const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {setTaskMode,delegationClaim,delegationOptions};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
+  MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){},setInterval:()=>1,clearInterval(){}});
+ const components=new Map();
+ const slots={inject(_name,register){return register();},register(options,component){components.set(options.name,component);return ()=>{};}};
+ await module.exports.apply({remote:{harness:{},async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
+  inject(keys,apply){if(keys.length===1&&keys[0]==='slots')apply({slots,effect(fn){fn();}});}});
+ const React=require('react'),{renderToStaticMarkup}=require('react-dom/server'),Dock=components.get('conversation.input.dock');
+ const t=(key,params)=>({pickLast:'沿用上次',native:'DSH 原生',pickModel:`${params?.harness} 的模型与推理强度`})[key]??key;
+ const sent=[],read=[];
+ const remote={models:async request=>{read.push(request);return {ok:true,value:{}};},delegateFromUser:async request=>{sent.push(request);return {ok:true,value:{sessionId:'child',harness:'codex',accepted:true}};}};
+ const claim=module.exports.delegationClaim(remote,{sessionId:'draft'},t);
+ module.exports.setTaskMode('draft',claim);
+ const render=()=>renderToStaticMarkup(React.createElement(Dock,{sessionId:'draft',inputActions:{setDraft(){}},t,input:{phase:'claimed',claim:{name:'delegate',token:'/delegate '},draft:'/delegate task',attachmentIds:[],draftRev:1,occurrences:[],queue:[]}}));
+ let html=render();
+ assert.match(html,/aria-label="Codex 的模型与推理强度"/);assert.match(html,/Codex · 沿用上次/);
+ assert.doesNotMatch(html,/Claude Code · /,'only selected targets get a pick');
+ assert.equal(read.length,0,'the catalog is read on first open, not on entering delegation mode');
+ const options=module.exports.delegationOptions;
+ options.set('draft',{harnesses:['dsh','claude-code'],reportBack:false,worktree:false,picks:{codex:{model:'fast'},'claude-code':{model:'deep',thinking:'high'}}});
+ html=render();
+ assert.match(html,/Claude Code · deep/);assert.match(html,/· effort\.high/);assert.doesNotMatch(html,/Codex · /);assert.doesNotMatch(html,/DSH 原生 · /);
+ await claim.submit('Plan the migration',{},[]);
+ assert.deepEqual(JSON.parse(JSON.stringify(sent[0].picks)),{'claude-code':{model:'deep',thinking:'high'}},'a deselected target keeps its pick in the dock but does not send it');
+ assert.deepEqual(sent[0].harnesses,['dsh','claude-code']);
+});
+
 test('sidebar marks active turns as breathing, completed sessions as static, and closed sessions as gray', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
@@ -254,4 +284,46 @@ test('the subagents guide card names the plugin that provides it and opens the t
  assert.match(renderToStaticMarkup(React.createElement(cards[0].component,{...props,description:'查看子代理'})),/<svg width="26" height="26"/,'described cards use the host icon size');
  cards[0].component(props).props.onClick();
  assert.deepEqual(JSON.parse(JSON.stringify(opened)),[['harness-subagents',{replaceTab:true}]]);
+});
+
+test('the Harness settings page follows Agent presets in Settings, renders the live values, and seeds delegation and discussion defaults', async () => {
+ const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {delegationClaim,discussionClaim,delegationOptions,discussionFor};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
+  MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){},setInterval:()=>1,clearInterval(){}});
+ const registered=[],writes=[];
+ const slots={inject(_name,register){return register();},register(options,component){registered.push({options,component});return ()=>{};}};
+ const value={codexCommand:'/opt/codex',idleCloseSeconds:30,delegateHarnesses:['dsh','claude-code'],delegateReportBack:true,delegateWorktree:true,discussHarnesses:['claude-code'],
+  progressFeedback:false,progressFeedbackText:'[CUSTOM FEEDBACK]',requestTimeoutSeconds:60,sessionLoadTimeoutSeconds:120,discussionTimeoutMinutes:30,toolOutputChars:64000,
+  peerReviewChars:12000,discussionResultChars:16000,catalogCacheSeconds:60,quotaCacheSeconds:60,pluginCacheSeconds:30,recoveryCheckSeconds:30,acpStderr:false};
+ const snapshot={status:'ready',value,user:{idleCloseSeconds:30},writable:true,revision:1,base:undefined,mode:'host'};
+ const form={getSnapshot:()=>snapshot,subscribe:()=>()=>{},set:async(field,next)=>{writes.push(['set',field,next]);return true;},unset:async field=>{writes.push(['unset',field]);return true;}};
+ let served;
+ const configForms={get:entry=>{assert.equal(entry,'harness-plugin');return form;},whileServed:(namespaces,register)=>{served=namespaces;return register(new Set(namespaces));}};
+ await module.exports.apply({remote:{harness:{},async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
+  inject(keys,apply){if(keys.includes('configForms'))apply({slots,configForms,effect(fn){fn();}});}});
+ assert.deepEqual([...served],['harness-plugin'],'the page exists only while the Host serves the entry');
+ const section=registered.find(entry=>entry.options.name==='settings.section');
+ assert.deepEqual(JSON.parse(JSON.stringify([section.options.id,section.options.order,section.options.label()])),['harness',25,'settingsNav'],'after Agent presets (20)');
+ const face=section.options.inject();
+ assert.equal(face.form,form);assert.equal(face.hooks.harnessSettings,form);
+ const React=require('react'),{renderToStaticMarkup}=require('react-dom/server');
+ const t=key=>key;
+ const html=renderToStaticMarkup(React.createElement(section.component,{useHarnessSettings:select=>select(snapshot),form,t}));
+ for (const group of ['settingsGroup.programs','settingsGroup.sessions','settingsGroup.delegation','settingsGroup.feedback','settingsGroup.advanced']) assert.match(html,new RegExp(`aria-label="${group}"`));
+ assert.match(html,/value="\/opt\/codex"/);assert.match(html,/placeholder="settingsAuto"/);
+ assert.match(html,/<textarea[^>]*disabled=""[^>]*>\[CUSTOM FEEDBACK\]<\/textarea>/,'the text is kept but not editable while the contract is off');
+ assert.equal((html.match(/settingsReset/g)??[]).length,1,'only the overridden field offers a reset');
+ assert.match(html,/role="switch" aria-checked="true" aria-label="setting.delegateReportBack"/);
+ assert.equal((html.match(/role="switch"/g)??[]).length,4);
+ // Unwritable: every control is disabled and the page says why.
+ const readOnly=renderToStaticMarkup(React.createElement(section.component,{useHarnessSettings:select=>select({...snapshot,writable:false}),form,t}));
+ assert.match(readOnly,/settingsReadOnly/);assert.doesNotMatch(readOnly,/<input(?![^>]*disabled)/);
+ assert.match(renderToStaticMarkup(React.createElement(section.component,{useHarnessSettings:select=>select({...snapshot,status:'unavailable',value:undefined}),form,t})),/settingsUnavailable/);
+ // Entering delegation or discussion mode preselects what the settings say; a native DSH target drops the worktree.
+ module.exports.delegationClaim({}, {sessionId:'draft'},t);
+ assert.deepEqual(JSON.parse(JSON.stringify(module.exports.delegationOptions.get('draft'))),{harnesses:['dsh','claude-code'],reportBack:true,worktree:false,picks:{}});
+ module.exports.discussionClaim({}, {sessionId:'draft'},t);
+ assert.deepEqual([...module.exports.discussionFor('draft')],['claude-code']);
 });

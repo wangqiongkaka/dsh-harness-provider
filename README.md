@@ -91,6 +91,7 @@ dsh --profile web
 - “完成后回传”默认关闭；关闭时结果仅保留在新会话，开启时才通知并唤醒来源会话。只有创建者可以读取回传结果。
 - 任何会话（包括委派创建的会话）都可由用户再次明确发起委派。
 - 同 Harness 沿用来源权限；跨 Harness 使用与来源权限相匹配的目标权限。
+- 发送前可为每个选中的 Codex / Claude Code 选择模型与推理强度，默认“沿用上次”。选择只作用于这次创建的会话，不改变之后新建会话沿用的模型；创建前按该 Harness 的模型目录校验，任一目标不合法时不创建任何会话。DSH 原生目标使用宿主当前模型。
 - DSH 原生目标使用宿主当前的默认 Agent preset 与模型；权限取与来源沙箱级别相同的权限预设（来源为 Codex / Claude Code 时，完全权限对应完全权限，只读或计划对应只读，其余对应工作区可写），没有匹配预设时拒绝创建。
 - 可选 **独立 worktree**（默认关闭，仅 Codex / Claude Code）：以来源目录当前内容（含未提交修改和未被忽略的新文件，不含 `node_modules`、`.env` 等被忽略文件）为起点，在插件数据目录下创建分离的 git worktree，Harness 在其中工作；DSH 会话仍显示在原工作区，界面中的文件与终端仍指向主目录。工作目录不是 git 仓库时拒绝创建。
 - 使用 worktree 时，委派会话每轮结束且有未合并改动，会在该会话中询问：**合并并删除**（三方合并，作为未提交修改应用到主目录，不创建提交、不改动暂存区；有冲突时不应用任何改动并保留 worktree）、**放弃并删除** 或 **暂不处理**（下一轮结束时再问）。删除后该会话不再接受新的对话。
@@ -105,6 +106,7 @@ dsh --profile web
 - 只分配一个会话时直接执行；分配多个会话时先独立完成，再在各自原会话中互评一轮，由主 Agent 汇总最终答案。
 - 参与者都是与当前会话同层显示的独立会话，共用工作区但拥有独立历史；讨论不会再递归创建新会话。
 - 分配入口只在用户开启讨论的当前轮有效。相同调用重试复用已有任务，不能借此增加会话。
+- 主 Agent 可按每项分工的复杂度为参与者指定模型与推理强度（先查询可用值），省略时沿用该 Harness 上次的选择；有不合法的选择时不创建任何参与者，修正后可在同一轮重试。
 - 参与者锁定为只读：Codex 使用真正的只读沙箱；Claude Code 只开放读取、文件搜索和内置网页搜索/抓取工具。权限申请自动拒绝，不能切换权限、修改配置或创建会话分支；限制在恢复后继续生效。
 - 原始网络与外部 MCP/应用操作不可用；内置网页能力仍受 Harness 自身支持和权限约束。无法安全拒绝或检测到权限变化时停止参与者，并在结果中报告原因；失败参与者不会自动进入互评。
 
@@ -121,26 +123,30 @@ dsh --profile web
 
 ## 配置
 
-插件无需额外配置即可使用。可在 Profile 的 `cordis.patch.yml` 中覆盖以下选项：
+插件无需额外配置即可使用。默认值可在 DSH 的 **设置 → Harness**（位于“Agent 预设”下方）中修改，修改立即保存到当前 Profile 的 `cordis.patch.yml`，每项都可恢复默认；当前连接不能写入配置时页面只读。
 
-| 配置项 | 默认值 | 说明 |
-| --- | --- | --- |
-| `codexCommand` | `codex` | Codex 可执行文件，也用于额度探测 |
-| `root` | `$DSH_HOME/harness-plugin` | 插件状态目录；未设置 `DSH_HOME` 时使用 `~/.dsh/harness-plugin` |
+| 分组 | 配置项 | 默认值 | 生效时机 |
+| --- | --- | --- | --- |
+| 程序 | `codexCommand` Codex 可执行文件（也用于额度、插件和轮次记录查询） | `codex` | 原生进程下次启动 |
+| 程序 | `claudeCommand` Claude Code 可执行文件；留空时使用 `CODEXHOST_CLAUDE_COMMAND`，再从 PATH、常见安装目录和版本管理器目录中查找 | 自动查找 | 原生进程下次启动 |
+| 会话 | `idleCloseSeconds` 空闲回收（秒） | 60 | 下一次空闲扫描 |
+| 委派与讨论 | `delegateHarnesses` / `delegateReportBack` / `delegateWorktree` 委派默认目标、回传、独立 worktree | Codex / 关 / 关 | 下次进入委派模式 |
+| 委派与讨论 | `discussHarnesses` 讨论默认参与者 | Codex + Claude Code | 下次进入讨论模式 |
+| 进展反馈 | `progressFeedback` / `progressFeedbackText` 是否注入中文进展反馈说明及其文本 | 开 / 内置说明 | 原生进程下次启动 |
+| 高级 | `requestTimeoutSeconds` / `sessionLoadTimeoutSeconds` ACP 请求、会话加载与分支超时（秒） | 60 / 120 | 下一次请求 |
+| 高级 | `discussionTimeoutMinutes` 讨论等待上限（分钟） | 30 | 原生进程下次启动 |
+| 高级 | `toolOutputChars` / `peerReviewChars` / `discussionResultChars` 工具输出、讨论互评摘录、讨论结果读取（字符，后者最多 64,000） | 64,000 / 12,000 / 16,000 | 下一次使用 |
+| 高级 | `catalogCacheSeconds` / `quotaCacheSeconds` / `pluginCacheSeconds` / `recoveryCheckSeconds` 模型目录、原生额度（最少 10）、插件目录缓存与恢复核对间隔（秒） | 60 / 60 / 30 / 30 | 下一次缓存填充 |
+| 高级 | `acpStderr` 将 ACP Agent 的 stderr 输出到 DSH，仅用于排查启动问题；输出可能包含提示词或凭据（环境变量 `DSH_HARNESS_ACP_STDERR=1` 同样有效） | 关 | 原生进程下次启动 |
+
+讨论参与者的只读权限、跨 Harness 委派的权限映射和协议上限不开放配置。插件状态目录 `root`（默认 `$DSH_HOME/harness-plugin`，未设置 `DSH_HOME` 时为 `~/.dsh/harness-plugin`）只能在 `cordis.patch.yml` 中修改，修改后插件重新加载：
 
 ```yaml
 - id: harness-plugin
   config:
-    codexCommand: /absolute/path/codex
     root: /absolute/path/harness-state
+    codexCommand: /absolute/path/codex
 ```
-
-支持的环境变量：
-
-| 环境变量 | 说明 |
-| --- | --- |
-| `CODEXHOST_CLAUDE_COMMAND` | Claude Code 可执行文件；未设置时从 PATH、常见安装目录和版本管理器目录中查找 |
-| `DSH_HARNESS_ACP_STDERR=1` | 将 ACP Agent 的 stderr 输出到 DSH，仅用于排查启动问题；输出可能包含提示词或凭据 |
 
 从图形界面启动 DSH 时，插件会读取登录 shell 的环境。
 
@@ -173,7 +179,7 @@ npm run check
 
 `npm run dev:link` 会链接参考仓库中的 `@deepseek-ai/*` 包，每次运行 `npm install` 后都需要重新执行。`npm run check` 依次执行类型检查、构建和全部测试。
 
-在 DSH `0.1.7-alpha.1` 参考构建上，`npm run check` 已通过类型检查、构建和 72 项测试，覆盖新版工具结果、通知来源、实时额度配置、并行调用日志、取消与会话冷恢复。本次未替换已安装的 Web 插件，未执行真实 CLI/API 和隔离 Web Profile 的端到端验证；组件静态渲染仍有 React `useLayoutEffect` 警告。
+在 DSH `0.1.7-alpha.1` 参考构建上，`npm run check` 已通过类型检查、构建和 82 项测试，覆盖新版工具结果、通知来源、实时额度配置、并行调用日志、取消与会话冷恢复。本次未替换已安装的 Web 插件，未执行真实 CLI/API 和隔离 Web Profile 的端到端验证；组件静态渲染仍有 React `useLayoutEffect` 警告。
 
 其他验证命令：
 

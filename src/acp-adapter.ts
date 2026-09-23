@@ -57,7 +57,10 @@ export interface AcpProfile {
   inspectAccount?(): Promise<HarnessAccountSnapshot | null>;
   /** Plugins the agent program can be pointed at from the prompt; ACP carries no plugin catalog. */
   listPlugins?(cwd: string): Promise<HarnessPlugin[]>;
+  /** Live timeouts, output limit and stderr debugging; read on every use. Missing fields keep {@link DEFAULT_LIMITS}. */
+  limits?(): Partial<AcpLimits>;
 }
+export interface AcpLimits { requestTimeoutMs: number; loadTimeoutMs: number; toolOutputChars: number; stderr: boolean }
 
 const clientCapabilities = (profile: AcpProfile): acp.ClientCapabilities => ({
   session: { compaction: {}, configOptions: { boolean: {} } }, elicitation: { form: {}, url: {} }, plan: {},
@@ -72,10 +75,15 @@ const SUBAGENT_UPDATE = '_dsh/subagent_update';
 type SubagentLifecycle = { sessionUpdate: 'subagent_spawned'; subagentSessionId: string; name?: unknown; task?: unknown } | { sessionUpdate: 'subagent_state_update'; subagentSessionId: string; state: unknown };
 /** AIR async task lifecycle (claude-agent-acp dist/async-tasks.js, codex-acp CodexBackgroundTerminalTasks); only liveness is kept. */
 type AsyncTaskUpdate = { sessionUpdate: 'async_task_spawned' | 'async_task_progress'; asyncTaskId: string } | { sessionUpdate: 'async_task_state_update'; asyncTaskId: string; state: unknown };
-const REQUEST_TIMEOUT_MS = 60_000;
 const CLOSE_TIMEOUT_MS = 5_000;
 const TITLE_TIMEOUT_MS = 30_000;
-const TOOL_OUTPUT_LIMIT = 64_000;
+const DEFAULT_LIMITS: AcpLimits = { requestTimeoutMs: 60_000, loadTimeoutMs: 120_000, toolOutputChars: 64_000, stderr: false };
+// `DSH_HARNESS_ACP_STDERR=1` still turns stderr on for a process started without the setting.
+const limitsOf = (profile: AcpProfile): AcpLimits => {
+  const limits = { ...DEFAULT_LIMITS, ...profile.limits?.() };
+  return { ...limits, stderr: limits.stderr || process.env.DSH_HARNESS_ACP_STDERR === '1' };
+};
+const truncate = (text: string, limit: number) => ({ text: text.length > limit ? text.slice(0, limit) : text, truncated: text.length > limit });
 const SKILLS_CONTEXT_BUDGET_NOTICE = 'Skill descriptions were shortened to fit the skills context budget.';
 const record = (value: unknown): Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown, max = 500): string | undefined => typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
@@ -229,6 +237,8 @@ interface Handlers {
 /** One agent process and its connection; `initialize` has already succeeded when `connect` resolves. */
 class AcpProcess {
   readonly agent: ClientContext;
+  /** Default timeout of requests to this agent, read when each request starts. */
+  requestTimeoutMs = (): number => DEFAULT_LIMITS.requestTimeoutMs;
   initialized!: acp.InitializeResponse;
   private closing?: Promise<void>;
   private live = true;
@@ -238,7 +248,7 @@ class AcpProcess {
   static async connect(profile: AcpProfile, environment: NodeJS.ProcessEnv, cwd: string, handlers: Handlers, instructions?: string): Promise<AcpProcess> {
     const { command, args, env } = profile.spawn(environment, instructions);
     // stderr is not a protocol channel and may carry prompt text or credentials; it is discarded unless debugging asks for it.
-    const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', process.env.DSH_HARNESS_ACP_STDERR === '1' ? 'inherit' : 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
+    const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', limitsOf(profile).stderr ? 'inherit' : 'pipe'], windowsHide: true, detached: process.platform !== 'win32' });
     child.stderr?.resume();
     const exited = new Promise<void>(resolve => { child.once('close', () => resolve()); child.once('error', () => resolve()); });
     const wire = ndJsonStream(Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>);
@@ -254,9 +264,10 @@ class AcpProcess {
       .onRequest('session/request_permission', ({ params, signal }) => handlers.permission(params, signal))
       .onRequest('elicitation/create', ({ params, signal }) => handlers.elicitation(params, signal));
     const process_ = new AcpProcess(child, app.connect(stream), exited);
+    process_.requestTimeoutMs = () => limitsOf(profile).requestTimeoutMs;
     void Promise.race([process_.connection.closed, exited]).then(() => { if (process_.live) { process_.live = false; handlers.fault(new Error(`${profile.harnessId} agent exited`)); } });
     try {
-      process_.initialized = await request<acp.InitializeResponse>(process_.agent, 'initialize', { protocolVersion: 1, clientCapabilities: clientCapabilities(profile),
+      process_.initialized = await request<acp.InitializeResponse>(process_, 'initialize', { protocolVersion: 1, clientCapabilities: clientCapabilities(profile),
         clientInfo: { name: pkg.name, version: pkg.version, title: 'DSH Harness Plugin' } });
       return process_;
     } catch (cause) { await process_.close(); throw cause; }
@@ -278,8 +289,8 @@ class AcpProcess {
 const IDLE_HANDLERS: Handlers = {
   update: () => {}, permission: async () => ({ outcome: { outcome: 'cancelled' } }), elicitation: async () => ({ action: 'cancel' }), elicitationComplete: () => {}, fault: () => {},
 };
-function request<T = unknown>(agent: ClientContext, method: string, params: unknown, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
-  return agent.request<T>(method, params, { cancellationSignal: AbortSignal.timeout(timeoutMs) });
+function request<T = unknown>(process_: AcpProcess, method: string, params: unknown, timeoutMs = process_.requestTimeoutMs()): Promise<T> {
+  return process_.agent.request<T>(method, params, { cancellationSignal: AbortSignal.timeout(timeoutMs) });
 }
 async function waitFor<T>(work: () => T | undefined, timeoutMs: number): Promise<T | undefined> {
   const deadline = Date.now() + timeoutMs;
@@ -298,6 +309,7 @@ interface TranscriptTurn {
 }
 class Transcript {
   readonly turns: TranscriptTurn[] = [];
+  constructor(private readonly outputLimit: () => number = () => DEFAULT_LIMITS.toolOutputChars) {}
   private agentMessageId?: string;
   /** Prompt hash plus its occurrence: stable for a finished turn, and the same for a replayed history. */
   key(turn: TranscriptTurn): string {
@@ -335,7 +347,7 @@ class Transcript {
       let item = toolItem(call);
       const output = replayedOutput(call);
       if (output) {
-        const truncated = output.length > TOOL_OUTPUT_LIMIT, text = truncated ? output.slice(0, TOOL_OUTPUT_LIMIT) : output;
+        const { text, truncated } = truncate(output, this.outputLimit());
         item = item.type === 'commandExecution' ? { ...item, output: text, outputTruncated: truncated } : { ...item, output: { content: [{ type: 'text', text }], ...(truncated ? { truncated } : {}) } };
       }
       const outcome: HostItemOutcome = call.status === 'completed' ? { status: 'succeeded' } : call.status === 'failed' ? { status: 'failed', error: error('nativeFailure', 'Tool failed') }
@@ -506,7 +518,7 @@ class AcpSession implements HarnessSession {
   readonly initialUsage: HostUsage | null;
   readonly #channel = new HarnessOutputChannel<HarnessOutput>();
   readonly outputs = this.#channel.outputs;
-  readonly #transcript = new Transcript();
+  readonly #transcript: Transcript;
   readonly #subagents = new Subagents();
   /** Background tasks (backgrounded shells) still running; they keep going after the turn ends. */
   readonly #backgroundTasks = new Set<string>();
@@ -530,6 +542,7 @@ class AcpSession implements HarnessSession {
 
   private constructor(options: SessionOptions, process_: AcpProcess, sessionId: string, opened: Opened, catalogs: Catalogs, commands: HarnessSkill[]) {
     this.#profile = options.profile; this.#environment = options.environment; this.#process = process_; this.#sessionId = sessionId; this.#cwd = options.input.cwd; this.#onClosed = options.onClosed;
+    this.#transcript = new Transcript(() => limitsOf(options.profile).toolOutputChars);
     this.harnessId = harnessIdSchema.parse(options.profile.harnessId);
     this.#catalogs = catalogs;
     this.#commands = commands;
@@ -569,11 +582,11 @@ class AcpSession implements HarnessSession {
       const meta = profile.sessionMeta?.(input.kind, input.instructions, input.discussion);
       let opened: Opened;
       if (input.kind === 'create') {
-        const created = await request<acp.NewSessionResponse>(process_.agent, 'session/new', { cwd: input.cwd, mcpServers: [], ...(meta ? { _meta: meta } : {}) });
+        const created = await request<acp.NewSessionResponse>(process_, 'session/new', { cwd: input.cwd, mcpServers: [], ...(meta ? { _meta: meta } : {}) });
         sessionId = created.sessionId; opened = created;
       } else {
         sessionId = input.nativeRef.nativeSessionId;
-        opened = await request<acp.LoadSessionResponse>(process_.agent, 'session/load', { sessionId, cwd: input.cwd, mcpServers: [], ...(meta ? { _meta: meta } : {}) }, 120_000);
+        opened = await request<acp.LoadSessionResponse>(process_, 'session/load', { sessionId, cwd: input.cwd, mcpServers: [], ...(meta ? { _meta: meta } : {}) }, limitsOf(profile).loadTimeoutMs);
       }
       const catalogs = catalogsOf(opened);
       const skills = (await waitFor(() => commands, 3_000)) ?? [];
@@ -632,7 +645,7 @@ class AcpSession implements HarnessSession {
     try {
       const process_ = await AcpProcess.connect(this.#profile, this.#environment, this.#cwd, IDLE_HANDLERS);
       try {
-        const forked = await request<acp.ForkSessionResponse>(process_.agent, 'session/fork', { sessionId: this.#sessionId, cwd: this.#cwd, ...(meta ? { _meta: meta } : {}) }, 120_000);
+        const forked = await request<acp.ForkSessionResponse>(process_, 'session/fork', { sessionId: this.#sessionId, cwd: this.#cwd, ...(meta ? { _meta: meta } : {}) }, limitsOf(this.#profile).loadTimeoutMs);
         if (!forked.sessionId || forked.sessionId === this.#sessionId) throw new Error('Harness 返回了错误的分支身份');
         return { ok: true, value: nativeSessionRefSchema.parse({ harnessId: this.harnessId, nativeSessionId: forked.sessionId, formatVersion: 1 }) };
       } finally { await process_.close(); }
@@ -642,7 +655,7 @@ class AcpSession implements HarnessSession {
   async steer(input: HostInput[]): Promise<HarnessResult<{ accepted: true }>> {
     if (!this.#active || this.#fault) return failed('invalidState', '当前没有可插入的原生轮次');
     try {
-      const result = record(await request(this.#process.agent, '_session/steering', { sessionId: this.#sessionId, prompt: blocksOf(input) }));
+      const result = record(await request(this.#process, '_session/steering', { sessionId: this.#sessionId, prompt: blocksOf(input) }));
       if (result.outcome !== 'injected') throw new Error('原生轮次已结束，插入未被接收');
       return { ok: true, value: { accepted: true } };
     } catch (cause) { return { ok: false, error: toError(cause, '插入未被接收') }; }
@@ -698,13 +711,13 @@ class AcpSession implements HarnessSession {
   }
 
   async #setConfig(configId: string, value: string | boolean): Promise<void> {
-    const response = await request<acp.SetSessionConfigOptionResponse>(this.#process.agent, 'session/set_config_option', {
+    const response = await request<acp.SetSessionConfigOptionResponse>(this.#process, 'session/set_config_option', {
       sessionId: this.#sessionId, configId, value, ...(typeof value === 'boolean' ? { type: 'boolean' as const } : {}),
     });
     this.#configChanged(response.configOptions);
   }
   async #setMode(modeId: string): Promise<void> {
-    await request(this.#process.agent, 'session/set_mode', { sessionId: this.#sessionId, modeId });
+    await request(this.#process, 'session/set_mode', { sessionId: this.#sessionId, modeId });
     this.#publish({ ...this.#state, effectivePermissionModeId: harnessPermissionModeIdSchema.parse(modeId) });
   }
   #configChanged(options: acp.SessionConfigOption[]): void {
@@ -740,7 +753,7 @@ class AcpSession implements HarnessSession {
       const lead = blocks.find(block => block.type === 'text');
       const title = text(lead?.type === 'text' ? lead.text.split('\n').find(line => line.trim()) : undefined, 60);
       // A local command that hangs must not hold the turn; the timeout cancels the request on the agent.
-      if (title) await request(this.#process.agent, 'session/prompt', { sessionId: this.#sessionId, prompt: [{ type: 'text', text: this.#profile.titleCommand!(title) }] }, TITLE_TIMEOUT_MS).catch(() => {});
+      if (title) await request(this.#process, 'session/prompt', { sessionId: this.#sessionId, prompt: [{ type: 'text', text: this.#profile.titleCommand!(title) }] }, TITLE_TIMEOUT_MS).catch(() => {});
     }
     const transcript = this.#transcript.begin(promptText(blocks));
     const active: ActiveTurn = { hostId: command.turnId, transcript, cancelled: false, tools: new Map(), announced: new Map(), compaction: new Map(), interactions: new Map(), done: Promise.withResolvers() };
@@ -903,7 +916,7 @@ class AcpSession implements HarnessSession {
         const images = describing ? [] : (update.content ?? []).flatMap(part => part.type === 'content' && part.content.type === 'image' ? [{ type: 'image' as const, mimeType: part.content.mimeType, base64Data: part.content.data }] : []);
         const diffs = (update.content ?? []).flatMap(part => part.type === 'diff' ? [part] : []);
         if (outputText || images.length) {
-          const truncated = outputText.length > TOOL_OUTPUT_LIMIT, output = truncated ? outputText.slice(0, TOOL_OUTPUT_LIMIT) : outputText;
+          const { text: output, truncated } = truncate(outputText, limitsOf(this.#profile).toolOutputChars);
           if (item.type === 'commandExecution') { item = { ...item, output, outputTruncated: truncated }; }
           else item = { ...item, output: { content: [...(output ? [{ type: 'text' as const, text: output }] : []), ...images], ...(truncated ? { truncated } : {}) } };
           active.tools.set(update.toolCallId, item);
@@ -1075,7 +1088,7 @@ class AcpSession implements HarnessSession {
           await Promise.race([active.done.promise, new Promise(resolve => setTimeout(resolve, CLOSE_TIMEOUT_MS).unref())]);
           if (this.#active === active) this.#finish(active, { status: 'cancelled', reason: 'Session closed' });
         }
-        if (!this.#fault) await request(this.#process.agent, 'session/close', { sessionId: this.#sessionId }, 2_000).catch(() => {});
+        if (!this.#fault) await request(this.#process, 'session/close', { sessionId: this.#sessionId }, 2_000).catch(() => {});
       } finally {
         await this.#process.close();
         this.#channel.end();
@@ -1172,9 +1185,9 @@ export class AcpAdapter implements HarnessAdapter {
     const process_ = await AcpProcess.connect(this.#options.profile, this.#options.environment, cwd, { ...IDLE_HANDLERS,
       update: notification => { if (notification.update.sessionUpdate === 'available_commands_update') commands.value = notification.update.availableCommands; } });
     try {
-      const opened = await request<acp.NewSessionResponse>(process_.agent, 'session/new', { cwd, mcpServers: [], ...(this.#options.profile.sessionMeta?.('create') ? { _meta: this.#options.profile.sessionMeta('create') } : {}) });
+      const opened = await request<acp.NewSessionResponse>(process_, 'session/new', { cwd, mcpServers: [], ...(this.#options.profile.sessionMeta?.('create') ? { _meta: this.#options.profile.sessionMeta('create') } : {}) });
       try { return await work(process_, opened, commands); }
-      finally { await request(process_.agent, 'session/close', { sessionId: opened.sessionId }, 2_000).catch(() => {}); }
+      finally { await request(process_, 'session/close', { sessionId: opened.sessionId }, 2_000).catch(() => {}); }
     } finally { await process_.close(); }
   }
   async #track<T>(work: () => Promise<T>): Promise<T> {

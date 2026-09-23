@@ -64,15 +64,20 @@ export class DshRunner {
   readonly retainedSubagents = new Map<string, HarnessSubagent[]>();
   /** When a client last reported each session on screen. */
   private readonly viewedAt = new Map<string, number>();
+  /** The current idle window, in ms. */
+  private readonly idleCloseMs: () => number;
   constructor(private readonly ctx: Context, private readonly bindings: Bindings,
     private readonly adapters: Record<Binding['harness'], HarnessAdapter>, private readonly delegation?: DelegationBridge, readonly secrets = new SecretQuestions(),
-    private readonly idleCloseMs = IDLE_CLOSE_MS) {
+    idleClose: number | (() => number) = IDLE_CLOSE_MS) {
+    this.idleCloseMs = typeof idleClose === 'function' ? idleClose : () => idleClose;
     // A Harness process holds the native conversation, so it lives as long as the session does; idling that long
     // buys nothing and keeps a CLI process (and its memory) resident, so it is closed and resumed on the next turn.
+    // Each sweep schedules the next from the current window, so a changed setting takes effect by the following sweep.
     ctx.effect(() => {
-      const timer = setInterval(() => { void this.reclaimIdle().catch(() => {}); }, idleSweepMs(idleCloseMs));
-      timer.unref();
-      return () => clearInterval(timer);
+      let timer: NodeJS.Timeout;
+      const schedule = () => { timer = setTimeout(() => { void this.reclaimIdle().catch(() => {}); schedule(); }, idleSweepMs(this.idleCloseMs())); timer.unref(); };
+      schedule();
+      return () => clearTimeout(timer);
     }, 'harness: idle session reclamation');
   }
 
@@ -81,13 +86,13 @@ export class DshRunner {
 
   /** Closes every Harness session whose process has been idle past the window; the binding keeps it resumable. */
   private async reclaimIdle(): Promise<void> {
-    const now = Date.now();
-    for (const [id, at] of this.viewedAt) if (now - at >= this.idleCloseMs) this.viewedAt.delete(id);
+    const now = Date.now(), idleCloseMs = this.idleCloseMs();
+    for (const [id, at] of this.viewedAt) if (now - at >= idleCloseMs) this.viewedAt.delete(id);
     for (const [id, live] of [...this.live]) {
       if (live.turnId) continue;
       // A backgrounded shell dies with the process; the idle window restarts once the last one ends.
       if (live.session.hasBackgroundTasks?.()) { live.activeAt = now; continue; }
-      if (now - Math.max(live.activeAt, this.viewedAt.get(id) ?? -Infinity) < this.idleCloseMs) continue;
+      if (now - Math.max(live.activeAt, this.viewedAt.get(id) ?? -Infinity) < idleCloseMs) continue;
       const agent = this.ctx.agents.get(SessionId(id));
       if (!agent || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) continue;
       // A session awaiting result confirmation stays open: the user is about to reconcile it against the native record.

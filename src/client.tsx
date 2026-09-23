@@ -4,7 +4,7 @@ import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
 import type {} from '@deepseek-ai/dsh-api-remotes/client';
 import type {} from '@deepseek-ai/dsh-api-session-controller/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
-import type {} from '@deepseek-ai/dsh-client-ui-settings/client';
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client';
 import type { DraftAttachmentId, SubmitOutcome } from '@deepseek-ai/dsh-client-ui-conversation/client';
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client';
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
@@ -14,7 +14,8 @@ import type { ClientSessionContext, CommandClaim, InputTriggerCandidate, InputTr
 import type {} from '@deepseek-ai/dsh-client-ui-commands/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client';
-import { contribution, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema } from './remote.js';
+import type { Settings } from './settings.js';
+import { contribution, SETTINGS_ENTRY, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema } from './remote.js';
 import type { z } from 'zod';
 
 type State = z.infer<typeof stateSchema>;
@@ -30,7 +31,7 @@ type Api = {
   answerSecret(request: {sessionId: string; id: string; answers: Record<string,string[]>; cancelled?: boolean}): Promise<RemoteResult<{accepted: boolean}>>;
   state(request: {sessionId: string}): Promise<RemoteResult<State>>;
   select(request: {sessionId: string; harness: State['harness']}): Promise<RemoteResult<State>>;
-  models(request: {sessionId: string}): Promise<RemoteResult<Models>>;
+  models(request: {sessionId: string; harness?: Exclude<State['harness'], 'dsh'>}): Promise<RemoteResult<Models>>;
   selectModel(request: {sessionId: string; model: string}): Promise<RemoteResult<State>>;
   selectThinking(request: {sessionId: string; thinking: string}): Promise<RemoteResult<State>>;
   selectPermission(request: {sessionId: string; permission: string}): Promise<RemoteResult<State>>;
@@ -42,7 +43,7 @@ type Api = {
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
   plugins(request: {sessionId: string}): Promise<RemoteResult<Plugin[]>>;
   edit(request: {sessionId: string; seq: number; text: string; requestId: string}): Promise<RemoteResult<State>>;
-  delegateFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; reportBack: boolean; worktree: boolean; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId?: string; harness: State['harness']; accepted: true}>>;
+  delegateFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; reportBack: boolean; worktree: boolean; picks: Picks; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId?: string; harness: State['harness']; accepted: true}>>;
   startDiscussionFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
 };
 const zh = {
@@ -72,6 +73,31 @@ const zh = {
   delegate: '委派', delegateMode: '委派模式', delegateDescription: '创建独立会话执行任务', delegateTask: '当前处于委派模式：描述任务，将交给所选 Harness 在新的独立会话中执行；输入 / 可先用当前会话的 skill（如交接）', delegateCreated: '已创建委派会话', delegatePrepared: '正在当前会话执行 skill，完成后自动创建委派会话', commands: '指令',
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
   worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code',
+  pickModel: '{harness} 的模型与推理强度', pickLast: '沿用上次',
+  settingsNav: 'Harness', settingsIntro: '接入 Codex / Claude Code 的默认行为。修改立即保存到当前 Profile 的配置文件；可执行文件、进展反馈说明、讨论等待上限和调试输出在原生进程下次启动时生效。',
+  settingsReadOnly: '当前连接不能修改配置，以下内容只读。', settingsUnavailable: '当前 Profile 没有提供本插件的配置。', settingsReset: '恢复默认',
+  settingsRejected: '未保存：取值无效或超出范围。', settingsAuto: '自动查找',
+  'settingsGroup.programs': '程序', 'settingsGroup.sessions': '会话', 'settingsGroup.delegation': '委派与讨论', 'settingsGroup.feedback': '进展反馈', 'settingsGroup.advanced': '高级',
+  'setting.codexCommand': 'Codex 可执行文件', 'setting.codexCommand.hint': '命令名或绝对路径，也用于额度、插件和轮次记录查询。',
+  'setting.claudeCommand': 'Claude Code 可执行文件', 'setting.claudeCommand.hint': '留空时依次使用环境变量 CODEXHOST_CLAUDE_COMMAND、PATH 中的 claude 和常见安装位置。',
+  'setting.idleCloseSeconds': '空闲回收（秒）', 'setting.idleCloseSeconds.hint': '会话不在屏幕上且空闲超过该时长后关闭原生进程，下一轮按原生会话恢复；仍有后台任务时保留。',
+  'setting.delegateHarnesses': '委派默认目标', 'setting.delegateHarnesses.hint': '进入委派模式时预选的 Harness。',
+  'setting.delegateReportBack': '委派默认回传', 'setting.delegateReportBack.hint': '进入委派模式时预选“完成后回传到当前会话”。',
+  'setting.delegateWorktree': '委派默认使用独立 worktree', 'setting.delegateWorktree.hint': '仅对 Codex / Claude Code 生效；默认目标包含 DSH 原生时不预选。',
+  'setting.discussHarnesses': '讨论默认参与者', 'setting.discussHarnesses.hint': '进入讨论模式时预选的 Harness。',
+  'setting.progressFeedback': '注入进展反馈说明', 'setting.progressFeedback.hint': '要求 Codex / Claude Code 在执行过程中用中文汇报进展。',
+  'setting.progressFeedbackText': '进展反馈说明', 'setting.progressFeedbackText.hint': '作为系统说明交给新启动的原生会话，不进入用户消息。',
+  'setting.requestTimeoutSeconds': 'ACP 请求超时（秒）', 'setting.requestTimeoutSeconds.hint': '新建会话、切换模型等单次请求的等待上限，不限制对话轮次本身。',
+  'setting.sessionLoadTimeoutSeconds': '会话加载超时（秒）', 'setting.sessionLoadTimeoutSeconds.hint': '恢复或分支原生会话时回放历史的等待上限。',
+  'setting.discussionTimeoutMinutes': '讨论等待上限（分钟）', 'setting.discussionTimeoutMinutes.hint': '主 Agent 等待讨论结果的最长时间。',
+  'setting.toolOutputChars': '工具输出上限（字符）', 'setting.toolOutputChars.hint': '单个工具输出超过该长度时截断显示。',
+  'setting.peerReviewChars': '讨论互评摘录（字符）', 'setting.peerReviewChars.hint': '互评时每位参与者的结果交给其他参与者的最大长度。',
+  'setting.discussionResultChars': '讨论结果读取（字符）', 'setting.discussionResultChars.hint': '汇总时读取每位参与者结果末尾的长度，最多 64,000。',
+  'setting.catalogCacheSeconds': '模型目录缓存（秒）', 'setting.catalogCacheSeconds.hint': '模型、推理强度和权限模式列表的缓存时长；0 表示每次重新读取。',
+  'setting.quotaCacheSeconds': '额度缓存（秒）', 'setting.quotaCacheSeconds.hint': 'DSH 原生模型账户额度的缓存时长，最少 10 秒。',
+  'setting.pluginCacheSeconds': '插件目录缓存（秒）', 'setting.pluginCacheSeconds.hint': '@ 菜单中 Harness 插件列表的缓存时长。',
+  'setting.recoveryCheckSeconds': '恢复核对间隔（秒）', 'setting.recoveryCheckSeconds.hint': '暂停的会话打开时自动核对原生记录的最短间隔。',
+  'setting.acpStderr': 'ACP 调试输出', 'setting.acpStderr.hint': '把 Agent 进程的 stderr 输出到 DSH 日志，仅用于排查启动问题；可能包含提示词或凭据。',
   discuss: '讨论', discussDescription: '由主 Agent 分配一个或多个会话并汇总', discussTask: '讨论任务', discussStarted: '已开始讨论',
   discussHint: '可多选；主 Agent 为选中的 Harness 分工并汇总', discussExit: '退出讨论模式', discussNative: 'DSH 原生暂不支持只读讨论',
 };
@@ -102,6 +128,31 @@ const en: Record<keyof typeof zh,string> = {
   delegate:'Delegate', delegateMode:'Delegation mode', delegateDescription:'Create an independent session for this task', delegateTask:'Delegation mode: describe the task for the selected Harness to run in a new session; type / to run one of this session\'s skills (such as a hand-off) first', delegateCreated:'Delegation session created', delegatePrepared:'Running the skill in this session; the delegation starts when it finishes', commands:'Commands',
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
   worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex and Claude Code only',
+  pickModel:'{harness} model and effort', pickLast:'Last used',
+  settingsNav:'Harness', settingsIntro:'Defaults for Codex and Claude Code. Changes save to this profile\'s configuration at once; executables, the progress feedback contract, the discussion wait and debug output apply when a native process next starts.',
+  settingsReadOnly:'This connection cannot change configuration; the values below are read-only.', settingsUnavailable:'This profile does not serve the plugin\'s configuration.', settingsReset:'Reset',
+  settingsRejected:'Not saved: the value is invalid or out of range.', settingsAuto:'Find automatically',
+  'settingsGroup.programs':'Programs', 'settingsGroup.sessions':'Sessions', 'settingsGroup.delegation':'Delegation and discussion', 'settingsGroup.feedback':'Progress feedback', 'settingsGroup.advanced':'Advanced',
+  'setting.codexCommand':'Codex executable', 'setting.codexCommand.hint':'Command name or absolute path; also used for quota, plugin and turn-record reads.',
+  'setting.claudeCommand':'Claude Code executable', 'setting.claudeCommand.hint':'When empty: CODEXHOST_CLAUDE_COMMAND, then claude on PATH, then the usual install locations.',
+  'setting.idleCloseSeconds':'Idle close (seconds)', 'setting.idleCloseSeconds.hint':'An off-screen session idle this long closes its native process and resumes on the next turn; background tasks keep it open.',
+  'setting.delegateHarnesses':'Default delegation targets', 'setting.delegateHarnesses.hint':'Harnesses preselected when delegation mode opens.',
+  'setting.delegateReportBack':'Report back by default', 'setting.delegateReportBack.hint':'Preselects "Report back to this session when complete".',
+  'setting.delegateWorktree':'Isolated worktree by default', 'setting.delegateWorktree.hint':'Codex and Claude Code only; not preselected while the targets include native DSH.',
+  'setting.discussHarnesses':'Default discussion participants', 'setting.discussHarnesses.hint':'Harnesses preselected when discussion mode opens.',
+  'setting.progressFeedback':'Progress feedback contract', 'setting.progressFeedback.hint':'Asks Codex and Claude Code to report progress in Chinese while they work.',
+  'setting.progressFeedbackText':'Contract text', 'setting.progressFeedbackText.hint':'Given to newly started native sessions as system instructions, never as a user message.',
+  'setting.requestTimeoutSeconds':'ACP request timeout (seconds)', 'setting.requestTimeoutSeconds.hint':'Limit for one request such as a new session or a model switch; turns themselves are not limited.',
+  'setting.sessionLoadTimeoutSeconds':'Session load timeout (seconds)', 'setting.sessionLoadTimeoutSeconds.hint':'Limit for replaying history when resuming or branching a native session.',
+  'setting.discussionTimeoutMinutes':'Discussion wait (minutes)', 'setting.discussionTimeoutMinutes.hint':'How long the main agent waits for a discussion result.',
+  'setting.toolOutputChars':'Tool output limit (characters)', 'setting.toolOutputChars.hint':'Longer tool output is truncated in the transcript.',
+  'setting.peerReviewChars':'Peer review excerpt (characters)', 'setting.peerReviewChars.hint':'How much of each participant\'s result the others review.',
+  'setting.discussionResultChars':'Discussion result read (characters)', 'setting.discussionResultChars.hint':'How much of the end of each result the synthesis reads; at most 64,000.',
+  'setting.catalogCacheSeconds':'Model catalog cache (seconds)', 'setting.catalogCacheSeconds.hint':'Cache for model, effort and permission lists; 0 reads them every time.',
+  'setting.quotaCacheSeconds':'Quota cache (seconds)', 'setting.quotaCacheSeconds.hint':'Cache for native DSH account quota; at least 10 seconds.',
+  'setting.pluginCacheSeconds':'Plugin catalog cache (seconds)', 'setting.pluginCacheSeconds.hint':'Cache for the Harness plugins in the @ menu.',
+  'setting.recoveryCheckSeconds':'Recovery check interval (seconds)', 'setting.recoveryCheckSeconds.hint':'Minimum gap between automatic native-record checks of a paused session.',
+  'setting.acpStderr':'ACP debug output', 'setting.acpStderr.hint':'Sends the agent process stderr to the DSH log, for startup problems only; it may contain prompts or credentials.',
   discuss:'Discuss', discussDescription:'Let the main agent assign one or more sessions and synthesize', discussTask:'Discussion task', discussStarted:'Discussion started',
   discussHint:'Select one or more; the main agent assigns the selected Harnesses and synthesizes', discussExit:'Exit discussion mode', discussNative:'Native DSH does not support read-only discussions yet',
 };
@@ -264,29 +315,46 @@ function useModelProvider(modelProvider: Injected['modelProvider'], sessionId: s
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-type DelegationOptions = { harnesses: State['harness'][]; reportBack: boolean; worktree: boolean };
+type Target = Exclude<State['harness'], 'dsh'>;
+/** Model / thinking picked per delegated Harness; a missing field keeps that Harness's last pick. */
+type Picks = Partial<Record<Target, { model?: string; thinking?: string }>>;
+type DelegationOptions = { harnesses: State['harness'][]; reportBack: boolean; worktree: boolean; picks: Picks };
 const delegationOptions = new Map<string, DelegationOptions>();
-const optionsFor = (sessionId: string): DelegationOptions => delegationOptions.get(sessionId) ?? { harnesses: ['codex'], reportBack: false, worktree: false };
+/** The plugin's live configuration, once the Settings form has a value; delegation and discussion defaults come from it. */
+let settingsForm: ConfigForm<Settings> | undefined;
+const pluginSettings = () => settingsForm?.getSnapshot().value;
+const freshOptions = (): DelegationOptions => {
+  const settings = pluginSettings();
+  const harnesses: State['harness'][] = settings?.delegateHarnesses?.length ? [...settings.delegateHarnesses] : ['codex'];
+  return { harnesses, reportBack: settings?.delegateReportBack ?? false, worktree: !harnesses.includes('dsh') && (settings?.delegateWorktree ?? false), picks: {} };
+};
+const freshDiscussion = (): State['harness'][] => { const harnesses = pluginSettings()?.discussHarnesses; return harnesses?.length ? [...harnesses] : ['codex', 'claude-code']; };
+const optionsFor = (sessionId: string): DelegationOptions => delegationOptions.get(sessionId) ?? freshOptions();
+/** Catalog reader per session in delegation mode; the dock slot itself has no Remote. */
+const delegationCatalogs = new Map<string, (harness: Target) => Promise<Models>>();
 const discussionHarnesses = new Map<string, State['harness'][]>();
-const discussionFor = (sessionId: string): State['harness'][] => discussionHarnesses.get(sessionId) ?? ['codex', 'claude-code'];
+const discussionFor = (sessionId: string): State['harness'][] => discussionHarnesses.get(sessionId) ?? freshDiscussion();
 let delegationRequestSequence = 0;
 const delegationRequestId = () => globalThis.crypto?.randomUUID?.() ?? `delegate-${Date.now()}-${++delegationRequestSequence}`;
 const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
   const requestId = delegationRequestId();
-  delegationOptions.set(session.sessionId, { harnesses: ['codex'], reportBack: false, worktree: false });
+  delegationOptions.set(session.sessionId, freshOptions());
+  delegationCatalogs.set(session.sessionId, harness => value(remote.models({ sessionId: session.sessionId, harness })));
   return {
     name: 'delegate', token: '/delegate ', hint: t('delegateTask'), attachments: true,
     async submit(prompt, _actx, attachments) {
       const options = optionsFor(session.sessionId);
-      const result = await value(remote.delegateFromUser({ sessionId: session.sessionId, requestId, prompt, attachments, ...options }));
-      delegationOptions.delete(session.sessionId);
+      // Only the selected Harnesses' picks travel; a deselected one's pick stays for the dock but is not sent.
+      const picks = Object.fromEntries(Object.entries(options.picks).filter(([harness]) => options.harnesses.includes(harness as Target)));
+      const result = await value(remote.delegateFromUser({ sessionId: session.sessionId, requestId, prompt, attachments, ...options, picks }));
+      delegationOptions.delete(session.sessionId); delegationCatalogs.delete(session.sessionId);
       return { kind: 'success', text: t(result.sessionId ? 'delegateCreated' : 'delegatePrepared') };
     },
   };
 };
 const discussionClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
   const requestId = delegationRequestId();
-  discussionHarnesses.set(session.sessionId, ['codex', 'claude-code']);
+  discussionHarnesses.set(session.sessionId, freshDiscussion());
   return {
     name: 'discuss', token: '/discuss ', hint: t('discussTask'), attachments: true,
     async submit(prompt, _actx, attachments) {
@@ -317,6 +385,59 @@ function TaskHarnessSelector({ selected, onChange, discussion = false, disabled 
     </button>)}
   </div>;
 }
+/** "Harness · model · effort" chip for one delegation target, with the seat's two-level menu; nothing picked keeps the last pick. */
+function DelegatePick({ harness, pick, load, disabled, onChange, t }: { harness: Target; pick: NonNullable<Picks[Target]>; load?: (harness: Target) => Promise<Models>; disabled: boolean; onChange: (pick: NonNullable<Picks[Target]>) => void; t: T }) {
+  const [open, setOpen] = useState(false);
+  const [pane, setPane] = useState<'root' | 'model' | 'effort'>('root');
+  const [catalog, setCatalog] = useState<Models>();
+  const root = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => { setOpen(false); setPane('root'); }, []);
+  useDismiss(open, close, root);
+  // Read on first open, so entering delegation mode starts no CLI probe; a failed read is shown with a retry.
+  useEffect(() => {
+    if (!open || catalog || !load) return;
+    let live = true;
+    void load(harness).then(next => { if (live) setCatalog(next); }, error => { if (live) setCatalog({ models: [], defaultModel: null, thinkingOptions: [],
+      defaultThinkingOptionId: null, permissionModes: [], defaultPermissionModeId: null, configOptions: [], error: error instanceof Error ? error.message : String(error) }); });
+    return () => { live = false; };
+  }, [open, catalog, load, harness]);
+  const name = harness === 'codex' ? 'Codex' : 'Claude Code';
+  const model = catalog?.models.find(entry => entry.id === pick.model);
+  const modelLabel = pick.model ? model?.label ?? pick.model : t('pickLast');
+  const efforts = (catalog?.thinkingOptions ?? []).filter(option => !model?.thinkingOptionIds || model.thinkingOptionIds.includes(option.id));
+  const effortText = pick.thinking ? effortLabel(t, pick.thinking, catalog?.thinkingOptions.find(option => option.id === pick.thinking)?.label ?? pick.thinking) : undefined;
+  const choose = (next: NonNullable<Picks[Target]>) => { onChange(next); close(); };
+  return <div ref={root} className="hp-anchor">
+    <button type="button" className="hp-chip" aria-label={t('pickModel', { harness: name })} aria-haspopup="menu" aria-expanded={open}
+      title={`${name} · ${modelLabel}${effortText ? ` · ${effortText}` : ''}`} disabled={disabled} onClick={() => { if (open) close(); else setOpen(true); }}>
+      <span className="hp-chip-label">{name} · {modelLabel}</span>
+      {effortText && <span className="hp-chip-effort">· {effortText}</span>}
+      <Chevron open={open} />
+    </button>
+    {open && <div className="hp-menu hp-menu-left" role="menu" aria-label={t('pickModel', { harness: name })} aria-busy={!catalog}>
+      {pane === 'root' && <>
+        <Cell label={t('menuModel')} value={modelLabel} onClick={() => setPane('model')} />
+        {(!catalog || efforts.length > 0) && <Cell label={t('menuEffort')} value={effortText ?? t('pickLast')} onClick={() => setPane('effort')} />}
+      </>}
+      {pane !== 'root' && <>
+        <button type="button" role="menuitem" className="hp-cell" onClick={() => setPane('root')}><span className="hp-cell-back"><Back /></span><span className="hp-cell-label">{t(pane === 'model' ? 'menuModel' : 'menuEffort')}</span></button>
+        <div className="hp-separator" />
+        {!catalog && <div className="hp-empty">{t('loading')}</div>}
+        {catalog?.error && <div className="hp-error"><span>{catalog.error}</span><button type="button" className="hp-retry" onClick={() => setCatalog(undefined)}>{t('retry')}</button></div>}
+      </>}
+      {pane === 'model' && catalog && !catalog.error && <>
+        <Option label={t('pickLast')} selected={!pick.model} onClick={() => choose({ ...pick, model: undefined })} />
+        {catalog.models.map(entry => <Option key={entry.id} label={entry.label} hint={entry.resolved && entry.resolved !== entry.label ? entry.resolved : undefined} selected={entry.id === pick.model}
+          // A thinking level the newly picked model lacks is dropped rather than sent and rejected.
+          onClick={() => choose({ model: entry.id, thinking: pick.thinking && (!entry.thinkingOptionIds || entry.thinkingOptionIds.includes(pick.thinking)) ? pick.thinking : undefined })} />)}
+      </>}
+      {pane === 'effort' && catalog && !catalog.error && <>
+        <Option label={t('pickLast')} selected={!pick.thinking} onClick={() => choose({ ...pick, thinking: undefined })} />
+        {efforts.map(option => <Option key={option.id} label={effortLabel(t, option.id, option.label)} selected={option.id === pick.thinking} onClick={() => choose({ ...pick, thinking: option.id })} />)}
+      </>}
+    </div>}
+  </div>;
+}
 function DelegationDockActive({ sessionId, t }: DelegationDockProps) {
   const [options, setOptions] = useState(() => optionsFor(sessionId));
   const busy = taskModes.get(sessionId)?.busy === true;
@@ -324,6 +445,8 @@ function DelegationDockActive({ sessionId, t }: DelegationDockProps) {
   return <div className="hp-delegate" data-hp-mode="delegate" aria-label={t('delegateMode')}>
     <strong>{t('delegateMode')}</strong>
     <TaskHarnessSelector disabled={busy} selected={options.harnesses} onChange={harnesses => update({ ...options, harnesses, worktree: !harnesses.includes('dsh') && options.worktree })} t={t} />
+    {options.harnesses.filter((harness): harness is Target => harness !== 'dsh').map(harness => <DelegatePick key={harness} harness={harness} pick={options.picks[harness] ?? {}}
+      load={delegationCatalogs.get(sessionId)} disabled={busy} onChange={pick => update({ ...options, picks: { ...options.picks, [harness]: pick } })} t={t} />)}
     <label className="hp-delegate-report" title={options.harnesses.includes('dsh') ? t('worktreeNative') : t('worktreeHint')}>
       <input type="checkbox" checked={options.worktree} disabled={busy || options.harnesses.includes('dsh')} onChange={event => update({ ...options, worktree: event.target.checked })} />
       <span>{t('worktree')}</span>
@@ -333,7 +456,7 @@ function DelegationDockActive({ sessionId, t }: DelegationDockProps) {
       <span>{t('reportBack')}</span>
     </label>
     <button type="button" className="hp-delegate-exit" disabled={busy} aria-label={t('delegateExit')} title={t('delegateExit')}
-      onClick={() => { delegationOptions.delete(sessionId); setTaskMode(sessionId); }}>×</button>
+      onClick={() => { delegationOptions.delete(sessionId); delegationCatalogs.delete(sessionId); setTaskMode(sessionId); }}>×</button>
   </div>;
 }
 function DiscussionDockActive({ sessionId, t }: DelegationDockProps) {
@@ -733,6 +856,81 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
   </div>;
 }
 
+// ---- Settings page: the plugin's live configuration; DSH Settings validates each edit and persists it in the profile ----
+type SettingsSectionInjected = { hooks: { harnessSettings: ConfigForm<Settings> }; form: ConfigForm<Settings> };
+type SettingsSectionProps = PropsRuntime<'settings.section'> & PropsLocale<'harness'> & InjectFace<SettingsSectionInjected>;
+type SettingField = keyof Settings;
+
+/** Text kept locally while typing and committed on blur or Enter, so every keystroke is not a profile write. */
+function DraftInput({ value, label, numeric, multiline, placeholder, disabled, onCommit }: { value: string; label: string; numeric?: boolean; multiline?: boolean; placeholder?: string; disabled: boolean; onCommit: (text: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  const commit = () => { if (draft !== value) onCommit(draft); };
+  const common = { value: draft, disabled, placeholder, 'aria-label': label, onBlur: commit };
+  return multiline ? <textarea {...common} rows={12} onChange={event => setDraft(event.target.value)} />
+    : <input {...common} className={numeric ? 'hp-set-number' : undefined} inputMode={numeric ? 'numeric' : undefined} onChange={event => setDraft(event.target.value)}
+      onKeyDown={event => { if (event.key === 'Enter') commit(); else if (event.key === 'Escape') setDraft(value); }} />;
+}
+function Toggle({ checked, label, disabled, onChange }: { checked: boolean; label: string; disabled: boolean; onChange: (checked: boolean) => void }) {
+  return <button type="button" role="switch" aria-checked={checked} aria-label={label} className="hp-switch" disabled={disabled} onClick={() => onChange(!checked)}><span className="hp-switch-thumb" /></button>;
+}
+export function HarnessSettingsSection({ useHarnessSettings, form, t }: SettingsSectionProps) {
+  const snapshot = useHarnessSettings(value => value);
+  const [failed, setFailed] = useState<SettingField>();
+  const value = snapshot.value;
+  if (snapshot.status !== 'ready' || !value) return <div className="hp-set">
+    <h2 className="hp-set-page">{t('settingsNav')}</h2>
+    <p className="hp-set-intro">{snapshot.status === 'loading' ? t('loading') : t('settingsUnavailable')}</p>
+  </div>;
+  const disabled = !snapshot.writable;
+  // A field present in the profile's own layer is an override, even when it equals the default.
+  const user = typeof snapshot.user === 'object' && snapshot.user !== null ? snapshot.user as Record<string, unknown> : {};
+  const settle = (field: SettingField, work: Promise<boolean>) => { setFailed(undefined); void work.then(ok => { if (!ok) setFailed(field); }, () => setFailed(field)); };
+  const label = (field: SettingField) => t(`setting.${field}` as Key);
+  const row = (field: SettingField, control: ReactNode, wide = false) => <div key={field} className={`hp-set-row${wide ? ' hp-set-wide' : ''}`}>
+    <div className="hp-set-copy">
+      <div className="hp-set-title">{label(field)}
+        {field in user && <button type="button" className="hp-set-reset" disabled={disabled} onClick={() => settle(field, form.unset(field))}>{t('settingsReset')}</button>}
+      </div>
+      <div className="hp-set-hint">{t(`setting.${field}.hint` as Key)}</div>
+      {failed === field && <div role="alert" className="hp-set-error">{t('settingsRejected')}</div>}
+    </div>
+    <div className="hp-set-control">{control}</div>
+  </div>;
+  // Clearing a text field returns it to its default rather than storing an empty override.
+  const text = (field: 'codexCommand' | 'claudeCommand', placeholder?: string) => <DraftInput value={value[field] ?? ''} label={label(field)} placeholder={placeholder} disabled={disabled}
+    onCommit={draft => settle(field, draft.trim() ? form.set(field, draft.trim()) : form.unset(field))} />;
+  const number = (field: SettingField) => <DraftInput numeric value={String(value[field])} label={label(field)} disabled={disabled} onCommit={draft => {
+    const parsed = Number(draft.trim());
+    if (!draft.trim() || !Number.isInteger(parsed) || parsed < 0) setFailed(field); else settle(field, form.set(field, parsed));
+  }} />;
+  const toggle = (field: SettingField, off = false) => <Toggle checked={value[field] === true} label={label(field)} disabled={disabled || off} onChange={next => settle(field, form.set(field, next))} />;
+  const group = (title: Key, rows: ReactNode) => <section className="hp-set-group" aria-label={t(title)}><h3 className="hp-set-head">{t(title)}</h3>{rows}</section>;
+  return <div className="hp-set">
+    <h2 className="hp-set-page">{t('settingsNav')}</h2>
+    <p className="hp-set-intro">{t('settingsIntro')}</p>
+    {disabled && <p className="hp-set-intro" role="note">{t('settingsReadOnly')}</p>}
+    {group('settingsGroup.programs', <>{row('codexCommand', text('codexCommand'))}{row('claudeCommand', text('claudeCommand', t('settingsAuto')))}</>)}
+    {group('settingsGroup.sessions', row('idleCloseSeconds', number('idleCloseSeconds')))}
+    {group('settingsGroup.delegation', <>
+      {row('delegateHarnesses', <TaskHarnessSelector selected={value.delegateHarnesses ?? ['codex']} disabled={disabled} t={t} onChange={next => settle('delegateHarnesses', form.set('delegateHarnesses', next))} />)}
+      {row('delegateReportBack', toggle('delegateReportBack'))}
+      {row('delegateWorktree', toggle('delegateWorktree'))}
+      {row('discussHarnesses', <TaskHarnessSelector discussion selected={value.discussHarnesses ?? ['codex', 'claude-code']} disabled={disabled} t={t} onChange={next => settle('discussHarnesses', form.set('discussHarnesses', next))} />)}
+    </>)}
+    {group('settingsGroup.feedback', <>
+      {row('progressFeedback', toggle('progressFeedback'))}
+      {row('progressFeedbackText', <DraftInput multiline value={value.progressFeedbackText ?? ''} label={label('progressFeedbackText')} disabled={disabled || !value.progressFeedback}
+        onCommit={draft => settle('progressFeedbackText', form.set('progressFeedbackText', draft))} />, true)}
+    </>)}
+    {group('settingsGroup.advanced', <>
+      {(['requestTimeoutSeconds', 'sessionLoadTimeoutSeconds', 'discussionTimeoutMinutes', 'toolOutputChars', 'peerReviewChars', 'discussionResultChars',
+        'catalogCacheSeconds', 'quotaCacheSeconds', 'pluginCacheSeconds', 'recoveryCheckSeconds'] as const).map(field => row(field, number(field)))}
+      {row('acpStderr', toggle('acpStderr'))}
+    </>)}
+  </div>;
+}
+
 // ---- right sidebar guide card: host geometry, with the provider beside the title ----
 type GuideEntryProps = PropsRuntime<'sidebar.right.tab.guide.entry'> & PropsLocale<'harness'>;
 export function GuideEntry({ kind, title, description, useTabInfo, t }: GuideEntryProps) {
@@ -904,7 +1102,7 @@ ${nativeContextColors}
 .hp-edit-bar button:disabled{opacity:.5;cursor:default}
 .hp-edit-error{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
 [data-composer-seat] [role=status]:has(~ [data-composer-card]){box-sizing:border-box}
-.hp-delegate{display:flex;align-items:center;gap:10px;box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance));max-width:var(--dsh-composer-card-max-width);margin:0 auto;padding:7px 10px;border-bottom:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
+.hp-delegate{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance) - var(--dsh-composer-side-clearance));max-width:var(--dsh-composer-card-max-width);margin:0 auto;padding:7px 10px;border-bottom:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px}
 .hp-delegate>strong{color:var(--dsw-alias-label-primary);font-weight:600}
 .hp-delegate[data-hp-mode=delegate],[data-composer-seat]:has(.hp-delegate[data-hp-mode=delegate]){--hp-mode-color:var(--dsw-alias-state-warn-label)}
 .hp-delegate[data-hp-mode=discuss],[data-composer-seat]:has(.hp-delegate[data-hp-mode=discuss]){--hp-mode-color:var(--dsw-static-blue-450)}
@@ -922,6 +1120,33 @@ ${nativeContextColors}
 .hp-delegate[data-hp-mode=discuss] .hp-delegate-exit{margin-left:auto}
 .hp-delegate-exit{display:grid;place-items:center;width:28px;height:28px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:18px;cursor:pointer}.hp-delegate-exit:hover{background:var(--dsw-alias-interactive-bg-hover)}
 @media(max-width:600px){.hp-delegate{flex-wrap:wrap}.hp-delegate-report{margin-left:0}.hp-delegate-exit{margin-left:auto}}
+.hp-set{display:flex;flex-direction:column;gap:12px;max-width:720px;color:var(--dsw-alias-label-primary)}
+.hp-set-page{margin:0;font-size:18px;font-weight:600}
+.hp-set-intro{margin:0;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
+.hp-set-group{display:flex;flex-direction:column;margin-top:20px}
+.hp-set-head{margin:0 0 2px;font-size:12px;font-weight:600;letter-spacing:.06em;color:var(--dsw-alias-label-tertiary)}
+.hp-set-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.hp-set-row:last-child{border-bottom:none}
+.hp-set-wide{flex-direction:column;align-items:stretch;gap:10px}
+.hp-set-copy{display:grid;gap:4px;min-width:0}
+.hp-set-title{display:flex;align-items:center;gap:8px;font-size:14px;line-height:20px}
+.hp-set-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.hp-set-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
+.hp-set-reset{padding:0;border:none;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.hp-set-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
+.hp-set-control{display:flex;justify-content:flex-end;flex:0 0 auto;min-width:0}
+.hp-set-control input,.hp-set-control textarea{box-sizing:border-box;padding:6px 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px}
+.hp-set-control input{width:260px}.hp-set-control input.hp-set-number{width:120px;text-align:right;font-variant-numeric:tabular-nums}
+.hp-set-control textarea{width:100%;resize:vertical;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:12px;line-height:18px}
+.hp-set-control input:focus-visible,.hp-set-control textarea:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px}
+.hp-set-control :disabled{opacity:.5;cursor:not-allowed}
+.hp-switch{box-sizing:border-box;position:relative;flex:0 0 auto;width:36px;height:20px;padding:2px;border:0;border-radius:10px;background:var(--dsw-alias-border-l3);cursor:pointer}
+.hp-switch[aria-checked=true]{background:var(--dsw-alias-brand-primary)}.hp-switch:disabled{opacity:.5;cursor:default}
+.hp-switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.hp-switch-thumb{display:block;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-label-primary-foreground);transition:transform 120ms ease}
+.hp-switch[aria-checked=true] .hp-switch-thumb{transform:translateX(16px)}
+@media(max-width:600px){.hp-set-row{flex-direction:column;align-items:stretch;gap:10px}.hp-set-control{justify-content:flex-start}.hp-set-control input{width:100%}}
+@media(prefers-reduced-motion:reduce){.hp-switch-thumb{transition:none}}
 `;
 
 // ---- editable user messages: wraps the host's user bubble; registered only while the current session runs on a Harness ----
@@ -1267,6 +1492,16 @@ export async function apply(ctx: Context): Promise<void> {
         taskModes.clear(); publishTaskMode();
       };
     }, 'harness: task submission');
+  });
+  // The Settings nav row, after Agent presets; present only while the Host serves this plugin's configuration.
+  ctx.inject(['slots', 'configForms'], scope => {
+    const t = ctx.locale.bind('harness'), form = scope.configForms.get<Settings>(SETTINGS_ENTRY);
+    settingsForm = form;
+    scope.effect(() => () => { if (settingsForm === form) settingsForm = undefined; }, 'harness: settings form');
+    scope.effect(() => scope.configForms.whileServed([SETTINGS_ENTRY], () => scope.slots.inject('settings.section', () => scope.slots.register({
+      name: 'settings.section', id: 'harness', order: 25, label: () => t('settingsNav'), locale: 'harness',
+      inject: () => ({ hooks: { harnessSettings: form }, form }),
+    }, HarnessSettingsSection))), 'harness: settings page');
   });
   ctx.inject(['slots'], scope => {
     scope.effect(() => scope.slots.inject('conversation.input.dock', () => scope.slots.register({

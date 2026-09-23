@@ -363,3 +363,29 @@ test('a Harness process stays open while its session is on screen or runs backgr
   assert.deepEqual(logs.filter(entry=>entry.kind==='create'||entry.kind==='resume').map(entry=>entry.kind),['create','resume']);
  } finally {await ctx.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true});}
 });
+
+test('the idle window is read live: shortening it closes an idle process by the next sweep', {timeout:15000}, async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-idle-live-'));
+ const logs=[],native={turns:0};
+ const bindings=new Bindings(join(root,'bindings'));
+ const id=SessionId('idle-live-session');
+ const ctx=new Context();
+ for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+ await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+ const adapter=fakeAdapter(logs,native);
+ let idleMs=2000;
+ const runner=new DshRunner(ctx,bindings,{codex:adapter},undefined,undefined,()=>idleMs);
+ ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+ try {
+  await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
+  await ctx.plugin(Loop,{agents:[]});
+  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  agent.followup(createUserMessage({content:[{type:'text',text:'one'}],source:{kind:'user'}}));
+  await agent.whenIdle();
+  await new Promise(resolve=>setTimeout(resolve,700));
+  assert.equal(runner.live.has(id),true,'still inside the 2s window');
+  idleMs=120;
+  await new Promise(resolve=>setTimeout(resolve,1000));
+  assert.equal(runner.live.has(id),false,'the shortened window applies without a restart');
+ } finally {await ctx.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true});}
+});

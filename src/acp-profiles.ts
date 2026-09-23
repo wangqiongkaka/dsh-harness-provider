@@ -7,10 +7,10 @@ import { z } from 'zod';
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
 import pkg from '../package.json' with { type: 'json' };
 import type { HarnessAccountSnapshot, HarnessPlugin, HostTurnSnapshot } from './contracts.js';
-import { feedbackInstructions } from './feedback.js';
+import { defaultSettings, feedbackOf, type SettingsSource } from './settings.js';
 import { CodexRpc } from './codex-rpc.js';
 import { ClaudeInspector, ClaudeNotInstalledError, resolveClaudeExecutable, withNodeOnPath, withUserShellEnvironment } from './claude-sdk.js';
-import type { AcpProfile } from './acp-adapter.js';
+import type { AcpLimits, AcpProfile } from './acp-adapter.js';
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const bundled = (name: string) => fileURLToPath(new URL(`./${name}`, import.meta.url));
@@ -111,11 +111,19 @@ function withDeveloperInstructions(raw: string | undefined, instructions: string
   const own = typeof config.developer_instructions === 'string' && config.developer_instructions ? `${config.developer_instructions}\n\n` : '';
   return JSON.stringify({ ...config, developer_instructions: own + instructions });
 }
+/** The live settings both profiles share: timeouts, the tool output limit and stderr debugging. */
+const limitsOf = (settings: SettingsSource) => (): AcpLimits => {
+  const current = settings();
+  return { requestTimeoutMs: current.requestTimeoutSeconds * 1000, loadTimeoutMs: current.sessionLoadTimeoutSeconds * 1000,
+    toolOutputChars: current.toolOutputChars, stderr: current.acpStderr };
+};
 /**
  * Both agents would otherwise spend a model request on naming every new session; DSH keeps its own titles, so the
- * native thread is named after the first prompt line instead.
+ * native thread is named after the first prompt line instead. `command` pins the executable over the live setting.
  */
-export function codexProfile(options: { command: string; environment: NodeJS.ProcessEnv }): AcpProfile {
+export function codexProfile(options: { command?: string; environment: NodeJS.ProcessEnv; settings?: SettingsSource }): AcpProfile {
+  const settings = options.settings ?? defaultSettings;
+  const command = () => options.command ?? settings().codexCommand;
   return {
     harnessId: 'codex',
     showThoughts: false,
@@ -123,15 +131,16 @@ export function codexProfile(options: { command: string; environment: NodeJS.Pro
     // codex-acp reads no instructions from session/new, but merges CODEX_CONFIG into every thread/start and thread/resume; as
     // developer instructions the feedback contract and Host instructions stay out of the user's messages and survive compaction.
     spawn: (environment, instructions) => ({ command: process.execPath, args: [bundled('codex-acp.mjs')],
-      env: { ...environment, CODEX_PATH: options.command, CODEX_CONFIG: withDeveloperInstructions(environment.CODEX_CONFIG, feedbackInstructions + (instructions ?? '')) } }),
+      env: { ...environment, CODEX_PATH: command(), CODEX_CONFIG: withDeveloperInstructions(environment.CODEX_CONFIG, feedbackOf(settings()) + (instructions ?? '')) } }),
     legacyPermissionModes: { readOnly: 'read-only', workspaceWrite: 'agent', dangerFullAccess: 'agent-full-access' },
     skillName: (command: AvailableCommand) => command.name.startsWith('$') ? command.name.slice(1) : command.name,
     // Codex injects a skill only for its own `$skill` mention; the local `/name` spelling of other commands stays as is.
     skillInvocation: (command: AvailableCommand) => command.name.startsWith('$') ? command.name : `/${command.name}`,
     titleCommand: title => `/rename ${title}`,
-    inspectAccount: () => codexAccount(options.command, options.environment),
-    listPlugins: cwd => codexPlugins(options.command, options.environment, cwd),
-    turnOutcomes: threadId => codexTurnOutcomes(options.command, options.environment, threadId),
+    inspectAccount: () => codexAccount(command(), options.environment),
+    listPlugins: cwd => codexPlugins(command(), options.environment, cwd),
+    turnOutcomes: threadId => codexTurnOutcomes(command(), options.environment, threadId),
+    limits: limitsOf(settings),
   };
 }
 
@@ -168,10 +177,13 @@ export function claudeAccountSnapshot(usage: { rate_limits_available?: boolean; 
   };
 }
 
-export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command?: string }): AcpProfile {
+export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command?: string; settings?: SettingsSource }): AcpProfile {
   const environment = withUserShellEnvironment({ ...options.environment });
+  const settings = options.settings ?? defaultSettings;
+  // An empty setting means unset: the environment variable and the usual install locations still apply.
+  const command = () => options.command ?? (settings().claudeCommand || undefined);
   const executable = (env: NodeJS.ProcessEnv) => {
-    try { return resolveClaudeExecutable(env, options.command); }
+    try { return resolveClaudeExecutable(env, command()); }
     catch (cause) { throw cause instanceof ClaudeNotInstalledError ? { code: 'notInstalled', message: cause.message } : cause; }
   };
   return {
@@ -184,7 +196,7 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
     },
     // The same system-prompt append the SDK adapter used; ACP forwards it through the agent's own options channel. Host
     // instructions (delegation) ride along, so they stay out of the user's messages and survive context compaction.
-    sessionMeta: (_kind, instructions, discussion) => ({ systemPrompt: { append: feedbackInstructions + (instructions ?? '') },
+    sessionMeta: (_kind, instructions, discussion) => ({ systemPrompt: { append: feedbackOf(settings()) + (instructions ?? '') },
       ...(discussion ? { claudeCode: { options: {
         tools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'], allowDangerouslySkipPermissions: false,
         settingSources: [], settings: { disableAllHooks: true }, plugins: [],
@@ -194,11 +206,13 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
     legacyThinkingOptions: { auto: 'default', off: 'default' },
     titleCommand: title => `/rename ${title}`,
     inspectAccount: async () => {
-      const inspector = new ClaudeInspector({ environment, cwd: process.cwd(), closeTimeoutMs: 7_000, ...(options.command ? { command: options.command } : {}) });
+      const claudeCommand = command();
+      const inspector = new ClaudeInspector({ environment, cwd: process.cwd(), closeTimeoutMs: 7_000, ...(claudeCommand ? { command: claudeCommand } : {}) });
       try {
         const account = await inspector.account();
         return account && claudeAccountSnapshot(account.usage, account.email);
       } finally { await inspector.close().catch(() => {}); }
     },
+    limits: limitsOf(settings),
   };
 }

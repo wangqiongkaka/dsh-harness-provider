@@ -695,3 +695,27 @@ test('background tasks the agent announces keep the session busy until they end,
     await session.close();
   } finally { await adapter.close(); await f.close(); }
 });
+
+test('tool output is truncated at the profile\'s live limit, both in a live turn and in replayed history', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  let limit = 2;
+  const profile = { ...f.profile, sessionMeta: undefined, limits: () => ({ toolOutputChars: limit }) };
+  await writeFile(join(f.root, 'history.json'), JSON.stringify([{ input: 'done', userId: 'h1', replyId: 'r1', reply: 'all green', updates: [
+    { sessionUpdate: 'tool_call', toolCallId: 't1', title: 'npm test', name: 'Bash', kind: 'execute', status: 'completed', rawInput: { command: 'npm test' }, rawOutput: [{ type: 'text', text: 'ok 12' }] },
+  ] }]));
+  const adapter = new AcpAdapter({ profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-tool', input: [{ type: 'text', text: 'tool' }] }));
+    const command = events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item).find(item => item.type === 'commandExecution');
+    assert.deepEqual([command.output, command.outputTruncated], ['hi', true]);
+    await session.close();
+    limit = 3;
+    const resumed = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: { harnessId: 'codex', nativeSessionId: 'native-session', formatVersion: 1 } }));
+    try {
+      const replayed = value(await resumed.readSnapshot()).turns[0].items[0].item;
+      assert.deepEqual([replayed.output, replayed.outputTruncated], ['ok ', true]);
+    } finally { await resumed.close(); }
+  } finally { await adapter.close(); await f.close(); }
+});

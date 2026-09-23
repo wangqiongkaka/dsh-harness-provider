@@ -36,29 +36,30 @@ import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT
 import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
-import { address, contribution, selectRequest, modelRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest } from './remote.js';
+import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest } from './delegation.js';
 import { createWorktree, mergeWorktree, removeWorktree, worktreeChanged } from './worktree.js';
+import { Config, defaultSettings, settingsOf, type SettingsSource } from './settings.js';
 
 /** DSH commands a Harness session keeps: the row stays DSH's, the work runs on the Harness's own command or mode. */
 const HARNESS_COMMANDS = new Set(['goal', 'plan', 'compact', 'clear']);
 const CLEAR_COMMAND: CommandDescriptor = { name: 'clear', description: 'Clear the Harness context' };
 
 export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions', 'attachments', 'fileUploads'];
-export const configSchema = z.object({
-  root: z.string().optional(), codexCommand: z.string().min(1).default('codex'),
-}).strict();
+export { Config };
 declare module '@deepseek-ai/cordis' { interface Context { harness: HarnessService } }
 
-/** Standalone DSH entry: no replacement of the original client/plugin row. */
-export async function apply(ctx: Context, rawConfig: unknown = {}): Promise<void> {
-  const config = configSchema.parse(rawConfig);
+/** Standalone DSH entry: no replacement of the original client/plugin row. The Loader hands over `Config`-parsed options. */
+export async function apply(ctx: Context, config: ReturnType<typeof Config> = Config({})): Promise<void> {
+  const settings = settingsOf(config);
   const environment = { ...process.env };
   const adapters = {
-    codex: new AcpAdapter({ profile: codexProfile({ command: config.codexCommand, environment }), environment }),
-    'claude-code': new AcpAdapter({ profile: claudeProfile({ environment }), environment }),
+    codex: new AcpAdapter({ profile: codexProfile({ environment, settings }), environment }),
+    'claude-code': new AcpAdapter({ profile: claudeProfile({ environment, settings }), environment }),
   };
-  new HarnessService(ctx, resolve(config.root ?? resolve(process.env.DSH_HOME ?? resolve(homedir(), '.dsh'), 'harness-plugin')), adapters);
+  new HarnessService(ctx, resolve(config.root ?? resolve(process.env.DSH_HOME ?? resolve(homedir(), '.dsh'), 'harness-plugin')), adapters, settings);
+  // The plugin ships its own Settings page, so DSH need not build one from the schema; without Settings it runs unchanged.
+  ctx.inject(['settings'], scope => { scope.effect(() => scope.settings.configure({ auto: false }, ctx.fiber), 'harness: settings page policy'); });
 }
 
 type Ready = Extract<HarnessInspection, { status: 'ready' }>;
@@ -135,12 +136,13 @@ export class HarnessService extends TypertRemoteService {
   // ponytail: in memory; a restart while the source runs the skill drops the hand-off, and the user delegates again.
   private readonly handoffs = new Map<string, { request: z.infer<typeof delegateFromUserRequest>; skill: string; content: ContentBlock[] }>();
   private readonly worktrees: string;
-  constructor(ctx: Context, root: string, private readonly adapters: Record<Binding['harness'], HarnessAdapter>) {
+  constructor(ctx: Context, root: string, private readonly adapters: Record<Binding['harness'], HarnessAdapter>, private readonly settings: SettingsSource = defaultSettings) {
     super(ctx, 'harness');
     this.worktrees = resolve(root, 'worktrees');
     this.bindings = new Bindings(root);
-    this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : method === 'discuss' ? this.discuss(source, input) : this.readDelegation(source, input));
-    this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation);
+    this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : method === 'discuss' ? this.discuss(source, input)
+      : method === 'models' ? this.delegationModels(source) : this.readDelegation(source, input), () => settings().discussionTimeoutMinutes * 60_000);
+    this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation, undefined, () => settings().idleCloseSeconds * 1000);
     ctx.effect(() => ctx.typert.register({ package: contribution.package, face: 'host', schemas: [], invocations: contribution.descriptors, model: { services: [], events: [], objects: [] } }), 'harness: Remote contracts');
     ctx.effect(() => async () => {
       this.stopped = true;
@@ -179,12 +181,19 @@ export class HarnessService extends TypertRemoteService {
         execute: async (args, exec) => { if (!exec.agent) throw new Error('查询需要来源会话'); return JSON.stringify(await this.readDelegation(exec.agent.id, args)); },
       }));
       scope.tools.register(defineTool({
-        name: 'harness_discussion_dispatch', description: '仅当用户在当前轮明确使用 /discuss 开启讨论模式时调用一次。根据任务并发性选择 1–4 个 Codex 或 Claude Code 只读参与者并给出各自分工；DSH 原生暂不支持。1 个直接执行，多个会话会自动互评一轮。等待返回后由你综合最终答案。普通委派不得调用此入口。',
+        name: 'harness_discussion_dispatch', description: '仅当用户在当前轮明确使用 /discuss 开启讨论模式时调用一次。根据任务并发性选择 1–4 个 Codex 或 Claude Code 只读参与者并给出各自分工；DSH 原生暂不支持。1 个直接执行，多个会话会自动互评一轮。等待返回后由你综合最终答案。普通委派不得调用此入口。可按每项分工的复杂度填写 model 与 thinking（取值先用 harness_models 查询；简单分工选较轻的模型或较低强度，复杂分工选更强的模型或更高强度），省略时沿用该 Harness 上次的选择。',
         parameters: { assignments: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
           harness: { type: 'string', required: true, enum: ['dsh', 'codex', 'claude-code'] }, role: { type: 'string' }, task: { type: 'string', required: true },
+          model: { type: 'string' }, thinking: { type: 'string' },
         } } } },
         output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
         execute: async (args, exec) => { if (!exec.agent) throw new Error('讨论需要来源会话'); return JSON.stringify(await this.discuss(exec.agent.id, args)); },
+      }));
+      scope.tools.register(defineTool({
+        name: 'harness_models', description: '查询 Codex / Claude Code 在当前工作区可用的模型与推理强度，供 harness_discussion_dispatch 为参与者填写 model 与 thinking。',
+        parameters: {},
+        output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
+        execute: async (_args, exec) => { if (!exec.agent) throw new Error('查询需要来源会话'); return JSON.stringify(await this.delegationModels(exec.agent.id)); },
       }));
     });
     this.wrapCommands(ctx);
@@ -408,7 +417,7 @@ export class HarnessService extends TypertRemoteService {
   private autoCheck(sessionId: string): Promise<void> {
     const cached = this.checks.get(sessionId);
     if (cached && cached.until > Date.now()) return cached.work;
-    const entry = { until: Infinity, work: this.recover({ sessionId, action: 'check' }).then(() => {}, () => {}).finally(() => { entry.until = Date.now() + 30_000; }) };
+    const entry = { until: Infinity, work: this.recover({ sessionId, action: 'check' }).then(() => {}, () => {}).finally(() => { entry.until = Date.now() + this.settings().recoveryCheckSeconds * 1000; }) };
     this.checks.set(sessionId, entry);
     return entry.work;
   }
@@ -418,6 +427,7 @@ export class HarnessService extends TypertRemoteService {
     const request = delegationRequest.parse(raw);
     if ((await this.bindings.readDelegated(source))?.delegation.discussion) throw new Error('讨论会话不能创建子会话');
     if (admitted?.discussion && request.harness === 'dsh') throw new Error('DSH 原生暂不支持强制只读讨论');
+    if (request.harness === 'dsh' && (request.model || request.thinking)) throw new Error('DSH 原生委派使用宿主当前模型，不能单独指定模型或推理强度');
     const parent = await this.agent(source);
     const cwd = parent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
@@ -443,7 +453,7 @@ export class HarnessService extends TypertRemoteService {
           if (existing.harness !== 'dsh') throw new Error('上次提交结果未确认，请在目标会话检查，禁止自动重发');
         }
         if (!existing) {
-          let external: { inspection: Ready; permission?: string } | undefined;
+          let external: { inspection: Ready; permission?: string; starting?: Pick<Binding, 'model' | 'thinking'> } | undefined;
           let preset: string | undefined;
           const presets = this.ctx.get('permissionPresets');
           if (request.harness === 'dsh') {
@@ -467,7 +477,8 @@ export class HarnessService extends TypertRemoteService {
               : parentBinding?.harness === request.harness ? parentBinding.permission
               : parentBinding && parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? FULL_ACCESS[request.harness] : DELEGATED[request.harness];
             if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
-            external = { inspection, ...(permission ? { permission } : {}) };
+            const starting = await this.startingModel(request.harness, cwd, request);
+            external = { inspection, ...(permission ? { permission } : {}), ...(starting ? { starting } : {}) };
           }
           // Made before the session so a non-git directory leaves nothing behind; the DSH session stays in the source workspace.
           const worktree = admitted?.worktree ? await createWorktree(cwd, resolve(this.worktrees, sessionId)) : undefined;
@@ -480,6 +491,7 @@ export class HarnessService extends TypertRemoteService {
             if (preset) presets!.set(child.session, preset);
             if (request.harness === 'dsh') await this.bindings.writeDelegated({ version: 1, sessionId, harness: 'dsh', cwd, locked: false, delegation: { parentSessionId: source, requestHash, reportBack: request.reportBack } });
             else await this.bind(child, sessionId, request.harness, {
+              ...external?.starting,
               permission: external?.permission ? harnessPermissionModeIdSchema.parse(external.permission) : external?.inspection.permissionModes?.defaultModeId,
               delegation: { parentSessionId: source, requestHash, reportBack: request.reportBack,
                 ...(admitted?.discussion ? { discussion: true as const } : {}),
@@ -511,6 +523,13 @@ export class HarnessService extends TypertRemoteService {
 
   async delegateFromUser(raw: unknown) {
     const request = delegateFromUserRequest.parse(raw);
+    // Checked before a leading skill runs or any target exists, so a bad pick never leaves a partial multi-target delegation.
+    const picked = request.harnesses.flatMap(harness => harness !== 'dsh' && request.picks[harness] ? [[harness, request.picks[harness]] as const] : []);
+    if (picked.length) {
+      const cwd = (await this.agent(request.sessionId)).session.header.cwd;
+      if (!cwd) throw new Error('请先连接工作目录');
+      await Promise.all(picked.map(([harness, pick]) => this.startingModel(harness, cwd, pick)));
+    }
     const skill = await this.leadingSkill(request.sessionId, request.prompt);
     if (skill) return this.handOffAfterSkill(request, skill);
     const { content, binding } = await this.admitUserPrompt(request);
@@ -528,7 +547,7 @@ export class HarnessService extends TypertRemoteService {
       const requestId = request.harnesses.length === 1 ? request.requestId
         : `multi-${createHash('sha256').update(JSON.stringify([request.requestId, harness])).digest('hex')}`;
       const result = await this.delegate(request.sessionId, {
-        requestId, harness, reportBack: request.reportBack, prompt, ...(request.title ? { title: request.title } : {}),
+        requestId, harness, reportBack: request.reportBack, prompt, ...(request.title ? { title: request.title } : {}), ...(harness === 'dsh' ? {} : request.picks[harness]),
       }, { content, requestHash, worktree: request.worktree });
       sessions.push({ sessionId: result.sessionId, harness: result.harness });
     }
@@ -647,7 +666,16 @@ export class HarnessService extends TypertRemoteService {
       return authorization.work;
     }
     authorization.inputHash = inputHash;
-    return authorization.work = this.runDiscussion(source, authorization, request.assignments);
+    // Every pick is checked before any participant exists; a rejected pick frees the turn's authorization for corrected assignments.
+    // `work` is set synchronously so a concurrent retry joins it instead of starting a second discussion.
+    const work: Promise<DiscussionResult> = (async () => {
+      const cwd = (await this.agent(source)).session.header.cwd;
+      await Promise.all(request.assignments.map(assignment => assignment.harness !== 'dsh' && cwd ? this.startingModel(assignment.harness, cwd, assignment) : undefined));
+    })().then(() => this.runDiscussion(source, authorization, request.assignments), error => {
+      if (authorization.work === work) { delete authorization.work; delete authorization.inputHash; }
+      throw error;
+    });
+    return authorization.work = work;
   }
 
   private async runDiscussion(source: string, authorization: { requestId: string; content: ContentBlock[] }, assignments: z.infer<typeof discussionRequest>['assignments']): Promise<DiscussionResult> {
@@ -658,7 +686,8 @@ export class HarnessService extends TypertRemoteService {
       const role = assignment.role ? `角色：${assignment.role}\n` : '';
       const prompt = `${role}分工：${assignment.task}`;
       const requestHash = createHash('sha256').update(JSON.stringify([authorization.requestId, index, assignment])).digest('hex');
-      const created = await this.delegate(source, { requestId, harness: assignment.harness, prompt, title: `讨论 · ${assignment.role ?? assignment.task}`.slice(0, 80), reportBack: false }, {
+      const created = await this.delegate(source, { requestId, harness: assignment.harness, prompt, title: `讨论 · ${assignment.role ?? assignment.task}`.slice(0, 80), reportBack: false,
+        model: assignment.model, thinking: assignment.thinking }, {
         content: [...authorization.content, { type: 'text', text: `\n\n[讨论分工]\n${prompt}\n独立完成本轮分析；不要等待或联系其他参与者。` }], requestHash, discussion: true,
       });
       participants.push({ sessionId: created.sessionId, harness: created.harness, ...(assignment.role ? { role: assignment.role } : {}), task: assignment.task });
@@ -668,7 +697,7 @@ export class HarnessService extends TypertRemoteService {
     if (participants.length > 1) {
       await Promise.all(participants.map(async (participant, index) => {
         if (first[index]?.status !== 'completed') return;
-        const peers = first.filter((_, peer) => peer !== index).map((entry, peer) => `参与者 ${peer + 1}${entry.role ? `（${entry.role}）` : ''}：\n${entry.text.slice(0, 12_000)}`).join('\n\n');
+        const peers = first.filter((_, peer) => peer !== index).map((entry, peer) => `参与者 ${peer + 1}${entry.role ? `（${entry.role}）` : ''}：\n${entry.text.slice(0, this.settings().peerReviewChars)}`).join('\n\n');
         await this.ctx.sessionController.prompt({ sessionId: participant.sessionId, requestId: brandString<SessionRequestId>(`${authorization.requestId}:review:${index}`), mode: 'queue',
           content: [{ type: 'text', text: `[讨论互评 · 第 2/2 轮]\n请审阅其他参与者的结果，指出冲突、遗漏或可合并之处，并给出修正后的结论。不要创建新会话。\n\n${peers}` }] }, new AbortController().signal);
       }));
@@ -683,7 +712,8 @@ export class HarnessService extends TypertRemoteService {
 
   private async readDiscussionResult(source: string, sessionId: string) {
     const summary = await this.readDelegation(source, { sessionId, limit: 1 });
-    const result = await this.readDelegation(source, { sessionId, offset: Math.max(0, summary.totalChars - 16_000), limit: 16_000, throughSeq: summary.throughSeq });
+    const chars = this.settings().discussionResultChars;
+    const result = await this.readDelegation(source, { sessionId, offset: Math.max(0, summary.totalChars - chars), limit: chars, throughSeq: summary.throughSeq });
     return result.status === 'completed' ? result : { ...result, text: `${result.text}\n\n[讨论参与者未完成：${result.status}]\n${JSON.stringify(result.outcome)}` };
   }
 
@@ -800,7 +830,7 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /** Bind a fresh session to a Harness, seeding permission from the native sandbox and model / thinking from the last pick. */
-  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation' | 'cwd'>> = {}): Promise<Binding> {
+  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation' | 'cwd' | 'model' | 'thinking'>> = {}): Promise<Binding> {
     const cwd = agent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
     const binding: Binding = { version: 1, sessionId, harness, cwd, locked: false };
@@ -824,10 +854,12 @@ export class HarnessService extends TypertRemoteService {
   }
 
   async models(raw: unknown) {
-    const { sessionId } = address.parse(raw);
-    await this.agent(sessionId);
-    const binding = await this.bindings.read(sessionId);
+    const { sessionId, harness } = modelsRequest.parse(raw);
+    const cwd = (await this.agent(sessionId)).session.header.cwd;
     const empty = { models: [], defaultModel: null, thinkingOptions: [], defaultThinkingOptionId: null, permissionModes: [], defaultPermissionModeId: null, configOptions: [] };
+    if (harness && !cwd) return { ...empty, error: '请先连接工作目录' };
+    // A delegation target reads its catalog without binding this session to it.
+    const binding: Binding | undefined = harness ? { version: 1, sessionId, harness, cwd: cwd!, locked: false } : await this.bindings.read(sessionId);
     if (!binding) return { ...empty, error: null };
     const inspection = await this.inspection(binding);
     if ('error' in inspection) return { ...empty, error: inspection.error };
@@ -852,7 +884,7 @@ export class HarnessService extends TypertRemoteService {
     const cached = this.catalogs.get(key);
     if (cached && cached.until > Date.now()) return cached.work;
     const entry = { until: Infinity, work: this.adapters[binding.harness].inspect({ cwd: binding.cwd }).then(result => {
-      entry.until = Date.now() + (result.status === 'ready' ? 60_000 : 10_000);
+      entry.until = Date.now() + (result.status === 'ready' ? this.settings().catalogCacheSeconds * 1000 : 10_000);
       return result.status === 'ready' ? result : { error: result.error.message };
     }, error => { if (this.catalogs.get(key) === entry) this.catalogs.delete(key); throw error; }) };
     this.catalogs.set(key, entry);
@@ -861,6 +893,44 @@ export class HarnessService extends TypertRemoteService {
   private async catalog(binding: Binding) {
     const inspection = await this.inspection(binding);
     return 'error' in inspection ? inspection : inspection.catalog;
+  }
+
+  /**
+   * The model / thinking a delegated session starts with when the delegation picks one: checked against the catalog before
+   * anything is created, filled from the Harness's last pick where omitted, and never written back as that last pick.
+   */
+  private async startingModel(harness: Binding['harness'], cwd: string, pick: z.infer<typeof modelPick>): Promise<Pick<Binding, 'model' | 'thinking'> | undefined> {
+    if (!pick.model && !pick.thinking) return undefined;
+    const name = harness === 'codex' ? 'Codex' : 'Claude Code';
+    const catalog = await this.catalog({ version: 1, sessionId: '', harness, cwd, locked: false });
+    if ('error' in catalog) throw new Error(catalog.error);
+    if (pick.model && !catalog.models.some(model => model.ref.id === pick.model)) {
+      throw new Error(`${name} 没有模型 ${pick.model}；可用模型：${catalog.models.map(model => model.ref.id).join('、') || '无'}`);
+    }
+    const remembered = (await this.bindings.readDefaults())[harness];
+    const modelId = pick.model ?? (remembered?.model && catalog.models.some(model => model.ref.id === remembered.model!.id) ? remembered.model.id : undefined);
+    const entry = catalog.models.find(model => model.ref.id === (modelId ?? catalog.defaultModel?.id));
+    const allowed: string[] = catalog.thinkingOptions.map(option => option.id).filter(id => !entry?.supportedThinkingOptionIds || entry.supportedThinkingOptionIds.includes(id));
+    if (pick.thinking && !allowed.includes(pick.thinking)) {
+      throw new Error(`${name} 的模型 ${entry?.ref.id ?? '默认模型'} 不支持推理强度 ${pick.thinking}；可用推理强度：${allowed.join('、') || '无'}`);
+    }
+    const thinking = pick.thinking ?? (remembered?.thinking && allowed.includes(remembered.thinking) ? remembered.thinking : undefined);
+    // Both keys are set so a last-picked thinking level the picked model lacks cannot come back through `bind`.
+    return { model: modelId ? harnessModelRefSchema.parse({ id: modelId }) : undefined, thinking: thinking ? harnessThinkingOptionIdSchema.parse(thinking) : undefined };
+  }
+
+  /** What a discussion can pick per participant: each external Harness's models and thinking levels in the source workspace. */
+  async delegationModels(source: string) {
+    const cwd = (await this.agent(source)).session.header.cwd;
+    if (!cwd) throw new Error('请先连接工作目录');
+    return Object.fromEntries(await Promise.all((['codex', 'claude-code'] as const).map(async harness => {
+      const catalog = await this.catalog({ version: 1, sessionId: source, harness, cwd, locked: false })
+        .catch(error => ({ error: error instanceof Error ? error.message : String(error) }));
+      if ('error' in catalog) return [harness, { error: catalog.error }];
+      const levels = catalog.thinkingOptions.map(option => option.id);
+      return [harness, { models: catalog.models.map(model => ({ id: model.ref.id, label: model.label,
+        thinking: model.supportedThinkingOptionIds ? levels.filter(id => model.supportedThinkingOptionIds!.includes(id)) : levels })) }];
+    })));
   }
 
   async selectModel(raw: unknown) {
@@ -1037,7 +1107,7 @@ export class HarnessService extends TypertRemoteService {
     const plugins = adapter.listPlugins({ cwd: binding.cwd });
     const entry = { until: Infinity, plugins };
     this.pluginCatalogs.set(key, entry);
-    plugins.then(() => { entry.until = Date.now() + 30_000; }, () => { if (this.pluginCatalogs.get(key) === entry) this.pluginCatalogs.delete(key); });
+    plugins.then(() => { entry.until = Date.now() + this.settings().pluginCacheSeconds * 1000; }, () => { if (this.pluginCatalogs.get(key) === entry) this.pluginCatalogs.delete(key); });
     return plugins;
   }
 
@@ -1109,7 +1179,7 @@ export class HarnessService extends TypertRemoteService {
     const cached = this.quotas.get(key);
     if (cached && cached.until > Date.now()) return cached.work;
     const work = probe().catch(error => { this.quotas.delete(key); throw error; });
-    this.quotas.set(key, { until: Date.now() + 60_000, work });
+    this.quotas.set(key, { until: Date.now() + this.settings().quotaCacheSeconds * 1000, work });
     return work;
   }
 

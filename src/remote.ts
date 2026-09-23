@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import type { InvocationDescriptor } from '@deepseek-ai/dsh-typert-protocol';
 
+/** The profile entry id `cordis.patch.yml` installs this plugin under; DSH Settings addresses its form by it. */
+export const SETTINGS_ENTRY = 'harness-plugin';
 export const selection = z.enum(['dsh', 'codex', 'claude-code']);
 export const address = z.object({ sessionId: z.string().min(1) }).strict();
 export const stateSchema = z.object({
@@ -12,6 +14,8 @@ export const stateSchema = z.object({
 });
 export const selectRequest = address.extend({ harness: selection });
 export const modelRequest = address.extend({ model: z.string().min(1) });
+/** Without `harness`, the session's own Harness; with it, that Harness in the session's workspace (delegation picks). */
+export const modelsRequest = address.extend({ harness: z.enum(['codex', 'claude-code']).optional() });
 export const thinkingRequest = address.extend({ thinking: z.string().min(1) });
 export const permissionRequest = address.extend({ permission: z.string().min(1) });
 export const configRequest = address.extend({ configId: z.string().min(1), value: z.union([z.string(), z.boolean()]) });
@@ -47,11 +51,14 @@ const delegationAttachmentSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('image'), mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif']), data: z.string().min(1), name: z.string().min(1).max(255).optional() }).strict(),
   z.object({ type: z.literal('file'), receiptId: z.string().min(1) }).strict(),
 ]);
+/** A model / thinking picked for one delegated session; omitted fields keep the Harness's last pick. */
+export const modelPick = z.object({ model: z.string().min(1).max(200).optional(), thinking: z.string().min(1).max(100).optional() }).strict();
 export const delegateFromUserRequest = address.extend({
   requestId: z.string().min(1).max(128), harness: selection.optional(),
   harnesses: z.array(selection).min(1, '至少选择一个 Harness').max(3).refine(values => new Set(values).size === values.length, '不能重复选择 Harness').optional(),
   prompt: z.string().max(64_000), title: z.string().trim().min(1).max(80).optional(),
   reportBack: z.boolean().default(false), worktree: z.boolean().default(false), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
+  picks: z.partialRecord(z.enum(['codex', 'claude-code']), modelPick).default({}),
 }).refine(request => request.harnesses || request.harness, { message: '至少选择一个 Harness' })
   .refine(request => !request.harnesses || !request.harness, { message: '不能同时指定 harness 和 harnesses' })
   .transform(({ harness, harnesses, ...request }) => ({ ...request, harnesses: harnesses ?? [harness!] }))
@@ -89,7 +96,7 @@ export const descriptors: InvocationDescriptor[] = [
   ['recover', recoveryRequest, recoverySchema], ['rollback', address, stateSchema], ['edit', editRequest, stateSchema],
   ['secretStatus', address, secretStatusSchema], ['answerSecret', secretAnswerRequest, z.object({ accepted: z.boolean() })],
   ['state', address, stateSchema], ['select', selectRequest, stateSchema],
-  ['models', address, modelsSchema], ['selectModel', modelRequest, stateSchema],
+  ['models', modelsRequest, modelsSchema], ['selectModel', modelRequest, stateSchema],
   ['selectThinking', thinkingRequest, stateSchema], ['selectPermission', permissionRequest, stateSchema], ['selectConfig', configRequest, stateSchema],
   ['usage', address, usageSchema], ['harnesses', harnessesRequest, harnessesSchema], ['quota', address, quotaSchema],
   ['delegateFromUser', delegateFromUserRequest, delegationAcceptedSchema],

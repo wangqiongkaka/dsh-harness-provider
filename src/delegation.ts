@@ -2,16 +2,17 @@ import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
+import { modelPick } from './remote.js';
 
 export const delegationRequest = z.object({
   requestId: z.string().min(1).max(128), harness: z.enum(['dsh', 'codex', 'claude-code']),
   prompt: z.string().trim().min(1).max(64_000), title: z.string().trim().min(1).max(80).optional(), reportBack: z.boolean().default(false),
-}).strict();
+}).extend(modelPick.shape).strict();
 
 export const delegationReadRequest = z.object({ sessionId: z.string().min(1), offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(64_000).default(32_000), throughSeq: z.number().int().nonnegative().optional() }).strict();
 export const discussionRequest = z.object({ assignments: z.array(z.object({
   harness: z.enum(['dsh', 'codex', 'claude-code']), role: z.string().trim().min(1).max(80).optional(), task: z.string().trim().min(1).max(64_000),
-}).strict()).min(1, '至少分配给 1 个参与者').max(4, '讨论最多支持 4 个参与者') }).strict();
+}).extend(modelPick.shape).strict()).min(1, '至少分配给 1 个参与者').max(4, '讨论最多支持 4 个参与者') }).strict();
 
 /** Loopback-only, per-source credentials; no Host Runtime or global CLI configuration. */
 export class DelegationBridge {
@@ -20,7 +21,8 @@ export class DelegationBridge {
   private closed = false;
   private readonly pending = new Set<Promise<unknown>>();
   private readonly tokens = new Map<string, { source: string; create: boolean }>();
-  constructor(private readonly call: (source: string, method: 'create' | 'read' | 'discuss', input: unknown) => Promise<unknown>) {}
+  constructor(private readonly call: (source: string, method: 'create' | 'read' | 'discuss' | 'models', input: unknown) => Promise<unknown>,
+    private readonly discussTimeoutMs: () => number = () => 1_800_000) {}
 
   async environment(source: string, create = false): Promise<Record<string, string>> {
     if (this.closed) throw new Error('DSH delegation is closed');
@@ -28,7 +30,8 @@ export class DelegationBridge {
     if (this.closed) throw new Error('DSH delegation is closed');
     const token = randomBytes(32).toString('hex');
     this.tokens.set(token, { source, create });
-    return { DSH_DELEGATE_ENDPOINT: endpoint, DSH_DELEGATE_TOKEN: token };
+    // The CLI runs in the agent's shell; it waits this long for a discussion, as set when the session's process started.
+    return { DSH_DELEGATE_ENDPOINT: endpoint, DSH_DELEGATE_TOKEN: token, DSH_DELEGATE_DISCUSS_TIMEOUT_MS: String(this.discussTimeoutMs()) };
   }
 
   private listen(): Promise<string> {
@@ -37,7 +40,7 @@ export class DelegationBridge {
       const credential = typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')
         ? this.tokens.get(req.headers.authorization.slice(7)) : undefined;
       if (!credential || req.headers.origin) { res.writeHead(403).end(JSON.stringify({ error: 'Forbidden' })); return; }
-      if (req.method !== 'POST' || !['/create', '/read', '/discuss'].includes(req.url ?? '')) {
+      if (req.method !== 'POST' || !['/create', '/read', '/discuss', '/models'].includes(req.url ?? '')) {
         res.writeHead(404).end(JSON.stringify({ error: 'Unknown delegation operation' })); return;
       }
       if (req.url === '/create' && !credential.create) { res.writeHead(403).end(JSON.stringify({ error: 'Forbidden' })); return; }
@@ -52,7 +55,7 @@ export class DelegationBridge {
         }
         if (oversized) { res.setHeader('Connection', 'close'); res.writeHead(413).end(JSON.stringify({ error: 'Request too large' })); return; }
         if (this.closed) throw new Error('DSH delegation is closed');
-        const work = this.call(credential.source, req.url === '/create' ? 'create' : req.url === '/discuss' ? 'discuss' : 'read', JSON.parse(Buffer.concat(chunks).toString('utf8')));
+        const work = this.call(credential.source, req.url!.slice(1) as 'create' | 'read' | 'discuss' | 'models', JSON.parse(Buffer.concat(chunks).toString('utf8')));
         this.pending.add(work);
         try { res.end(JSON.stringify(await work)); } finally { this.pending.delete(work); }
       } catch (error) {
@@ -91,6 +94,7 @@ export function delegationInstructions(): string {
   return `\n\n[DSH 会话能力，由宿主提供]
 只有用户可以通过界面中的委派指令创建独立会话；不要自行创建或建议调用创建入口。
 仅当用户在当前轮明确使用 /discuss 开启讨论模式时，调用 ${command} discuss '{"assignments":[{"harness":"codex","role":"角色","task":"分工"}]}'。根据任务并发性自行选择 1–4 个 Codex 或 Claude Code 参与者（harness 为 codex 或 claude-code，DSH 原生暂不支持只读讨论）；一个参与者直接执行，多个参与者会自动互评一轮。参与者只读，不能修改代码。每轮只调用一次，等待返回后综合结论。
+可按每项分工的复杂度为参与者加上 model 与 thinking：先运行 ${command} models 查询各 Harness 可用的模型与推理强度，简单分工选较轻的模型或较低强度，复杂分工选更强的模型或更高强度；省略时沿用该 Harness 上次的选择。
 仅在收到委派完成通知后，使用 ${command} read '<sessionId>' 读取状态与回复；不要执行 sleep 或定时 read 轮询。结果按字符分页；nextOffset 非空时，用 read '{"sessionId":"目标 ID","offset":下一偏移,"throughSeq":首次返回的 throughSeq}' 继续读取，直到 nextOffset 为 null 才算读完。
 状态为 not-started 或 interrupted 时，提醒用户进入目标会话检查和处理，不要自动重发。
 此入口只允许读取由当前会话明确要求回传的结果。环境凭据已注入，不要打印或写入消息。
