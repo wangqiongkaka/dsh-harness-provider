@@ -110,7 +110,9 @@ const SHELL_MARKER = Buffer.from('\0DSH_HARNESS_SHELL_ENV_V1\0');
 const shellCache = new Map<string, Readonly<Record<string, string>>>();
 /**
  * GUI-launched hosts do not load the user's shell init files; capture them once so Claude Code sees the same
- * environment as in a terminal. Existing variables win; the snapshot is never persisted or logged.
+ * environment as in a terminal. Existing variables win, except that PATH keeps its own entries first and gains the shell's
+ * others: launchd's bare PATH would otherwise hide every directory a version manager adds (nvm, pnpm, …). The snapshot is
+ * never persisted or logged.
  */
 export function withUserShellEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (process.platform === 'win32' || !environment.HOME) return environment;
@@ -139,6 +141,7 @@ export function withUserShellEnvironment(environment: NodeJS.ProcessEnv): NodeJS
   }
   const merged = { ...environment };
   for (const [name, value] of Object.entries(loaded)) merged[name] ??= value;
+  if (environment.PATH && loaded.PATH) merged.PATH = [...new Set([...environment.PATH.split(path.delimiter), ...loaded.PATH.split(path.delimiter)].filter(Boolean))].join(path.delimiter);
   return merged;
 }
 

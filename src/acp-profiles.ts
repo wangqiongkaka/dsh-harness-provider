@@ -122,6 +122,8 @@ const limitsOf = (settings: SettingsSource) => (): AcpLimits => {
  * native thread is named after the first prompt line instead. `command` pins the executable over the live setting.
  */
 export function codexProfile(options: { command?: string; environment: NodeJS.ProcessEnv; settings?: SettingsSource }): AcpProfile {
+  // A `#!/usr/bin/env node` codex (an nvm or npm install) needs the user shell's PATH, which a GUI-launched host lacks.
+  const environment = withUserShellEnvironment({ ...options.environment });
   const settings = options.settings ?? defaultSettings;
   const command = () => options.command ?? settings().codexCommand;
   return {
@@ -130,16 +132,20 @@ export function codexProfile(options: { command?: string; environment: NodeJS.Pr
     nativeSubagents: true,
     // codex-acp reads no instructions from session/new, but merges CODEX_CONFIG into every thread/start and thread/resume; as
     // developer instructions the feedback contract and Host instructions stay out of the user's messages and survive compaction.
-    spawn: (environment, instructions) => ({ command: process.execPath, args: [bundled('codex-acp.mjs')],
-      env: { ...environment, CODEX_PATH: command(), CODEX_CONFIG: withDeveloperInstructions(environment.CODEX_CONFIG, feedbackOf(settings()) + (instructions ?? '')) } }),
+    // codex-acp starts CODEX_PATH with its own environment.
+    spawn: (raw, instructions) => {
+      const env = withUserShellEnvironment({ ...raw });
+      return { command: process.execPath, args: [bundled('codex-acp.mjs')],
+        env: { ...env, CODEX_PATH: command(), CODEX_CONFIG: withDeveloperInstructions(env.CODEX_CONFIG, feedbackOf(settings()) + (instructions ?? '')) } };
+    },
     legacyPermissionModes: { readOnly: 'read-only', workspaceWrite: 'agent', dangerFullAccess: 'agent-full-access' },
     skillName: (command: AvailableCommand) => command.name.startsWith('$') ? command.name.slice(1) : command.name,
     // Codex injects a skill only for its own `$skill` mention; the local `/name` spelling of other commands stays as is.
     skillInvocation: (command: AvailableCommand) => command.name.startsWith('$') ? command.name : `/${command.name}`,
     titleCommand: title => `/rename ${title}`,
-    inspectAccount: () => codexAccount(command(), options.environment),
-    listPlugins: cwd => codexPlugins(command(), options.environment, cwd),
-    turnOutcomes: threadId => codexTurnOutcomes(command(), options.environment, threadId),
+    inspectAccount: () => codexAccount(command(), environment),
+    listPlugins: cwd => codexPlugins(command(), environment, cwd),
+    turnOutcomes: threadId => codexTurnOutcomes(command(), environment, threadId),
     limits: limitsOf(settings),
   };
 }

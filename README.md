@@ -159,7 +159,7 @@ dsh --profile web
     codexCommand: /absolute/path/codex
 ```
 
-从图形界面启动 DSH 时，插件会读取登录 shell 的环境。
+从图形界面启动 DSH 时，插件会读取登录 shell 的环境；PATH 保留 DSH 自身的条目，并追加 shell 中的其他目录（如 nvm、pnpm），因此 `codexCommand` 可以指向 nvm 安装的 `#!/usr/bin/env node` 脚本。
 
 ## 工作原理
 
