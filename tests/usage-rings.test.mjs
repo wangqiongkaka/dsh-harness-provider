@@ -72,6 +72,20 @@ test('delegation and discussion modes share composer styling with distinct color
  } finally {await browser.close();}
 });
 
+test('settings harness choices match row typography without changing composer choices', async () => {
+ const source=await readFile('src/client.tsx','utf8');
+ const bundle=await build({stdin:{contents:source+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require:createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'))});
+ const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage();
+  await page.setContent(`<style>body{font-size:16px}${module.exports.styles}</style><div class="hp-set"><div class="hp-set-row"><div class="hp-set-title">委派默认目标</div><div class="hp-set-control"><div class="hp-delegate-harness"><button>Codex</button></div></div></div></div><div class="hp-delegate"><div class="hp-delegate-harness"><button>Codex</button></div></div>`);
+  const sizes=await page.locator('.hp-set-title,.hp-set-control .hp-delegate-harness button,.hp-delegate .hp-delegate-harness button').evaluateAll(nodes=>nodes.map(node=>getComputedStyle(node).fontSize));
+  assert.deepEqual(sizes,['14px','14px','12px']);
+ } finally {await browser.close();}
+});
+
 test('输入提示条与输入框在宽屏和窄屏下左右对齐', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
