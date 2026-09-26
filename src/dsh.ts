@@ -1060,7 +1060,7 @@ export class HarnessService extends TypertRemoteService {
         const live = this.runner.live.get(sessionId);
         if (live) { await live.session.close(); this.runner.live.delete(sessionId); }
         this.runner.retainedSubagents.delete(sessionId);
-        delete binding.nativeRef; delete binding.usage; delete binding.turns; delete binding.pendingNative;
+        delete binding.nativeRef; delete binding.usage; delete binding.turns; delete binding.pendingNative; delete binding.carry;
         await this.bindings.write(binding);
       });
       return;

@@ -107,7 +107,7 @@ test('Harness sessions keep /goal /plan /compact, add /clear, hide the other DSH
 
   // /clear drops the native identity and context-only state; the next prompt creates a fresh native session.
   const binding=await ctx.harness.bindings.read('claude');
-  Object.assign(binding,{nativeRef:{harnessId:'claude-code',nativeSessionId:'old',formatVersion:1},usage:{contextUsedTokens:12,totalTokens:20},turns:[{turn:1,key:'native-1'}]});
+  Object.assign(binding,{nativeRef:{harnessId:'claude-code',nativeSessionId:'old',formatVersion:1},usage:{contextUsedTokens:12,totalTokens:20},turns:[{turn:1,key:'native-1'}],carry:{throughSeq:1}});
   await ctx.harness.bindings.write(binding);
   await assert.rejects(ctx.commands.execute(agents.claude,'/clear now',[],signal),/不接受参数或附件/);
   await assert.rejects(ctx.commands.execute(agents.claude,'/clear',[{type:'image',mediaType:'image/png',data:png}],signal),/不接受参数或附件/);
