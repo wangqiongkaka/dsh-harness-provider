@@ -49,7 +49,7 @@ test('session CLI creates a visible independent harness session, reads its resul
  }
  const adapter = harness => ({
   async inspect() { return unavailable ? {status:'unavailable',error:{message:'fixture unavailable'}} : {status:'ready',catalog:{models:[],thinkingOptions:[]},
-   permissionModes:{modes:[{id:'read-only',label:'Read only'},{id:'plan',label:'Plan'},{id:'agent',label:'Agent'},{id:'default',label:'Default'},{id:'acceptEdits',label:'Accept edits'}],defaultModeId:'read-only'}}; },
+   permissionModes:{modes:[{id:'read-only',label:'Read only'},{id:'plan',label:'Plan'},{id:'agent',label:'Agent'},{id:'default',label:'Default'},{id:'acceptEdits',label:'Accept edits'},{id:'auto',label:'Auto'}],defaultModeId:'read-only'}}; },
   async open(input) {
    opens.push({harness,input});
    if (harness === 'codex' && !input.discussion) assert.ok(input.environment?.DSH_DELEGATE_TOKEN);
@@ -287,6 +287,7 @@ test('session CLI creates a visible independent harness session, reads its resul
    const agent=ctx.agents.get(session.sessionId);await agent.whenIdle();
    assert.equal(agent.session.snapshotEvents().find(event=>event.type==='user/message').data.content[0].text,'Same task for both');
   }
+  assert.equal((await h.bindings.read(multi.sessions.find(session=>session.harness==='claude-code').sessionId)).permission,'auto');
   const beforeMultiRetry=created.length;
   assert.deepEqual((await h.delegateFromUser(multiRequest)).sessions,multi.sessions);
   assert.equal(created.length,beforeMultiRetry);

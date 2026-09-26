@@ -7,6 +7,38 @@ import {Context,Service} from '@deepseek-ai/cordis';
 import Typert from '@deepseek-ai/dsh-typert-registry';
 import {HarnessService,inject} from '../dist/dsh.js';
 
+test('new Codex and Claude sessions default to automatic approval without widening inherited or chosen permissions',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-permission-default-'));
+ const ctx=new Context();
+ const agents=Object.fromEntries(['codex','claude','full','readonly'].map(id=>[id,{
+  id,status:'idle',inbox:{nextTurn:[],nextStep:[]},session:{header:{cwd:root,sandbox:id==='full'?'danger-full-access':id==='readonly'?'read-only':'workspace-write'},snapshotEvents:()=>[]}
+ }]));
+ class NativeCommands extends Service {
+  constructor(ctx){super(ctx,'sessionController');}
+  async resolveAgent(id){return {agent:agents[id]};}
+  async prompt(){} async fork(){} async selectModel(){} updateQueue(){}
+ }
+ const inspect=harness=>({status:'ready',capabilities:{},catalog:{models:[],thinkingOptions:[]},permissionModes:harness==='codex'
+  ? {modes:[{id:'read-only',label:'Ask'},{id:'agent',label:'Auto'},{id:'agent-full-access',label:'Full'}],defaultModeId:'agent'}
+  : {modes:[{id:'default',label:'Manual'},{id:'auto',label:'Auto'},{id:'bypassPermissions',label:'Full'}],defaultModeId:'default'}});
+ try{
+  await ctx.plugin(Typert);await ctx.plugin(NativeCommands);
+  ctx.provide('agents',{get:id=>agents[id]});ctx.provide('sessions',{});ctx.provide('userQuestions',{});
+  ctx.provide('sessionProjections',{stateOf:(session,key)=>key==='permissions'?{sandbox:session.header.sandbox}:undefined});
+  ctx.provide('attachments',{});ctx.provide('fileUploads',{});
+  await ctx.plugin({inject,apply(scope){new HarnessService(scope,root,{
+   codex:{inspect:async()=>inspect('codex'),async close(){}},'claude-code':{inspect:async()=>inspect('claude-code'),async close(){}}
+  });}});
+  const h=ctx.harness;
+  assert.equal((await h.select({sessionId:'codex',harness:'codex'})).permission,'agent');
+  assert.equal((await h.select({sessionId:'claude',harness:'claude-code'})).permission,'auto');
+  assert.equal((await h.select({sessionId:'full',harness:'claude-code'})).permission,'bypassPermissions');
+  assert.equal((await h.select({sessionId:'readonly',harness:'codex'})).permission,'read-only');
+  assert.equal((await h.selectPermission({sessionId:'claude',permission:'default'})).permission,'default');
+  assert.equal((await h.state({sessionId:'claude'})).permission,'default');
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});
+
 test('thinking selection validates against the catalog, persists, and quota reads the account snapshot once per minute',async()=>{
  const root=await mkdtemp(join(tmpdir(),'dsh-harness-service-'));
  const ctx=new Context();

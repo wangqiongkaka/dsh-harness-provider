@@ -39,7 +39,7 @@ test('delegation and discussion start sessions on a validated model and thinking
  const catalog={models:[{ref:{id:'fast'},label:'Fast',supportedThinkingOptionIds:['low']},{ref:{id:'deep'},label:'Deep'}],
   thinkingOptions:[{id:'low',label:'Low'},{id:'high',label:'High'}],defaultModel:{id:'deep'}};
  const adapter = harness => ({
-  async inspect() { inspects++; return {status:'ready',catalog,permissionModes:{modes:[{id:'read-only',label:'Read only'},{id:'plan',label:'Plan'},{id:'agent',label:'Agent'},{id:'acceptEdits',label:'Accept edits'}],defaultModeId:'agent'}}; },
+  async inspect() { inspects++; return {status:'ready',catalog,permissionModes:{modes:[{id:'read-only',label:'Read only'},{id:'plan',label:'Plan'},{id:'agent',label:'Agent'},{id:'acceptEdits',label:'Accept edits'},{id:'auto',label:'Auto'}],defaultModeId:'agent'}}; },
   async open(input) {
    opens.push({harness,input});
    const channel=new HarnessOutputChannel();

@@ -75,7 +75,7 @@ test('Harness sessions keep /goal /plan /compact, add /clear, hide the other DSH
  }
  const skill=name=>({name,description:name,modelInvocable:true});
  const ready=extra=>({status:'ready',capabilities:{},catalog:{models:[],thinkingOptions:[],...extra.catalog},...extra.root});
- const claude={async inspect(){return ready({root:{permissionModes:{modes:[{id:'default',label:'Manual'},{id:'acceptEdits',label:'Accept edits'},{id:'plan',label:'Plan'}],defaultModeId:'default'}}});},
+ const claude={async inspect(){return ready({root:{permissionModes:{modes:[{id:'default',label:'Manual'},{id:'acceptEdits',label:'Accept edits'},{id:'plan',label:'Plan'},{id:'auto',label:'Auto'}],defaultModeId:'default'}}});},
   async listSkills(){return [skill('compact'),skill('goal'),skill('review')];},async close(){}};
  const codex={async inspect(){return ready({catalog:{configOptions:[{id:'collaboration_mode',label:'Mode',currentValue:'default',choices:[{value:'default',label:'Default'},{value:'plan',label:'Plan'}]}]}});},
   async listSkills(){return [skill('plan'),skill('compact'),skill('goal'),skill('status')];},async close(){}};
@@ -119,7 +119,7 @@ test('Harness sessions keep /goal /plan /compact, add /clear, hide the other DSH
   assert.equal(ctx.harness.runner.live.has('claude'),false);
   assert.equal(ctx.harness.runner.retainedSubagents.has('claude'),false);
   assert.deepEqual(await ctx.harness.bindings.read('claude'),{
-   version:1,sessionId:'claude',harness:'claude-code',cwd:root,locked:true,
+   version:1,sessionId:'claude',harness:'claude-code',cwd:root,locked:true,permission:'auto',
   });
   assert.deepEqual(sent('claude'),[['/compact'],['/goal ship it','image']],'clear is handled by the host, not sent as a prompt');
 

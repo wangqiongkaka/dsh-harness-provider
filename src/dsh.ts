@@ -88,8 +88,7 @@ const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>
 };
 /** Full access on either side maps to full access on the other. */
 const FULL_ACCESS: Record<Binding['harness'], string> = { codex: 'agent-full-access', 'claude-code': 'bypassPermissions' };
-/** Cross-harness delegation below full access still lets the child work: Codex auto-approves, Claude Code accepts edits. */
-const DELEGATED: Record<Binding['harness'], string> = { codex: 'agent', 'claude-code': 'acceptEdits' };
+const AUTOMATIC_PERMISSION: Record<Binding['harness'], string> = { codex: 'agent', 'claude-code': 'auto' };
 
 /** One DSH child session as a sidebar subagent: its first prompt is the task, its messages, reasoning and tool calls the entries. */
 export function nativeSubagent(child: { id: string; parentId: string | null; label?: string | undefined; running: boolean }, events: readonly SessionEvent[]): HarnessSubagent {
@@ -477,9 +476,9 @@ export class HarnessService extends TypertRemoteService {
             if ('error' in inspection) throw new Error(inspection.error);
             const parentBinding = await this.bindings.read(source);
             const nativeSandbox = this.ctx.get('sessionProjections')?.stateOf(parent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
-            const permission = admitted?.discussion ? DISCUSSION_PERMISSION[request.harness] : !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox]
-              : parentBinding?.harness === request.harness ? parentBinding.permission
-              : parentBinding && parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? FULL_ACCESS[request.harness] : DELEGATED[request.harness];
+            const permission = admitted?.discussion ? DISCUSSION_PERMISSION[request.harness] : !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox] ?? AUTOMATIC_PERMISSION[request.harness]
+              : parentBinding?.harness === request.harness ? parentBinding.permission ?? AUTOMATIC_PERMISSION[request.harness]
+              : parentBinding && parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? FULL_ACCESS[request.harness] : AUTOMATIC_PERMISSION[request.harness];
             if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
             const starting = await this.startingModel(request.harness, cwd, request);
             external = { inspection, ...(permission ? { permission } : {}), ...(starting ? { starting } : {}) };
@@ -850,6 +849,7 @@ export class HarnessService extends TypertRemoteService {
     const sandbox = this.ctx.get('sessionProjections')?.stateOf(agent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
     const seeded = sandbox && NATIVE_PERMISSION_MODES[harness][sandbox];
     const remembered = (await this.bindings.readDefaults())[harness];
+    if (harness === 'claude-code') binding.permission = harnessPermissionModeIdSchema.parse(AUTOMATIC_PERMISSION[harness]);
     if (seeded || remembered) {
       const inspection = await this.inspection(binding);
       if (!('error' in inspection)) {
