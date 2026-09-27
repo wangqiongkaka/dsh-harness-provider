@@ -20,7 +20,7 @@ test('the @ plugin source lists Harness plugins after files and inserts the nati
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
- runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}}}});
  const notion={name:'notion',displayName:'Notion',description:'Notion docs and workflows',mention:'[@notion](plugin://notion@openai-curated)'};
  const sentry={name:'sentry',displayName:'Sentry',description:null,mention:'[@sentry](plugin://sentry@openai-curated)'};
  const plain=value=>value===undefined?value:JSON.parse(JSON.stringify(value)); // results come from another VM realm
@@ -49,7 +49,7 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
- runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}}}});
  const rows=['file','model','goal','plan','compact','clear','export'];
  let commandInjectKeys=[];
  class CommandUi {
@@ -115,7 +115,7 @@ test('after /delegate the / menu lists only this session\'s skills and the hand-
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
- runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}}}});
  class CommandUi {
   async candidates(){return [{name:'compact'}];}
   dispatch(){return 'handled';} matchSpace(_session,token){return 'handled:'+token;} async matchEnter(){return 'handled';}
@@ -157,7 +157,7 @@ test('the model seat follows the Harness of the main-view session and task modes
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
- runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){},setInterval:()=>1,clearInterval(){}});
  // DSH 0.1.6 snapshots carry no `current`; the open session is the one retained by the main view.
  const snapshot={ids:['draft','other'],byId:{draft:{id:'draft',retainedBy:{mainView:1}},other:{id:'other',retainedBy:{}}}};
@@ -200,7 +200,7 @@ test('the delegation dock offers a model and effort pick per selected Codex / Cl
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {setTaskMode,delegationClaim,delegationOptions};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
- runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){},setInterval:()=>1,clearInterval(){}});
  const components=new Map();
  const slots={inject(_name,register){return register();},register(options,component){components.set(options.name,component);return ()=>{};}};
@@ -232,7 +232,7 @@ test('sidebar marks active turns as breathing, completed sessions as static, and
  const module={exports:{}},row={dataset:{},'__reactFiber$x':{memoizedProps:{node:{id:'s'}}}},styles=[];
  let refresh,processRunning=true;
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,
-  document:{createElement:()=>({remove(){}}),head:{append(style){styles.push(style.textContent);}},body:{},querySelectorAll:()=>[row]},
+  document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(style){styles.push(style.textContent);}},body:{},querySelectorAll:()=>[row]},
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:fn=>{queueMicrotask(fn);return 1;},cancelAnimationFrame(){},
   setInterval:fn=>{refresh=fn;return 1;},clearInterval(){}});
  const summary={id:'s',retainedBy:{},running:false};
@@ -274,7 +274,7 @@ test('the subagents guide card names the plugin that provides it and opens the t
  const React=require('react'), {renderToStaticMarkup}=require('react-dom/server');
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
- runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}}}});
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}}}});
  const cards=[];
  const slots={inject(_name,register){return register();},register(options,component){if(options.name==='sidebar.right.tab.guide.entry')cards.push({key:options.key,component});return ()=>{};}};
  const ctx={
@@ -301,7 +301,7 @@ test('the Harness settings page follows Agent presets in Settings, renders the l
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {delegationClaim,discussionClaim,delegationOptions,discussionFor};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
- runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}},body:{},querySelectorAll:()=>[]},
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:()=>1,cancelAnimationFrame(){},setInterval:()=>1,clearInterval(){}});
  const registered=[],writes=[];
  const slots={inject(_name,register){return register();},register(options,component){registered.push({options,component});return ()=>{};}};

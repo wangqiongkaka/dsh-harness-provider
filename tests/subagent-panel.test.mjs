@@ -88,7 +88,7 @@ test('the subagents chip reads the same session as the panel, so both report a r
   const require = createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
   const bundle = await build({ stdin: { contents: await readFile('src/client.tsx', 'utf8'), resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['react', 'react/jsx-runtime'] });
   const module = { exports: {} };
-  runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, require, document: { createElement: () => ({ remove() {} }), head: { append() {} } } });
+  runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, require, document: { createElement: () => ({ setAttribute() {}, remove() {} }), head: { append() {} } } });
   const asked = [], registrations = [], injected = [];
   const scope = {
     effect: fn => fn(),

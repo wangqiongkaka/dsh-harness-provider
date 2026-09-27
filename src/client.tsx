@@ -1365,11 +1365,13 @@ export async function apply(ctx: Context): Promise<void> {
   ctx.effect(() => ctx.locale.register('harness',{zh,en}), 'harness: locale');
   ctx.effect(() => {
     const style=document.createElement('style');
+    style.setAttribute('data-plugin', 'dsh-harness-provider');
     style.textContent=styles;
     document.head.append(style);return ()=>style.remove();
   }, 'harness: selector styles');
   ctx.effect(() => {
     const style=document.createElement('style');
+    style.setAttribute('data-plugin', 'dsh-harness-provider');
     style.textContent=markStyles;
     document.head.append(style);return ()=>style.remove();
   }, 'harness: sidebar mark styles');

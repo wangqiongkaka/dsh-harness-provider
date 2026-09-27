@@ -11,7 +11,7 @@ test('the Add menu survives Remote replacement without calling the disposed clie
   let client;
   runInNewContext(await readFile('dist/client.js', 'utf8'), {
     window: { __ModuleLoader__: { load: ({ factory }) => { client = factory(require); } } },
-    document: { createElement: () => ({ remove() {} }), head: { append() {} } },
+    document: { createElement: () => ({ setAttribute() {}, remove() {} }), head: { append() {} } },
   });
   const ctx = new Context();
   class Commands extends Service {
@@ -57,4 +57,28 @@ test('the Add menu survives Remote replacement without calling the disposed clie
     for (const key of ['candidates', 'dispatch', 'matchEnter']) assert.equal(Object.hasOwn(ctx.commandUi, key), false);
     assert.equal(Object.hasOwn(ctx.conversation, 'sendSession'), false, 'task submission must also release its disposed scope');
   } finally { await ctx.fiber.dispose(); }
+});
+
+test('the client styles survive another module claiming and removing unowned styles', async () => {
+  const require = createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+  let client;
+  const styles = [];
+  const document = {
+    createElement: () => ({ attributes: {}, setAttribute(name, value) { this.attributes[name] = value; },
+      getAttribute(name) { return this.attributes[name] ?? null; }, remove() { styles.splice(styles.indexOf(this), 1); } }),
+    head: { append(style) { styles.push(style); } },
+  };
+  runInNewContext(await readFile('dist/client.js', 'utf8'), {
+    window: { __ModuleLoader__: { load: ({ factory }) => { client = factory(require); } } }, document,
+  });
+  await client.apply({
+    remote: { $mount: async () => () => {} }, locale: { register: () => () => {} },
+    effect: execute => execute(), inject() {},
+  });
+  assert.equal(styles.length, 2);
+  assert.ok(styles.every(style => style.getAttribute('data-plugin') === 'dsh-harness-provider'));
+  // DSH's client module loader claims every unowned style for the next module it materializes.
+  for (const style of styles) if (!style.getAttribute('data-plugin')) style.setAttribute('data-plugin', 'another-module');
+  for (const style of [...styles]) if (style.getAttribute('data-plugin') === 'another-module') style.remove();
+  assert.equal(styles.length, 2, 'the Harness stylesheet stays installed after the other module unloads');
 });
