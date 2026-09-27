@@ -1539,9 +1539,16 @@ export async function apply(ctx: Context): Promise<void> {
       matchEnter: async (session, line, ...rest) => taskModes.has(session.sessionId) || /^\/(delegate|discuss)(?:\s|$)/.test(line.trim()) ? undefined
         : /^\/model(\s|$)/.test(line.trim()) && await external(session.sessionId) ? undefined : matchEnter(session, line, ...rest),
     };
+    const descriptors = Object.getOwnPropertyDescriptors(runtime);
     scope.effect(() => {
       Object.assign(runtime, replacements);
-      return () => { for (const key of ['candidates', 'dispatch', 'matchSpace', 'matchEnter'] as const) if (Object.hasOwn(runtime, key) && runtime[key] === replacements[key]) Reflect.deleteProperty(runtime, key); };
+      return () => {
+        // Cordis wraps method reads in a fresh Proxy; compare the stored function so reconnects discard the old scope.
+        for (const key of ['candidates', 'dispatch', 'matchSpace', 'matchEnter'] as const) {
+          if (Object.getOwnPropertyDescriptor(runtime, key)?.value !== replacements[key]) continue;
+          if (descriptors[key]) Object.defineProperty(runtime, key, descriptors[key]); else Reflect.deleteProperty(runtime, key);
+        }
+      };
     }, 'harness: DSH slash commands');
   });
   // `@` menu: the session Harness's installed plugins after the files. A pick inserts a chip whose prompt text is the Harness's
@@ -1571,7 +1578,7 @@ export async function apply(ctx: Context): Promise<void> {
       serializeDraftAttachments(ids: readonly DraftAttachmentId[]): Promise<{ attachments: readonly SubmitAttachment[] }>;
       releaseDraftAttachment(id: DraftAttachmentId): void;
     };
-    const sendSession = service.sendSession.bind(service);
+    const sendSession = service.sendSession.bind(service), descriptor = Object.getOwnPropertyDescriptor(service, 'sendSession');
     const t = ctx.locale.bind('harness');
     const replacement: typeof service.sendSession = async (session, text, attachmentIds, mode, signal) => {
       let active = taskModes.get(session.sessionId);
@@ -1601,7 +1608,9 @@ export async function apply(ctx: Context): Promise<void> {
     scope.effect(() => {
       service.sendSession = replacement;
       return () => {
-        if (service.sendSession === replacement) Reflect.deleteProperty(service, 'sendSession');
+        if (Object.getOwnPropertyDescriptor(service, 'sendSession')?.value === replacement) {
+          if (descriptor) Object.defineProperty(service, 'sendSession', descriptor); else Reflect.deleteProperty(service, 'sendSession');
+        }
         taskModes.clear(); publishTaskMode();
       };
     }, 'harness: task submission');
