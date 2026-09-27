@@ -48,6 +48,7 @@ type Api = {
 };
 const zh = {
   harness: '选择 Harness', model: '选择 Harness 模型', native: 'DSH 原生', defaultModel: '默认模型',
+  taskRunning: '任务执行中', taskIdle: '本轮已结束',
   retry: '重试', locked: '开始对话后 Harness 固定；可新建会话，或从消息新建分支后在发送前切换',
   recovery: '上次请求结果未确认，已暂停发送以避免重复执行。', loading: '加载中',
   menuModel: '模型', menuEffort: '强度', effortDefault: '默认', emptyModels: '没有可用模型', emptyEfforts: '当前模型不支持调整强度',
@@ -104,6 +105,7 @@ const zh = {
 };
 const en: Record<keyof typeof zh,string> = {
   harness:'Select Harness', model:'Select Harness model', native:'Native DSH', defaultModel:'Default model',
+  taskRunning:'Task running', taskIdle:'Turn ended',
   retry:'Retry', locked:'Harness is fixed after the first prompt. Start a new session, or branch from a message and switch before sending.',
   recovery:'The previous request was not confirmed. Sending is paused to avoid duplicate execution.', loading:'Loading',
   menuModel:'Model', menuEffort:'Effort', effortDefault:'Default', emptyModels:'No models available', emptyEfforts:'This model has no effort levels',
@@ -699,6 +701,10 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
       </div>}
     </div>
     <QuotaChip quota={quotaView} t={t} />
+    {current !== 'dsh' && state && !state.recoveryRequired && (summary?.running || summary?.blank === false) &&
+      <span data-hp-run-state data-running={summary.running ? 'true' : 'false'} className="hp-run-state" role="status">
+        {summary.running && <span className="hp-sub-live-dot" aria-hidden />}{t(summary.running ? 'taskRunning' : 'taskIdle')}
+      </span>}
     {current !== 'dsh' && state?.recoveryRequired && <SessionRecovery key={`recovery:${sessionId}`} sessionId={sessionId} recover={recover} running={!!summary?.running} onChange={setState} />}
     <SecretPanel key={sessionId} sessionId={sessionId} read={secretStatus} answer={answerSecret} />
     {error && <span role="alert" className="hp-alert">{error}</span>}
@@ -1129,6 +1135,7 @@ const styles = `
 .hp-option-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 .hp-check{display:grid;place-items:center;flex:0 0 18px;color:var(--dsw-alias-label-primary)}
 .hp-status,.hp-empty{padding:10px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
+.hp-run-state{display:inline-flex;align-items:center;gap:6px;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px;white-space:nowrap}.hp-run-state[data-running=true]{color:var(--dsw-static-blue-450)}
 .hp-error{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:4px;padding:7px 8px;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
 .hp-retry{flex:0 0 auto;padding:0;border:none;background:transparent;color:inherit;font:inherit;font-weight:600;cursor:pointer}
 .hp-ring{display:inline-flex;align-items:center;gap:6px;flex:none;padding:1px 8px;border:none;border-radius:24px;background:transparent;color:var(--dsw-alias-label-tertiary);font-family:inherit;font-size:var(--dsh-content-font-size-secondary,13px);font-variant-numeric:tabular-nums;line-height:calc(20px + var(--dsh-content-font-delta-secondary,0px));white-space:nowrap;cursor:pointer}

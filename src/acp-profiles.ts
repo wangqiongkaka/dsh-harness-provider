@@ -10,6 +10,7 @@ import type { AvailableCommand } from '@agentclientprotocol/sdk';
 import pkg from '../package.json' with { type: 'json' };
 import type { HarnessAccountSnapshot, HarnessPlugin, HostTurnSnapshot } from './contracts.js';
 import { defaultSettings, feedbackOf, type SettingsSource } from './settings.js';
+import { interactionInstructions } from './feedback.js';
 import { CodexRpc } from './codex-rpc.js';
 import { ClaudeInspector, ClaudeNotInstalledError, resolveClaudeExecutable, withNodeOnPath, withUserShellEnvironment } from './claude-sdk.js';
 import type { AcpLimits, AcpProfile } from './acp-adapter.js';
@@ -158,12 +159,12 @@ export function codexProfile(options: { command?: string; environment: NodeJS.Pr
     showThoughts: false,
     nativeSubagents: true,
     // codex-acp reads no instructions from session/new, but merges CODEX_CONFIG into every thread/start and thread/resume; as
-    // developer instructions the feedback contract and Host instructions stay out of the user's messages and survive compaction.
+    // developer instructions the interaction, feedback and Host instructions stay out of the user's messages and survive compaction.
     // codex-acp starts CODEX_PATH with its own environment.
     spawn: (raw, instructions) => {
       const env = withUserShellEnvironment({ ...raw });
       return { command: process.execPath, args: [bundled('codex-acp.mjs')],
-        env: { ...env, CODEX_PATH: command(), CODEX_CONFIG: withDeveloperInstructions(env.CODEX_CONFIG, feedbackOf(settings()) + (instructions ?? ''), env) } };
+        env: { ...env, CODEX_PATH: command(), CODEX_CONFIG: withDeveloperInstructions(env.CODEX_CONFIG, interactionInstructions + '\n\n' + feedbackOf(settings()) + (instructions ?? ''), env) } };
     },
     legacyPermissionModes: { readOnly: 'read-only', workspaceWrite: 'agent', dangerFullAccess: 'agent-full-access' },
     skillName: (command: AvailableCommand) => command.name.startsWith('$') ? command.name.slice(1) : command.name,
@@ -229,7 +230,7 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
     },
     // The same system-prompt append the SDK adapter used; ACP forwards it through the agent's own options channel. Host
     // instructions (delegation) ride along, so they stay out of the user's messages and survive context compaction.
-    sessionMeta: (_kind, instructions, discussion) => ({ systemPrompt: { append: feedbackOf(settings()) + (instructions ?? '') },
+    sessionMeta: (_kind, instructions, discussion) => ({ systemPrompt: { append: interactionInstructions + '\n\n' + feedbackOf(settings()) + (instructions ?? '') },
       ...(discussion ? { claudeCode: { options: {
         tools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'], allowDangerouslySkipPermissions: false,
         settingSources: [], settings: { disableAllHooks: true }, plugins: [],

@@ -26,25 +26,28 @@ test('the plugin Config keeps the former built-in defaults, rejects out-of-range
   }
 });
 
-test('both profiles read the live settings on every use: executables, the feedback contract and the ACP limits', () => {
+test('both profiles retain the interaction contract while reading live settings', () => {
   let current = { ...defaultSettings(), codexCommand: '/opt/codex', claudeCommand: process.execPath, requestTimeoutSeconds: 7, sessionLoadTimeoutSeconds: 9, toolOutputChars: 1234, acpStderr: true };
   const settings = () => current;
   const codex = codexProfile({ environment: {}, settings }), claude = claudeProfile({ environment: {}, settings });
   const developer = () => JSON.parse(codex.spawn({}, '\n\n[HOST]').env.CODEX_CONFIG).developer_instructions;
+  const questionContract = /用户决定[\s\S]*request_user_input[\s\S]*AskUserQuestion[\s\S]*不要仅在正文/;
+  assert.match(developer(), questionContract);
+  assert.match(claude.sessionMeta('create').systemPrompt.append, questionContract);
   assert.equal(codex.spawn({}).env.CODEX_PATH, '/opt/codex');
   assert.equal(claude.spawn({ PATH: '' }).env.CLAUDE_CODE_EXECUTABLE, process.execPath);
-  assert.equal(developer(), `${feedbackInstructions}\n\n[HOST]`);
+  assert.ok(developer().endsWith(`${feedbackInstructions}\n\n[HOST]`));
   assert.deepEqual(codex.limits(), { requestTimeoutMs: 7000, loadTimeoutMs: 9000, toolOutputChars: 1234, stderr: true });
   assert.deepEqual(claude.limits(), codex.limits());
   // An edit reaches the next spawn and session without rebuilding the profile.
   current = { ...current, codexCommand: 'codex-next', progressFeedbackText: '[CUSTOM]' };
   assert.equal(codex.spawn({}).env.CODEX_PATH, 'codex-next');
-  assert.equal(developer(), '[CUSTOM]\n\n[HOST]');
-  assert.equal(claude.sessionMeta('create', '\n\n[HOST]').systemPrompt.append, '[CUSTOM]\n\n[HOST]');
-  // Turned off, only the Host's own instructions remain.
+  assert.ok(developer().endsWith('[CUSTOM]\n\n[HOST]'));
+  assert.ok(claude.sessionMeta('create', '\n\n[HOST]').systemPrompt.append.endsWith('[CUSTOM]\n\n[HOST]'));
+  // Turning off progress feedback leaves user interaction available.
   current = { ...current, progressFeedback: false };
-  assert.equal(developer(), '\n\n[HOST]');
-  assert.equal(claude.sessionMeta('resume').systemPrompt.append, '');
+  assert.match(developer(), questionContract);
+  assert.match(claude.sessionMeta('resume').systemPrompt.append, questionContract);
   // An explicit command still pins the executable over the setting.
   assert.equal(codexProfile({ command: 'pinned', environment: {}, settings }).spawn({}).env.CODEX_PATH, 'pinned');
 });

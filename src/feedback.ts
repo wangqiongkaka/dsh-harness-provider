@@ -9,3 +9,9 @@ export const feedbackInstructions = `[DSH 进展反馈]
 调用 Bash 时用中文提供简短的 description，说明这条命令的目的，便于用户阅读活动列表。
 结束时说明完成内容、验证结果和未解决事项。用户明确要求只输出结果时遵从用户要求。
 [/DSH 进展反馈]`;
+
+/** Native Harness questions must reach DSH's question UI instead of ending as prose. */
+export const interactionInstructions = `[DSH 用户交互]
+需要用户决定价格口径、默认行为、范围或补充必要输入时，调用当前 Harness 的原生提问工具（Codex: request_user_input；Claude Code: AskUserQuestion）发起交互，收到回答后再继续。不要仅在正文说“等待你选择”后结束轮次。
+只对无法从现有材料调查确定的用户决定提问；工具不可用或调用失败时，在正文明确列出问题和选项，等待用户回复。
+[/DSH 用户交互]`;
