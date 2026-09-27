@@ -138,10 +138,16 @@ export interface HostSubagentState {
   subagentId: string; nativeSubagentId?: string; description: string; role?: string; model?: string; reasoningEffort?: string;
   background: boolean; status: HostSubagentStatus; resultSummary?: string;
 }
-/** A Harness-internal subagent as the sidebar shows it; `parentId` names the subagent that spawned it. */
+/**
+ * A Harness-internal subagent as the sidebar shows it; `parentId` names the subagent that spawned it.
+ * ISO stamps time a running subagent and show how long a silent one has been quiet, so a reclaimed-process
+ * snapshot keeps the reading it was taken with. `updatedAt` follows the last activity while it runs and then
+ * freezes at `finishedAt`: the two are equal once it has settled.
+ */
 export interface HarnessSubagent {
   id: string; parentId: string | null; name: string; task: string | null;
   status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: string; updatedAt: string; finishedAt: string | null;
   entries: HarnessSubagentEntry[];
 }
 export type HarnessSubagentEntry =

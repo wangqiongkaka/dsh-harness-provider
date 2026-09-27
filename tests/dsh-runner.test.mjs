@@ -17,6 +17,7 @@ import { HarnessOutputChannel } from '../dist/contracts.js';
 import { Bindings } from '../dist/bindings.js';
 import { DshRunner, usageDelta } from '../dist/dsh-runner.js';
 import { deriveTurnTokenUsage } from '@deepseek-ai/dsh-token-meter/client';
+import { isRemoteJsonValue } from '@deepseek-ai/dsh-typert-protocol';
 // The host's per-turn footer ("用量") needs every attempt of the turn to report usage.
 const turnUsage=(events,turn)=>deriveTurnTokenUsage(events.filter(e=>e.data?.turn===turn));
 import { DshOutput } from '../dist/dsh-output.js';
@@ -69,6 +70,8 @@ function fakeAdapter(log,native) {
       emit({type:'item.completed',turnId:active,snapshot:{item:{type:'agentMessage',itemId:'final',text:'done'},outcome:{status:'succeeded'}}});}
      const turns=++native.turns;emit({type:'session.usage.changed',usage:{inputTokens:1000*turns,cachedInputTokens:100*turns,outputTokens:50*turns}});
      emit({type:'turn.completed',turnId:active,outcome:{status:'succeeded'}});
+     // The adapter closes a session whose native turn would not stop; the turn has already completed.
+     if(text==='closes') channel.end();
      active=undefined;return {ok:true,value:{turnId:command.turnId}};
     },
     async steer(input){log.push({kind:'steer',input});return {ok:true,value:{accepted:true}};},
@@ -220,6 +223,24 @@ test('Harness questions and edits land on DSH native ask_user_question and edit 
  assert.deepEqual(results[2].data.meta.diffs,[{path:'/a.txt',oldText:'old',newText:'new'}]);
 });
 
+test('Harness interactions send lossless JSON through DSH user questions',async()=>{
+ const asked=[],responded=[];
+ const ctx={effect(){},userQuestions:{async ask(request){
+  asked.push(request);
+  assert.equal(isRemoteJsonValue({questions:request.questions}),true,'the gateway must accept the forwarded question');
+  return {answers:[{id:request.questions[0].id,selected:[request.questions[0].options?.[0]?.label??'ok']}]};
+ }}};
+ const runner=new DshRunner(ctx,{readDelegated:async()=>null},{});
+ const agent={id:'question-agent'};
+ const session={async execute(command){responded.push(command);return {ok:true,value:{accepted:true}};}};
+ const output={question:(_id,_questions,ask)=>ask()};
+ const signal=new AbortController().signal;
+ await runner.answer(agent,{type:'approval',interactionId:'a',turnId:'t',title:'Allow?',subject:{type:'nativeAction'},actions:[{id:'yes',label:'Allow',effect:'allowOnce'}]},signal,session,output);
+ await runner.answer(agent,{type:'question',interactionId:'q',turnId:'t',questions:[{id:'choice',type:'choice',prompt:'Choose?',options:[{value:'one',label:'One'}],multiple:false,allowOther:false,optional:false}]},signal,session,output);
+ assert.equal(asked.length,2);
+ assert.deepEqual(responded.map(command=>command.response),[{type:'approval',actionId:'yes'},{type:'question',answers:{choice:['one']}}]);
+});
+
 test('工具运行期间的正文和通知不会拆开调用与结果',async()=>{
  for(const mode of ['complete','cancel','question']){
  const cancel=mode==='cancel';
@@ -318,6 +339,27 @@ test('an idle Harness session is closed after the idle window and the next turn 
   assert.equal(runner.live.has(id),true);
   agent.cancel({kind:'user'});
   await new Promise(resolve=>setTimeout(resolve,50));
+ } finally {await ctx.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('a Harness session that closed itself after a turn is resumed by the next turn', {timeout:10000}, async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-closed-'));
+ const logs=[],native={turns:0};
+ const bindings=new Bindings(join(root,'bindings'));
+ const id=SessionId('closed-session');
+ const ctx=new Context();
+ for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+ await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+ const adapter=fakeAdapter(logs,native);
+ const runner=new DshRunner(ctx,bindings,{codex:adapter});
+ ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+ try {
+  await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
+  await ctx.plugin(Loop,{agents:[]});
+  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  for(const text of ['closes','two']){agent.followup(createUserMessage({content:[{type:'text',text}],source:{kind:'user'}}));await agent.whenIdle();}
+  assert.deepEqual(logs.filter(entry=>entry.kind==='create'||entry.kind==='resume').map(entry=>entry.kind),['create','resume']);
+  assert.deepEqual(agent.session.snapshotEvents().filter(e=>e.type==='turn/end').map(e=>e.data.reason.kind),['completed','completed']);
  } finally {await ctx.fiber.dispose();await adapter.close();await rm(root,{recursive:true,force:true});}
 });
 

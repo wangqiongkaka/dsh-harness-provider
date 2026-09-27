@@ -60,7 +60,7 @@ export interface AcpProfile {
   /** Live timeouts, output limit and stderr debugging; read on every use. Missing fields keep {@link DEFAULT_LIMITS}. */
   limits?(): Partial<AcpLimits>;
 }
-export interface AcpLimits { requestTimeoutMs: number; loadTimeoutMs: number; toolOutputChars: number; stderr: boolean }
+export interface AcpLimits { requestTimeoutMs: number; loadTimeoutMs: number; toolOutputChars: number; stderr: boolean; cancelTimeoutMs: number }
 
 const clientCapabilities = (profile: AcpProfile): acp.ClientCapabilities => ({
   session: { compaction: {}, configOptions: { boolean: {} } }, elicitation: { form: {}, url: {} }, plan: {},
@@ -77,7 +77,7 @@ type SubagentLifecycle = { sessionUpdate: 'subagent_spawned'; subagentSessionId:
 type AsyncTaskUpdate = { sessionUpdate: 'async_task_spawned' | 'async_task_progress'; asyncTaskId: string } | { sessionUpdate: 'async_task_state_update'; asyncTaskId: string; state: unknown };
 const CLOSE_TIMEOUT_MS = 5_000;
 const TITLE_TIMEOUT_MS = 30_000;
-const DEFAULT_LIMITS: AcpLimits = { requestTimeoutMs: 60_000, loadTimeoutMs: 120_000, toolOutputChars: 64_000, stderr: false };
+const DEFAULT_LIMITS: AcpLimits = { requestTimeoutMs: 60_000, loadTimeoutMs: 120_000, toolOutputChars: 64_000, stderr: false, cancelTimeoutMs: 10_000 };
 // `DSH_HARNESS_ACP_STDERR=1` still turns stderr on for a process started without the setting.
 const limitsOf = (profile: AcpProfile): AcpLimits => {
   const limits = { ...DEFAULT_LIMITS, ...profile.limits?.() };
@@ -449,18 +449,46 @@ class Subagents {
   readonly #messageIds = new Map<string, string | undefined>();
   has(id: string): boolean { return this.#byId.has(id); }
   list(): HarnessSubagent[] { return [...this.#byId.values()].map(agent => ({ ...agent, entries: agent.entries.map(entry => ({ ...entry })) })); }
+  /** A first sighting starts the clock; a later one only refreshes what it is called and what it was asked to do. */
   upsert(id: string, fields: { name?: string | undefined; task?: string | undefined; parentId?: string | undefined }): void {
     const agent = this.#byId.get(id);
-    if (agent) { if (fields.name) agent.name = fields.name; if (fields.task) agent.task = fields.task; return; }
-    if (this.#byId.size >= SUBAGENT_LIMIT) this.#drop(this.#byId.keys().next().value!);
-    this.#byId.set(id, { id, parentId: fields.parentId ?? null, name: fields.name ?? 'Subagent', task: fields.task ?? null, status: 'running', entries: [] });
+    if (agent) {
+      if (!fields.name && !fields.task) return;
+      if (fields.name) agent.name = fields.name;
+      if (fields.task) agent.task = fields.task;
+      if (agent.status === 'running') agent.updatedAt = stamp();
+      return;
+    }
+    // A settled subagent is a finished record; giving way to a running one keeps the newest work on the panel.
+    if (this.#byId.size >= SUBAGENT_LIMIT) this.#drop(this.#oldest(agent => agent.status !== 'running'));
+    const now = stamp();
+    this.#byId.set(id, { id, parentId: fields.parentId ?? null, name: fields.name ?? 'Subagent', task: fields.task ?? null, status: 'running',
+      startedAt: now, updatedAt: now, finishedAt: null, entries: [] });
   }
-  finish(id: string, status: HarnessSubagent['status']): void { const agent = this.#byId.get(id); if (agent?.status === 'running') agent.status = status; }
+  #oldest(matches: (agent: HarnessSubagent) => boolean): string {
+    for (const [id, agent] of this.#byId) if (matches(agent)) return id;
+    return this.#byId.keys().next().value!;
+  }
+  finish(id: string, status: HarnessSubagent['status']): void {
+    const agent = this.#byId.get(id);
+    if (agent?.status !== 'running') return;
+    this.#settleOne(agent, status);
+  }
   /** A turn that did not end normally ends every subagent still running. */
-  settle(status: 'failed' | 'cancelled'): void { for (const agent of this.#byId.values()) if (agent.status === 'running') agent.status = status; }
+  settle(status: 'failed' | 'cancelled'): void {
+    for (const agent of this.#byId.values()) if (agent.status === 'running') this.#settleOne(agent, status);
+  }
+  /** The end of a subagent freezes its clock: `finishedAt` is its last activity, so a late event cannot outdate it. */
+  #settleOne(agent: HarnessSubagent, status: HarnessSubagent['status']): void {
+    agent.status = status;
+    agent.finishedAt = stamp();
+    agent.updatedAt = agent.finishedAt;
+  }
+  /** While it runs, anything a subagent emits counts as activity, even an update the panel filters out of its entries. */
   append(id: string, update: acp.SessionUpdate, showThoughts: boolean): void {
     const agent = this.#byId.get(id);
     if (!agent) return;
+    if (agent.status === 'running') agent.updatedAt = stamp();
     if (update.sessionUpdate === 'agent_message_chunk' || update.sessionUpdate === 'agent_thought_chunk') {
       if (update.content.type !== 'text' || (update.sessionUpdate === 'agent_thought_chunk' && !showThoughts)) return;
       const kind = update.sessionUpdate === 'agent_message_chunk' ? 'message' : 'thought', last = agent.entries.at(-1), messageId = update.messageId ?? undefined;
@@ -491,6 +519,8 @@ class Subagents {
   }
 }
 const subagentStatus = (state: unknown): HarnessSubagent['status'] => state === 'completed' ? 'completed' : state === 'cancelled' ? 'cancelled' : 'failed';
+/** ISO stamps on every subagent change: the panel times a running subagent and its silence from these. */
+const stamp = (): string => new Date().toISOString();
 
 /** A reported diff as DSH's own edit row (or write row for a new file); the edit card reads its hunk from these arguments. */
 const diffTool = (itemId: string, diff: acp.Diff): HostItemOf<'toolExecution'> => ({ type: 'toolExecution', itemId: hostItemIdSchema.parse(itemId), namespace: 'edit',
@@ -677,6 +707,13 @@ class AcpSession implements HarnessSession {
           if (!active || active.hostId !== command.turnId) return failed('invalidState', 'Turn is not active');
           active.cancelled = true;
           await this.#process.agent.notify('session/cancel', { sessionId: this.#sessionId });
+          // Codex 0.157 never completes a turn interrupted inside a cua_repl call; the wedged process is dropped so Stop
+          // still ends the turn, and the next turn resumes the native session in a fresh one.
+          setTimeout(() => {
+            if (this.#active !== active) return;
+            this.#finish(active, { status: 'cancelled', reason: 'Cancelled by user' });
+            void this.close();
+          }, limitsOf(this.#profile).cancelTimeoutMs).unref();
           return { ok: true, value: { cancellationRequested: true } };
         }
         case 'interaction.respond': return this.#respond(command);

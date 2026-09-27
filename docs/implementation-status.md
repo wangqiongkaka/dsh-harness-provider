@@ -2,6 +2,29 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## 子代理运行态可见性（2026-09-26）
+
+### 问题
+
+- 右侧「子代理」面板每个子代理只有 8px 圆点加一行 12px 灰色状态字：运行中与已完成只差一个颜色和一个词，看不出它是否还在动，也没有「跑了多久 / 多久没动静」。
+- 状态只在展开面板里可见，切到同一分栏的其它 tab 就完全看不到还有子代理在运行。
+
+### 决定
+
+- 契约 `HarnessSubagent` 增加 `startedAt` / `updatedAt` / `finishedAt`（ISO 字符串）。ACP 适配器首次出现时写下起点与更新时间，运行期间每次活动刷新 `updatedAt`，结束（完成/失败/取消）时把两者定格为同一读数，之后到达的迟到事件只进 entries、不再改动时钟。DSH 原生子代理（`nativeSubagent`）按子会话日志的事件时间打点：最后一个 `turn/start` 为本轮起点、`turn/end` 为终点（与状态取同一轮）；fork 子会话的继承前缀按 `observation.inheritedEventCount` 切掉，只用它自己的事件（顺带修掉「任务写成父会话提问」）；日志不可读时退回实时会话的 `header.createdAt`。
+- 面板每行改为状态芯片：运行中（蓝）显示「运行中 · 已跑时长」，已完成（绿）/失败（红）/取消（灰）显示「状态 · 耗时」，底与字取同一个状态色（`color-mix`，与宿主状态 Tag 同法）。运行中的行再补一行「当前动作 + 距上次活动多久」，让「还在跑」与「卡住了」分得开。耗时才用 1 秒时钟，数据仍按 2 秒轮询；没有运行中子代理时不挂时钟。resume 重放没有原始时间（ACP `session/update` 不带时间戳），不足 1 秒的读数就不打印，避免给出「耗时 0 秒」。
+- 面板与标签页 chip 共用同一 `sessionId` 的 subagent feed，并按宿主 `useTabInfo().tab.visible` 门控：只有真正在屏上的那一方（面板作为活动 tab，或 chip 在展开的侧栏里）才轮询，隐藏的一方只读缓存，最后一个在屏读者离开即停表。于是侧栏收起、切到别的 tab 或会话只在后台保留时都不会继续请求宿主。chip 上显示运行中数量，不必打开面板也能看出是否在运行。
+- 淘汰（`SUBAGENT_LIMIT`）优先丢第一个非运行中的子代理，运行中的不会被静默挤掉。
+
+### 验证
+
+- 新增 `tests/subagent-panel.test.mjs`：运行中子代理的芯片、耗时、当前动作与静默时长；运行中/已完成靠颜色与动画区分（Chromium 计算样式 + `prefers-reduced-motion`）；折叠的任务两行截断按行盒裁剪（间距改用 margin，渲染实测高度 36px；修前是 44px，会露出下一行的上半截）；chip 与面板注册同一个 `sessionId` 的 `harness/subagents` 读取；chip 渲染出运行中数量、无运行时不带角标；两个在屏订阅者只发一次请求、隐藏订阅者不发请求、最后一个在屏读者停表而最后一个读者释放缓存。旧客户端上五条全部失败（`SubagentRow`/`subscribeSubagents` 不存在、无 `sidebar.right.pane.tab.title` 注册）。
+- `tests/acp-adapter.test.mjs` 补时间戳断言：Agent 调用打开时 running 且 `finishedAt: null`；完成后 `finishedAt` 不早于 `startedAt` 且与 `updatedAt` 相等；**settle 之后 25ms 才到的迟到消息**不改变时钟（去掉「仅运行中才推进 `updatedAt`」即失败）；重放后仍为已结束状态、时间戳是本次恢复时刻。
+- `tests/dsh-service.test.mjs` 的 DSH 原生子代理用例改成确定时间与 fork 前缀：日志首条是父会话继承的提问，`startedAt` 取自己的 `turn/start`、`finishedAt`/`updatedAt` 取 `turn/end`，`task` 是自己那条；无日志的子代理退回 `header.createdAt`。去掉前缀切片即失败。
+- 已知残留：进程被回收后保留的是最后一次快照，若快照里仍有 running 的子代理，芯片会继续计时；此时「当前动作 + 多久没动静」仍在增长，可据此判断它已经没有活动。原生路径里子会话日志损坏且会话已不在世时，起点只能取当前时刻（无从得知真实起点）。`SUBAGENT_LIMIT` 在原生路径仍按最旧淘汰（>200 个后代才会遇到）。
+- `npm run check` 通过（104 项测试，含类型检查与构建）。
+- 未执行：`npm run probe:web`（本机没有 `dsh` CLI，无法在临时 Profile 里做真实浏览器的端到端验证）。面板外观改为用 `.cache/panel-preview.mjs` 以宿主真实 token 渲染截图核对（`.cache/panel-preview.png`）。
+
 ## 讨论只读权限（2026-09-20）
 
 - 委派和讨论输入条统一使用多选分段按钮，至少保留一个目标。委派为每个选中类型创建独立会话，附件与回传设置共用，skill 只执行一次后批量交接；重复请求复用原会话。讨论授权记录所选类型，主 Agent 分工必须覆盖所选类型且不得越界，DSH 原生选项禁用。
@@ -117,7 +140,7 @@ Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工
 | 上下文占用、累计 token | `usage_update`、`PromptResponse.usage` 累加 |
 | 账户额度 | 原生补充（见上） |
 | 插入当前轮 | `_session/steering` |
-| 取消 | `session/cancel` → `stopReason: cancelled` |
+| 取消 | `session/cancel` → `stopReason: cancelled`；10 秒（`AcpLimits.cancelTimeoutMs`）内未结束则本地按取消结束并关闭进程，下一轮恢复原生会话（Codex 0.157 中断 `cua_repl` 调用后不再发 `turn/completed`） |
 | 技能菜单、斜杠命令 | `available_commands_update`；本地命令由适配器执行 |
 | 历史读取、恢复对账 | 回放重建的转录；有输出的轮次视为已执行 |
 | 分支、回滚 | `session/fork` + AIR fork 消息边界 |

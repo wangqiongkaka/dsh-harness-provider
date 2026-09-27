@@ -141,6 +141,8 @@ export class DshRunner {
     const discussion = binding.delegation?.discussion;
     if (discussion) binding.permission = DISCUSSION_PERMISSION[binding.harness] as Binding['permission'];
     let live = this.live.get(agent.id);
+    // A session the adapter closed on its own (a wedged native turn) is reopened like a reclaimed one.
+    if (live?.ended) { this.live.delete(agent.id); live = undefined; }
     if (!live) {
       // The adapter places the instructions: the agent's system prompt, or Codex's developer instructions at launch. A branch
       // switched from another Harness gets its inherited history there on every open, since its native session lacks it.
@@ -319,11 +321,12 @@ export class DshRunner {
       return;
     }
     const questions = interaction.type === 'approval' ? [{
-      id: 'approval', question: interaction.title, detail: interaction.description,
+      id: 'approval', question: interaction.title, ...(interaction.description === undefined ? {} : { detail: interaction.description }),
       options: interaction.actions.map(action => ({ label: action.label })),
     }] : interaction.questions.map(question => ({
       id: question.id, question: question.prompt,
-      ...(question.type === 'choice' ? { options: question.options.map(option => ({ label: option.label, description: option.description })), multiSelect: question.multiple } : {}),
+      ...(question.type === 'choice' ? { options: question.options.map(option => ({ label: option.label,
+        ...(option.description === undefined ? {} : { description: option.description }) })), multiSelect: question.multiple } : {}),
     }));
     const ask = () => this.ctx.userQuestions.ask({ agent, questions, signal });
     // Approvals stay transient like DSH's own; a question leaves the same answered row DSH's ask_user_question tool does.

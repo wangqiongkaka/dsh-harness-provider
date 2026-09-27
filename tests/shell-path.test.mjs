@@ -44,3 +44,22 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.deepEqual(await codexProfile({ command, environment: f.environment }).listPlugins('/work'), []);
   } finally { await f.close(); }
 });
+
+test('Codex forwards the user HTTPS proxy to an enabled CUA MCP server without embedding its value in config', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'cua-proxy-'));
+  const codexHome = join(home, '.codex');
+  const plugin = join(codexHome, 'plugins', 'cache', 'openai-bundled', 'unified-computer-use', '26.1.0');
+  const server = { command: '/bin/cua', args: ['server'], env: { KEEP: 'value' }, env_vars: ['ALREADY'], enabled_tools: ['js', 'js_reset', 'turn_ended'] };
+  await mkdir(plugin, { recursive: true });
+  await writeFile(join(codexHome, 'config.toml'), '[plugins."unified-computer-use@openai-bundled"]\nenabled = true\n');
+  await writeFile(join(plugin, '.mcp.json'), JSON.stringify({ mcpServers: { cua_repl: server } }));
+  try {
+    const env = { HOME: home, CODEX_HOME: codexHome, SHELL: '/bin/false', HTTPS_PROXY: 'http://proxy.example:8080' };
+    const config = JSON.parse(codexProfile({ command: 'codex', environment: env }).spawn(env).env.CODEX_CONFIG);
+    assert.deepEqual(config.mcp_servers.cua_repl, { ...server, env_vars: ['ALREADY', 'HTTPS_PROXY'] });
+    assert.equal(JSON.stringify(config).includes('proxy.example'), false);
+    await writeFile(join(codexHome, 'config.toml'), '[plugins."unified-computer-use@openai-bundled"]\nenabled = false\n');
+    const disabled = JSON.parse(codexProfile({ command: 'codex', environment: env }).spawn(env).env.CODEX_CONFIG);
+    assert.equal(disabled.mcp_servers?.cua_repl, undefined);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});

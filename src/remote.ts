@@ -76,6 +76,7 @@ export const discussionAcceptedSchema = z.object({ accepted: z.literal(true) });
 /** Harness-internal subagents of the native session, oldest first: live, else as last seen before its idle process was reclaimed. */
 export const subagentsSchema = z.array(z.object({
   id: z.string(), parentId: z.string().nullable(), name: z.string(), task: z.string().nullable(), status: z.enum(['running', 'completed', 'failed', 'cancelled']),
+  startedAt: z.string(), updatedAt: z.string(), finishedAt: z.string().nullable(),
   entries: z.array(z.discriminatedUnion('kind', [
     z.object({ kind: z.enum(['message', 'thought']), text: z.string() }),
     z.object({ kind: z.literal('tool'), title: z.string(), status: z.enum(['running', 'completed', 'failed']), output: z.string().nullable() }),

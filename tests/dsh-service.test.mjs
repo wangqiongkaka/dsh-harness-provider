@@ -66,20 +66,26 @@ test('thinking selection validates against the catalog, persists, and quota read
   ctx.provide('sessionProjections',{stateOf:(session,key)=>{assert.equal(session.header.cwd,root);return key==='permissions'?{sandbox:'danger-full-access'}:undefined;}});
   ctx.provide('attachments',{});ctx.provide('fileUploads',{});
   const childEvents=[
-   {type:'user/message',data:{content:[{type:'text',text:'Map the repo\nthoroughly'}]}},
-   {type:'assistant/message',data:{message:{content:[{type:'reasoning',text:'plan'},{type:'text',text:'Looking'},{type:'tool-call',id:'c1',name:'bash',arguments:'{"command":"ls"}'},{type:'tool-call',id:'c2',name:'read',arguments:'{"file_path":"a.ts"}'}]}}},
-   {type:'tool/result',data:{message:{role:'tool',source:{kind:'tool'},toolCallId:'c1',content:[{type:'text',text:'src'}],isError:false}}},
-   {type:'turn/end',data:{reason:{kind:'completed'}}},
+   // A fork seeds the child with the parent's finished turns; the first entry belongs to the parent, not to this child.
+   {type:'user/message',time:Date.parse('2026-01-02T02:00:00.000Z'),data:{content:[{type:'text',text:'父会话的旧提问'}]}},
+   {type:'turn/start',time:Date.parse('2026-01-02T03:04:05.000Z'),data:{turn:1}},
+   {type:'user/message',time:Date.parse('2026-01-02T03:04:06.000Z'),data:{content:[{type:'text',text:'Map the repo\nthoroughly'}]}},
+   {type:'assistant/message',time:Date.parse('2026-01-02T03:04:30.000Z'),data:{message:{content:[{type:'reasoning',text:'plan'},{type:'text',text:'Looking'},{type:'tool-call',id:'c1',name:'bash',arguments:'{"command":"ls"}'},{type:'tool-call',id:'c2',name:'read',arguments:'{"file_path":"a.ts"}'}]}}},
+   {type:'tool/result',time:Date.parse('2026-01-02T03:04:40.000Z'),data:{message:{role:'tool',source:{kind:'tool'},toolCallId:'c1',content:[{type:'text',text:'src'}],isError:false}}},
+   {type:'turn/end',time:Date.parse('2026-01-02T03:05:00.000Z'),data:{reason:{kind:'completed'}}},
   ];
   ctx.provide('subagents',{listDescendants:async id=>id==='started'?[{kind:'child',id:'child',parentId:'started',depth:1,mode:'one-shot',label:'explorer'},{kind:'diagnostic',id:'bad',reason:'corrupt'},{kind:'child',id:'grandchild',parentId:'child',depth:2,mode:'one-shot'}]:[]});
-  ctx.provide('sessionQuery',{observeSession:async id=>({events:id==='child'?childEvents:[],[Symbol.dispose](){}})});
+  // A child log times the subagent; a log that could not be read falls back to when its session was created.
+  ctx.provide('sessionQuery',{observeSession:async id=>({events:id==='child'?childEvents:[],inheritedEventCount:id==='child'?1:0,header:{createdAt:Date.parse('2026-01-02T03:00:00.000Z')},[Symbol.dispose](){}})});
   await ctx.plugin({inject,apply(scope){new HarnessService(scope,root,{codex:adapter,'claude-code':adapter});}});
   const h=ctx.harness;
   // DSH's own subagents: the descendant tree read from child logs, without loading the parent-owned child Agents.
   assert.deepEqual(await h.subagents({sessionId:'started'}),[
-   {id:'child',parentId:null,name:'explorer',task:'Map the repo\nthoroughly',status:'completed',entries:[
+   {id:'child',parentId:null,name:'explorer',task:'Map the repo\nthoroughly',status:'completed',
+    startedAt:'2026-01-02T03:04:05.000Z',updatedAt:'2026-01-02T03:05:00.000Z',finishedAt:'2026-01-02T03:05:00.000Z',entries:[
     {kind:'thought',text:'plan'},{kind:'message',text:'Looking'},{kind:'tool',title:'bash · ls',status:'completed',output:'src'},{kind:'tool',title:'read · a.ts',status:'failed',output:null}]},
-   {id:'grandchild',parentId:'child',name:'Subagent',task:null,status:'running',entries:[]},
+   {id:'grandchild',parentId:'child',name:'Subagent',task:null,status:'running',
+    startedAt:'2026-01-02T03:00:00.000Z',updatedAt:'2026-01-02T03:00:00.000Z',finishedAt:null,entries:[]},
   ]);
   assert.equal(await h.quota({sessionId:'bound'}),null); // native session, no provider route exposed here
   // Native full access carries over when the Harness offers the matching mode; Codex ids differ from this catalog, so nothing is seeded.

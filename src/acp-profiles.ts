@@ -2,6 +2,8 @@
  * The two ACP agents this plugin ships: codex-acp over the user's Codex CLI and claude-agent-acp over the user's Claude
  * Code CLI. Account quota windows are not on the ACP wire, so each profile keeps a native probe for them.
  */
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { AvailableCommand } from '@agentclientprotocol/sdk';
@@ -105,14 +107,39 @@ export async function codexPlugins(command: string, environment: NodeJS.ProcessE
   });
 }
 
+/** Codex starts plugin MCP servers with their declared environment, so forward shell proxies by name to CUA. */
+function withCuaProxy(config: Record<string, unknown>, environment: NodeJS.ProcessEnv): Record<string, unknown> {
+  const proxies = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'].filter(name => environment[name]);
+  if (!proxies.length) return config;
+  const codexHome = environment.CODEX_HOME ?? (environment.HOME ? join(environment.HOME, '.codex') : undefined);
+  if (!codexHome) return config;
+  const configured = isRecord(config.mcp_servers) ? config.mcp_servers : {};
+  if ('cua_repl' in configured) return config;
+  try {
+    const userConfig = readFileSync(join(codexHome, 'config.toml'), 'utf8');
+    const plugin = userConfig.split(/^\[plugins\."unified-computer-use@openai-bundled"\][^\S\r\n]*(?:\r?\n|$)/m)[1]?.split(/^\[/m)[0];
+    if (!plugin || !/^\s*enabled\s*=\s*true(?:\s*#.*)?\s*$/m.test(plugin)) return config;
+    const cache = join(codexHome, 'plugins', 'cache', 'openai-bundled', 'unified-computer-use');
+    for (const version of readdirSync(cache).sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))) {
+      try {
+        const manifest = JSON.parse(readFileSync(join(cache, version, '.mcp.json'), 'utf8')) as Record<string, unknown>;
+        const server = isRecord(manifest.mcpServers) ? manifest.mcpServers.cua_repl : undefined;
+        if (!isRecord(server) || typeof server.command !== 'string' || !Array.isArray(server.args) || !server.args.every(arg => typeof arg === 'string')) continue;
+        const inherited = Array.isArray(server.env_vars) ? server.env_vars.filter((name): name is string => typeof name === 'string') : [];
+        return { ...config, mcp_servers: { ...configured, cua_repl: { ...server, env_vars: [...new Set([...inherited, ...proxies])] } } };
+      } catch { /* A stale cache entry is not an installed MCP server. */ }
+    }
+  } catch { /* Keep Codex's native configuration if the plugin cache is unavailable. */ }
+  return config;
+}
 /** A CODEX_CONFIG the user already set keeps its settings; its own developer instructions come first. */
-function withDeveloperInstructions(raw: string | undefined, instructions: string): string {
+function withDeveloperInstructions(raw: string | undefined, instructions: string, environment: NodeJS.ProcessEnv): string {
   const config = raw ? JSON.parse(raw) as Record<string, unknown> : {};
   const own = typeof config.developer_instructions === 'string' && config.developer_instructions ? `${config.developer_instructions}\n\n` : '';
-  return JSON.stringify({ ...config, developer_instructions: own + instructions });
+  return JSON.stringify(withCuaProxy({ ...config, developer_instructions: own + instructions }, environment));
 }
 /** The live settings both profiles share: timeouts, the tool output limit and stderr debugging. */
-const limitsOf = (settings: SettingsSource) => (): AcpLimits => {
+const limitsOf = (settings: SettingsSource) => (): Partial<AcpLimits> => {
   const current = settings();
   return { requestTimeoutMs: current.requestTimeoutSeconds * 1000, loadTimeoutMs: current.sessionLoadTimeoutSeconds * 1000,
     toolOutputChars: current.toolOutputChars, stderr: current.acpStderr };
@@ -136,7 +163,7 @@ export function codexProfile(options: { command?: string; environment: NodeJS.Pr
     spawn: (raw, instructions) => {
       const env = withUserShellEnvironment({ ...raw });
       return { command: process.execPath, args: [bundled('codex-acp.mjs')],
-        env: { ...env, CODEX_PATH: command(), CODEX_CONFIG: withDeveloperInstructions(env.CODEX_CONFIG, feedbackOf(settings()) + (instructions ?? '')) } };
+        env: { ...env, CODEX_PATH: command(), CODEX_CONFIG: withDeveloperInstructions(env.CODEX_CONFIG, feedbackOf(settings()) + (instructions ?? ''), env) } };
     },
     legacyPermissionModes: { readOnly: 'read-only', workspaceWrite: 'agent', dangerFullAccess: 'agent-full-access' },
     skillName: (command: AvailableCommand) => command.name.startsWith('$') ? command.name.slice(1) : command.name,

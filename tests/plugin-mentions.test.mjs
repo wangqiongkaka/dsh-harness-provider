@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { build } from 'esbuild';
+import { chromium } from '@playwright/test';
 
 test('task mode dock follows the composer card width axis', async () => {
  const source=await readFile('src/client.tsx','utf8');
@@ -245,6 +246,16 @@ test('sidebar marks active turns as breathing, completed sessions as static, and
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
  const css=styles.join('\n');
  assert.match(css,/data-hp-harness="codex"[^}]+width:14px;height:14px;background:#10A37F[^}]+mask:url/);
+ const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage();
+  await page.setContent(`<style>:root{--dsw-alias-label-tertiary:rgb(128, 128, 128)}${css}</style><div data-hp-harness="dsh" data-hp-closed=""><span><div data-slot="sidebar.session.row.leading"></div></span></div><div data-hp-harness="dsh" data-hp-closed=""><span><div data-slot="sidebar.session.row.leading"><span data-session-schedule-mark></span></div></span></div><div data-hp-harness="dsh" data-hp-closed="" data-hp-delegated=""><span><div data-slot="sidebar.session.row.leading"></div></span></div>`);
+  const marks=await page.locator('[data-hp-harness="dsh"]').evaluateAll(rows=>rows.map(row=>{
+   const cell=row.firstElementChild;
+   return [getComputedStyle(cell,'::before').content,getComputedStyle(cell,'::before').backgroundColor,getComputedStyle(cell,'::after').content];
+  }));
+  assert.deepEqual(marks,[['""','rgb(128, 128, 128)','none'],['none','rgba(0, 0, 0, 0)','none'],['""','rgb(128, 128, 128)','""']], 'empty host slots show gray logos and delegation badges without covering schedule marks');
+ } finally { await browser.close(); }
  assert.match(css,/\[data-hp-running\]>span:first-child>\*\{display:none\}/,'the breathing Harness logo replaces native running dots');
  assert.match(css,/\[data-hp-running\]>span:first-child::before\{animation:hp-logo-breathe 1\.4s ease-in-out infinite\}/);
  assert.match(css,/@media \(prefers-reduced-motion:reduce\)\{\[data-hp-running\][^}]+animation:none/);

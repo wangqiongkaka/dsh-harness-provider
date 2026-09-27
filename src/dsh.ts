@@ -90,12 +90,17 @@ const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>
 const FULL_ACCESS: Record<Binding['harness'], string> = { codex: 'agent-full-access', 'claude-code': 'bypassPermissions' };
 const AUTOMATIC_PERMISSION: Record<Binding['harness'], string> = { codex: 'agent', 'claude-code': 'auto' };
 
-/** One DSH child session as a sidebar subagent: its first prompt is the task, its messages, reasoning and tool calls the entries. */
-export function nativeSubagent(child: { id: string; parentId: string | null; label?: string | undefined; running: boolean }, events: readonly SessionEvent[]): HarnessSubagent {
+/**
+ * One DSH child session as a sidebar subagent: its first prompt is the task, its messages, reasoning and tool calls the
+ * entries. Timing follows the last turn, which is also what its status describes; `createdAt` is the fallback for a log
+ * that could not be read.
+ */
+export function nativeSubagent(child: { id: string; parentId: string | null; label?: string | undefined; running: boolean; createdAt?: number | undefined }, events: readonly SessionEvent[]): HarnessSubagent {
   const entries: HarnessSubagent['entries'] = [], tools = new Map<string, Extract<HarnessSubagent['entries'][number], { kind: 'tool' }>>();
-  let task: string | null = null, end: string | undefined;
+  let task: string | null = null, end: string | undefined, started: number | undefined, updated: number | undefined, ended: number | undefined;
   const textOf = (blocks: readonly { type: string; text?: unknown }[]) => blocks.flatMap(block => block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n');
   for (const event of events) {
+    if (typeof event.time === 'number') updated = event.time;
     if (event.type === 'user/message' && task === null) task = textOf(event.data.content).trim() || null;
     else if (event.type === 'assistant/message') for (const block of event.data.message.content) {
       if ((block.type === 'text' || block.type === 'reasoning') && 'text' in block && typeof block.text === 'string' && block.text.trim()) entries.push({ kind: block.type === 'text' ? 'message' : 'thought', text: block.text });
@@ -108,11 +113,17 @@ export function nativeSubagent(child: { id: string; parentId: string | null; lab
     } else if (event.type === 'tool/result') {
       const result = event.data.message, entry = tools.get(result.toolCallId);
       if (entry) Object.assign(entry, { status: result.isError ? 'failed' : 'completed', output: textOf(result.content).slice(0, SUBAGENT_OUTPUT_LIMIT) || null });
-    } else if (event.type === 'turn/end') end = event.data.reason.kind;
+    } else if (event.type === 'turn/start') started = event.time ?? started;
+    else if (event.type === 'turn/end') { end = event.data.reason.kind; ended = event.time ?? updated; }
   }
   const status = child.running || end === undefined ? 'running' : end === 'completed' || end === 'max-tokens' ? 'completed' : end === 'aborted' ? 'cancelled' : 'failed';
   if (status !== 'running') for (const entry of tools.values()) if (entry.status === 'running') entry.status = 'failed';
-  return { id: child.id, parentId: child.parentId, name: child.label ?? task?.split('\n')[0]!.slice(0, 80) ?? 'Subagent', task, status, entries: entries.slice(-SUBAGENT_ENTRY_LIMIT) };
+  const startedAt = started ?? updated ?? child.createdAt ?? Date.now();
+  const finishedAt = status === 'running' ? undefined : ended ?? updated ?? startedAt;
+  const updatedAt = updated ?? finishedAt ?? startedAt;
+  return { id: child.id, parentId: child.parentId, name: child.label ?? task?.split('\n')[0]!.slice(0, 80) ?? 'Subagent', task, status,
+    startedAt: new Date(startedAt).toISOString(), updatedAt: new Date(updatedAt).toISOString(), finishedAt: finishedAt === undefined ? null : new Date(finishedAt).toISOString(),
+    entries: entries.slice(-SUBAGENT_ENTRY_LIMIT) };
 }
 
 export class HarnessService extends TypertRemoteService {
@@ -1149,13 +1160,15 @@ export class HarnessService extends TypertRemoteService {
     if (!runtime || !query) return [];
     const children = (await runtime.listDescendants(SessionId(sessionId))).flatMap(entry => entry.kind === 'child' ? [entry] : []).slice(-SUBAGENT_LIMIT);
     return Promise.all(children.map(async child => {
-      const running = this.ctx.agents.get(child.id)?.status === 'running';
-      let events: readonly SessionEvent[] = [];
+      const agent = this.ctx.agents.get(child.id), running = agent?.status === 'running';
+      // A live child's session header times it even when its log cannot be read; a child that is gone falls back to now.
+      let events: readonly SessionEvent[] = [], createdAt = agent?.session.header.createdAt;
       try {
         const observation = await query.observeSession(child.id, { projectionMode: 'none' });
-        try { events = observation.events; } finally { observation[Symbol.dispose](); }
+        // A fork seeds the child with the parent's finished turns: only its own events say when it ran and what it was asked.
+        try { events = observation.events.slice(observation.inheritedEventCount); createdAt = observation.header.createdAt; } finally { observation[Symbol.dispose](); }
       } catch { /* an unreadable child still lists, without content */ }
-      return nativeSubagent({ id: child.id, parentId: child.depth > 1 ? child.parentId : null, label: child.label, running }, events);
+      return nativeSubagent({ id: child.id, parentId: child.depth > 1 ? child.parentId : null, label: child.label, running, createdAt }, events);
     }));
   }
 

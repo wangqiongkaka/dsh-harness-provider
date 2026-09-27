@@ -74,6 +74,12 @@ const app = agent({ name: 'peer' })
     // the fixture mirrors that wire shape, so cached input travels only in its own buckets.
     const end = usage => ({ stopReason: 'end_turn', usage: usage ?? { inputTokens: 100 * turn, outputTokens: 10 * turn, cachedReadTokens: 5 * turn, cachedWriteTokens: 2 * turn, totalTokens: 117 * turn } });
     if (text === 'cancel') { entries.push({ input: raw, userId }); save(entries); while (!cancelled) await new Promise(r => setTimeout(r, 10)); return { stopReason: 'cancelled' }; }
+    // A wedged native turn: it ignores the cancel and never answers (Codex after an interrupted cua_repl call).
+    if (text === 'stuck') {
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'cua', title: 'mcp.cua_repl.js', kind: 'execute', status: 'in_progress',
+        rawInput: { server: 'cua_repl', tool: 'js', arguments: { code: "await cua.getApp('Simulator')" } } });
+      return new Promise(() => {});
+    }
     if (text === 'wait') { while (!steered) await new Promise(r => setTimeout(r, 10)); await reply('steered:' + steered); return end(); }
     if (text === 'approve') {
       const answer = await client.request('session/request_permission', { sessionId, toolCall: { toolCallId: 'call-1', title: 'Run npm test', kind: 'execute', status: 'pending', rawInput: { command: 'npm test' } },
@@ -159,6 +165,9 @@ const app = agent({ name: 'peer' })
         options: [{ optionId: 'yes', name: 'Yes', kind: 'allow_once' }, { optionId: 'no', name: 'No', kind: 'reject_once' }] });
       await child({ sessionUpdate: 'tool_call', toolCallId: 'c-cmd', title: 'ls', kind: 'execute', status: 'completed', rawInput: { command: 'ls' }, rawOutput: { output: 'src\\n' } });
       await update({ sessionUpdate: 'subagent_state_update', subagentSessionId: 'child-1', state: 'completed' });
+      // Work reported after the child was called done: the record takes it, but its clock stays at the settle.
+      await new Promise(resolve => setTimeout(resolve, 25));
+      await child({ sessionUpdate: 'agent_message_chunk', messageId: 'c-late', content: { type: 'text', text: 'late' } });
       await reply('child-permission:' + (answer.outcome.optionId ?? answer.outcome.outcome)); return end();
     }
     if (text === 'background') {
@@ -208,6 +217,15 @@ async function until(iterator, type) {
 }
 const events = (seen, type) => seen.filter(entry => entry.kind === 'event' && entry.event.type === type).map(entry => entry.event);
 const interaction = async iterator => { while (true) { const next = await iterator.next(); if (next.value.kind === 'interaction') return next.value.interaction; } };
+/** Subagent timestamps come from the clock; the rest of the projection is what these cases pin down. */
+const untimed = list => list.map(({ startedAt, updatedAt, finishedAt, ...agent }) => agent);
+/** Reads until one `item.started` event satisfies `matches`, leaving the rest of the turn unread. */
+async function startedItem(iterator, matches) {
+  while (true) {
+    const next = await iterator.next(); assert.equal(next.done, false);
+    if (next.value.kind === 'event' && next.value.event.type === 'item.started' && matches(next.value.event.item)) return next.value.event.item;
+  }
+}
 
 test('discussion create and resume do not replay pre-open permission states after applying model and thinking hints', { timeout: 20000 }, async () => {
   const f = await fixture(), ctx = new Context();
@@ -324,6 +342,52 @@ test('turns stream text, apply hints, steer, cancel, and carry cumulative usage 
     assert.deepEqual(snapshot.turns.map(turn => [turn.input[0].text, turn.outcome.status]), [['first[HOST]', 'succeeded'], ['second', 'succeeded'], ['$probe-skill go\nmore', 'succeeded'], ['/status now', 'succeeded'], ['', 'succeeded'], ['wait', 'succeeded'], ['cancel', 'unknown']]);
     await session.close();
   } finally { await adapter.close(); await f.close(); }
+});
+
+test('a cancel the native agent never honours still ends the turn and closes the wedged session', { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const adapter = new AcpAdapter({ profile: { ...f.profile, limits: () => ({ cancelTimeoutMs: 200 }) }, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-stuck', input: [{ type: 'text', text: 'stuck' }] }));
+    value(await session.execute({ type: 'turn.cancel', turnId: 'host-stuck' }));
+    const seen = await until(output, 'turn.completed');
+    assert.equal(events(seen, 'item.started')[0].item.toolName, 'mcp.cua_repl.js');
+    assert.equal(events(seen, 'item.completed')[0].snapshot.outcome.status, 'cancelled');
+    assert.equal(events(seen, 'turn.completed')[0].outcome.status, 'cancelled');
+    // The native process is closed with it, so the next turn reopens the session instead of queueing behind the wedged one.
+    while (!(await output.next()).done);
+    assert.equal((await session.execute({ type: 'turn.start', turnId: 'host-next', input: [{ type: 'text', text: 'next' }] })).ok, false);
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('DSH Stop clears a wedged Codex tool and the next message resumes the session', { timeout: 10000 }, async () => {
+  const f = await fixture(), ctx = new Context();
+  const adapter = new AcpAdapter({ profile: { ...f.profile, limits: () => ({ cancelTimeoutMs: 200 }) }, environment: {} });
+  const bindings = new Bindings(join(f.root, 'bindings'));
+  try {
+    for (const plugin of [Llm, Sessions, Projections, Prompt, Tools, Agents]) await ctx.plugin(plugin);
+    const runner = new DshRunner(ctx, bindings, { codex: adapter });
+    ctx.on('agent/pre-step', async payload => {
+      await runner.run(payload, await bindings.read(payload.agent.id));
+      return { kind: 'enter', messages: [] };
+    });
+    await ctx.plugin(Loop, { agents: [] });
+    const { agent } = await ctx.agents.create({ sessionId: 'wedged-tool', meta: { cwd: f.root } });
+    await bindings.write({ version: 1, sessionId: agent.id, harness: 'codex', cwd: f.root, locked: true });
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'stuck' }], source: { kind: 'user' } }));
+    for (let i = 0; i < 100 && !agent.session.snapshotEvents().some(event => event.type === 'tool/call'); i++)
+      await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(agent.session.snapshotEvents().some(event => event.type === 'tool/call'), 'the tool reached DSH before Stop');
+    agent.cancel({ kind: 'user' });
+    await agent.whenIdle();
+    assert.equal(agent.session.snapshotEvents().filter(event => event.type === 'turn/end').at(-1).data.reason.kind, 'aborted');
+    assert.equal((await bindings.read(agent.id)).pending, undefined);
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'next' }], source: { kind: 'user' } }));
+    await agent.whenIdle();
+    assert.equal(agent.session.snapshotEvents().filter(event => event.type === 'turn/end').at(-1).data.reason.kind, 'completed');
+  } finally { await ctx.fiber.dispose(); await adapter.close(); await f.close(); }
 });
 
 test('Codex message phases split messages without leaking internal labels to the host', { timeout: 20000 }, async () => {
@@ -457,15 +521,29 @@ test('Harness subagents leave the main transcript for the sidebar: Claude Code t
     assert.deepEqual(initialize._meta.jetbrains.air.capabilities, ['sessionFailure', 'recommendedValue', 'asyncTasks']);
     const output = session.outputs[Symbol.asyncIterator]();
     value(await session.execute({ type: 'turn.start', turnId: 'host-sub', input: [{ type: 'text', text: 'claude-subagent' }] }));
+    // The Agent call opens the subagent: running, timed from that sighting, with no finish time until the call completes.
+    await startedItem(output, item => item.type === 'toolExecution' && item.toolName === 'Agent');
+    const [live] = session.subagents();
+    assert.equal(live.status, 'running');
+    assert.equal(live.finishedAt, null);
+    assert.ok(Date.parse(live.updatedAt) >= Date.parse(live.startedAt), 'activity never predates the first sighting');
     const completed = events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item);
     assert.deepEqual(completed.map(item => [item.type, item.toolName ?? item.text]), [['toolExecution', 'Agent'], ['agentMessage', 'found it']]);
-    assert.deepEqual(session.subagents(), expected);
+    assert.deepEqual(untimed(session.subagents()), expected);
+    const [done] = session.subagents();
+    assert.equal(done.status, 'completed');
+    assert.ok(done.finishedAt !== null && Date.parse(done.finishedAt) >= Date.parse(done.startedAt), 'a finished subagent carries the moment it ended');
+    assert.equal(done.finishedAt, done.updatedAt, 'and one clock reading: a late event cannot outdate a settled record');
     await session.close();
   } finally { await adapter.close(); }
+  const resumedAt = Date.now();
   adapter = new AcpAdapter({ profile: f.profile, environment: {} });
   try {
     const session = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref }));
-    assert.deepEqual(session.subagents(), expected);
+    assert.deepEqual(untimed(session.subagents()), expected);
+    const [replayed] = session.subagents();
+    assert.equal(replayed.finishedAt, replayed.updatedAt, 'a replayed subagent stays settled');
+    assert.ok(Date.parse(replayed.startedAt) >= resumedAt, 'ACP carries no times, so a replay is stamped with the moment it was reloaded');
     assert.deepEqual(value(await session.readSnapshot()).turns[0].items.map(snapshot => snapshot.item.type), ['toolExecution', 'agentMessage']);
     await session.close();
   } finally { await adapter.close(); await f.close(); }
@@ -482,9 +560,12 @@ test('Harness subagents leave the main transcript for the sidebar: Claude Code t
     value(await session.execute({ type: 'interaction.respond', interactionId: pending.interactionId, response: { type: 'approval', actionId: 'yes' } }));
     const completed = events(await until(output, 'turn.completed'), 'item.completed').map(event => event.snapshot.item);
     assert.deepEqual(completed.map(item => item.text), ['child-permission:yes']);
-    assert.deepEqual(session.subagents(), [{ id: 'child-1', parentId: null, name: 'explorer', task: 'Map the repo', status: 'completed', entries: [
-      { kind: 'message', text: 'mapping' }, { kind: 'tool', title: 'ls', status: 'completed', output: 'src' },
+    assert.deepEqual(untimed(session.subagents()), [{ id: 'child-1', parentId: null, name: 'explorer', task: 'Map the repo', status: 'completed', entries: [
+      { kind: 'message', text: 'mapping' }, { kind: 'tool', title: 'ls', status: 'completed', output: 'src' }, { kind: 'message', text: 'late' },
     ] }]);
+    const [child] = session.subagents();
+    assert.ok(child.finishedAt !== null, 'a Codex child session reports its own end');
+    assert.equal(child.finishedAt, child.updatedAt, 'work that arrives after the settle does not reopen its clock');
     await session.close();
   } finally { await adapter.close(); await g.close(); }
 });

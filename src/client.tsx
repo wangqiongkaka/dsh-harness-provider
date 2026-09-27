@@ -67,6 +67,8 @@ const zh = {
   subagents: '子代理', subagentsDescription: '查看子代理的运行状态和内容', providedBy: '由 dsh-harness-provider 插件提供',
   subagentsEmpty: '当前会话还没有子代理活动。Codex / Claude Code 会话在本次运行中打开后才会显示其子代理。', subagentNoActivity: '暂无内容',
   'subagent.running': '运行中', 'subagent.completed': '已完成', 'subagent.failed': '失败', 'subagent.cancelled': '已取消',
+  subagentsRunning: '{count} 个子代理正在运行', subagentStarting: '等待首个动作', subagentSince: '已运行 {time}', subagentTook: '耗时 {time}',
+  'time.seconds': '{seconds} 秒', 'time.minutes': '{minutes} 分 {seconds} 秒', 'time.hours': '{hours} 小时 {minutes} 分', 'time.ago': '{time}前',
   plugins: '插件',
   edit: '编辑', editCancel: '取消', editSend: '发送', editHint: '发送后从这条消息重新执行，之后的原生上下文会撤销；工作区文件不会还原。',
   clear: '清理', clearDescription: '清理上下文',
@@ -121,6 +123,8 @@ const en: Record<keyof typeof zh,string> = {
   subagents:'Subagents', subagentsDescription:'Status and activity of subagents', providedBy:'Provided by the dsh-harness-provider plugin',
   subagentsEmpty:'No subagent activity in this session yet. Codex / Claude Code subagents appear once the session is open in this run.', subagentNoActivity:'Nothing yet',
   'subagent.running':'Running', 'subagent.completed':'Completed', 'subagent.failed':'Failed', 'subagent.cancelled':'Cancelled',
+  subagentsRunning:'{count} running', subagentStarting:'Waiting for its first step', subagentSince:'Running for {time}', subagentTook:'Took {time}',
+  'time.seconds':'{seconds}s', 'time.minutes':'{minutes}m {seconds}s', 'time.hours':'{hours}h {minutes}m', 'time.ago':'{time} ago',
   plugins:'Plugins',
   edit:'Edit', editCancel:'Cancel', editSend:'Send', editHint:'Sending reruns from this message and drops the native context after it; workspace files are not restored.',
   clear:'Clear', clearDescription:'Clear context',
@@ -944,34 +948,133 @@ export function GuideEntry({ kind, title, description, useTabInfo, t }: GuideEnt
   </button>;
 }
 
-// ---- right sidebar tab: Harness subagents, newest first; polled only while the tab is on screen ----
-type SubagentsTabProps = PropsRuntime<'sidebar.right.pane.tab'> & PropsLocale<'harness'> & { load(): Promise<Subagents> };
-export function SubagentsTab({ useTabInfo, load, t }: SubagentsTabProps) {
+// ---- right sidebar tab: Harness subagents, newest first; one poll per session serves the tab body and its chip ----
+type SubagentsTabProps = PropsRuntime<'sidebar.right.pane.tab'> & PropsLocale<'harness'> & { sessionId: string; load(): Promise<Subagents> };
+type SubagentsTitleProps = PropsRuntime<'sidebar.right.pane.tab.title'> & PropsLocale<'harness'> & { sessionId: string; load(): Promise<Subagents> };
+
+/** One session's list while anything watches it: the last answer, its listeners, and how many of them are on screen. */
+type SubagentFeed = { value?: Subagents; listeners: Set<() => void>; watching: number; timer?: ReturnType<typeof setInterval>; load: () => Promise<Subagents> };
+const subagentFeeds = new Map<string, SubagentFeed>();
+/**
+ * One poll per session, shared by the panel and its chip, and only while one of them is on screen: a hidden tab, a
+ * collapsed sidebar, or a session kept in the background reads the last answer without asking the host again.
+ */
+function subscribeSubagents(sessionId: string, load: () => Promise<Subagents>, watching: boolean, publish: () => void): () => void {
+  const known = subagentFeeds.get(sessionId);
+  // Nothing cached and nothing on screen: the hidden reader parks without touching the host or the store.
+  if (!known && !watching) return () => {};
+  const opened = known ?? { listeners: new Set<() => void>(), watching: 0, load };
+  opened.load = load;
+  subagentFeeds.set(sessionId, opened);
+  opened.listeners.add(publish);
+  if (watching) {
+    opened.watching += 1;
+    if (!opened.timer) {
+      const tick = () => { void opened.load().then(next => { opened.value = next; for (const listener of opened.listeners) listener(); }).catch(() => {}); };
+      tick();
+      opened.timer = setInterval(tick, 2_000);
+    }
+  }
+  return () => {
+    opened.listeners.delete(publish);
+    if (watching) opened.watching -= 1;
+    if (opened.watching) return;
+    clearInterval(opened.timer);
+    opened.timer = undefined;
+    if (opened.listeners.size) return;
+    if (subagentFeeds.get(sessionId) === opened) subagentFeeds.delete(sessionId);
+  };
+}
+function useSubagents(sessionId: string, load: () => Promise<Subagents>, watching: boolean): Subagents | undefined {
+  const latest = useRef(load); latest.current = load;
+  const subscribe = useCallback((publish: () => void) => subscribeSubagents(sessionId, () => latest.current(), watching, publish), [sessionId, watching]);
+  const snapshot = () => subagentFeeds.get(sessionId)?.value;
+  return useSyncExternalStore(subscribe, snapshot, snapshot);
+}
+/** A one-second clock, running only while a subagent is; the panel times it and its silence from the same reading. */
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, [active]);
+  return now;
+}
+/** Whole seconds since an ISO stamp, clamped to zero: a stamp the clock cannot read counts as just now, never `NaN`. */
+const elapsed = (from: string, to: number): number => {
+  const ms = to - Date.parse(from);
+  return Number.isFinite(ms) ? Math.max(0, Math.round(ms / 1_000)) : 0;
+};
+/** A duration the way the host's subagent catalog reads it: seconds, then minutes with seconds, then hours with minutes. */
+const durationText = (seconds: number, t: T): string => seconds < 60 ? t('time.seconds', { seconds })
+  : seconds < 3_600 ? t('time.minutes', { minutes: Math.floor(seconds / 60), seconds: seconds % 60 })
+  : t('time.hours', { hours: Math.floor(seconds / 3_600), minutes: Math.floor(seconds % 3_600 / 60) });
+/** What a subagent is doing now: the title of its last tool call, or the opening of its last message or thought. */
+const currentStep = (agent: Subagents[number]): string | undefined => {
+  const last = agent.entries.at(-1);
+  if (!last) return undefined;
+  const step = last.kind === 'tool' ? last.title : last.text.replace(/\s+/g, ' ').trim();
+  return step ? step.slice(0, 160) : undefined;
+};
+
+/** One subagent: its state chip, and — while it runs — the step it is on and how long that step has been silent. */
+export function SubagentRow({ agent, now, expanded, onToggle, t }: { agent: Subagents[number]; now: number; expanded: boolean; onToggle(): void; t: T }) {
+  const running = agent.status === 'running';
+  const seconds = running ? elapsed(agent.startedAt, now) : elapsed(agent.startedAt, Date.parse(agent.finishedAt ?? agent.updatedAt));
+  // A resumed session replays its subagents without their original clock, so a sub-second reading is left off rather than printed as "0 秒".
+  const duration = !running && seconds === 0 ? undefined : durationText(seconds, t);
+  const step = running ? currentStep(agent) ?? t('subagentStarting') : undefined;
+  return <section className="hp-sub-agent">
+    <button type="button" className="hp-sub-head" aria-expanded={expanded} onClick={onToggle}>
+      <span className={`hp-sub-dot hp-sub-${agent.status}`} aria-hidden />
+      <span className="hp-sub-name">{agent.name}</span>
+      <span className={`hp-sub-chip hp-sub-chip-${agent.status}`} title={duration === undefined ? undefined : t(running ? 'subagentSince' : 'subagentTook', { time: duration })}>
+        {t(`subagent.${agent.status}`)}{duration && <span className="hp-sub-elapsed">{duration}</span>}
+      </span>
+      <Chevron open={expanded} />
+    </button>
+    {agent.task && <p className={expanded ? 'hp-sub-task' : 'hp-sub-task hp-sub-clamp'}>{agent.task}</p>}
+    {step && <p className="hp-sub-live">
+      <span className="hp-sub-live-dot" aria-hidden />
+      <span className="hp-sub-live-step" title={step}>{step}</span>
+      <span className="hp-sub-live-age">{t('time.ago', { time: durationText(elapsed(agent.updatedAt, now), t) })}</span>
+    </p>}
+    {expanded && <div className="hp-sub-entries">
+      {!agent.entries.length && <p className="hp-muted">{t('subagentNoActivity')}</p>}
+      {agent.entries.map((entry, index) => entry.kind === 'tool'
+        ? <details key={index} className="hp-sub-tool"><summary><span className={`hp-sub-dot hp-sub-${entry.status}`} aria-hidden />{entry.title}</summary>{entry.output && <pre>{entry.output}</pre>}</details>
+        : <p key={index} className={entry.kind === 'thought' ? 'hp-sub-text hp-muted' : 'hp-sub-text'}>{entry.text}</p>)}
+    </div>}
+  </section>;
+}
+
+export function SubagentsTab({ useTabInfo, sessionId, load, t }: SubagentsTabProps) {
   const { tab } = useTabInfo();
-  const list = usePolled(() => tab.visible ? load() : Promise.reject(), 2_000, [tab.visible]);
+  const list = useSubagents(sessionId, load, tab.visible);
   const [open, setOpen] = useState<string>();
+  const running = list?.some(agent => agent.status === 'running') ?? false;
+  const now = useNow(running);
   if (!list) return <div className="hp-sub-empty">{t('loading')}</div>;
   if (!list.length) return <div className="hp-sub-empty">{t('subagentsEmpty')}</div>;
   return <div className="hp-sub">
-    {[...list].reverse().map(agent => {
-      const expanded = open === agent.id;
-      return <section key={agent.id} className="hp-sub-agent">
-        <button type="button" className="hp-sub-head" aria-expanded={expanded} onClick={() => setOpen(expanded ? undefined : agent.id)}>
-          <span className={`hp-sub-dot hp-sub-${agent.status}`} aria-hidden />
-          <span className="hp-sub-name">{agent.name}</span>
-          <span className="hp-sub-status">{t(`subagent.${agent.status}`)}</span>
-          <Chevron open={expanded} />
-        </button>
-        {agent.task && <p className={expanded ? 'hp-sub-task' : 'hp-sub-task hp-sub-clamp'}>{agent.task}</p>}
-        {expanded && <div className="hp-sub-entries">
-          {!agent.entries.length && <p className="hp-muted">{t('subagentNoActivity')}</p>}
-          {agent.entries.map((entry, index) => entry.kind === 'tool'
-            ? <details key={index} className="hp-sub-tool"><summary><span className={`hp-sub-dot hp-sub-${entry.status}`} aria-hidden />{entry.title}</summary>{entry.output && <pre>{entry.output}</pre>}</details>
-            : <p key={index} className={entry.kind === 'thought' ? 'hp-sub-text hp-muted' : 'hp-sub-text'}>{entry.text}</p>)}
-        </div>}
-      </section>;
-    })}
+    {[...list].reverse().map(agent => <SubagentRow key={agent.id} agent={agent} now={now} expanded={open === agent.id} t={t}
+      onToggle={() => setOpen(open === agent.id ? undefined : agent.id)} />)}
   </div>;
+}
+
+/** The tab's chip: the same list, so a running subagent shows without opening the panel or switching its pane's tab. */
+export function SubagentsTitle({ useTabInfo, sessionId, load, t }: SubagentsTitleProps) {
+  const { tab } = useTabInfo();
+  const list = useSubagents(sessionId, load, tab.visible);
+  const running = list?.filter(agent => agent.status === 'running').length ?? 0;
+  return <>
+    {t('subagents')}
+    {running > 0 && <span className="hp-sub-badge" title={t('subagentsRunning', { count: running })}>
+      <span className="hp-sub-live-dot" aria-hidden />{running}
+    </span>}
+  </>;
 }
 
 function ExternalOnboarding({ complete }: PropsRuntime<'settings.onboarding'>) {
@@ -1066,11 +1169,24 @@ ${nativeContextColors}
 .hp-sub-agent{border-radius:12px;background:var(--dsw-alias-interactive-bg-hover)}
 .hp-sub-head{display:flex;align-items:center;gap:8px;width:100%;min-height:36px;padding:6px 10px;border:none;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .hp-sub-name{flex:1;min-width:0;overflow:hidden;font-weight:500;text-overflow:ellipsis;white-space:nowrap}
-.hp-sub-status{flex:none;font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.hp-sub-chip{flex:none;display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:10px;font-size:12px;line-height:20px;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-tertiary)}
+/* Chip fill and text come from one state color, as the host's state tags do. */
+.hp-sub-chip-running{color:var(--dsw-static-blue-450);background:color-mix(in srgb,var(--dsw-static-blue-450) 12%,transparent)}
+.hp-sub-chip-completed{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent)}
+.hp-sub-chip-failed{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 12%,transparent)}
+.hp-sub-chip-cancelled{background:var(--dsw-alias-interactive-bg-active)}
+.hp-sub-elapsed:before{content:"·";margin-right:4px}
 .hp-sub-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-label-dimmed)}
 .hp-sub-running{background:var(--dsw-static-blue-450);animation:hp-pulse 1.2s ease-in-out infinite}.hp-sub-completed{background:var(--dsw-alias-state-success-primary)}.hp-sub-failed{background:var(--dsw-alias-state-error-primary)}
 @keyframes hp-pulse{50%{opacity:.35}}
-.hp-sub-task{margin:0;padding:0 10px 8px 26px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-word}
+.hp-sub-live{display:flex;align-items:center;gap:6px;margin:0;padding:0 10px 8px 26px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.hp-sub-live-dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--dsw-static-blue-450);animation:hp-pulse 1.2s ease-in-out infinite}
+.hp-sub-live-step{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.hp-sub-live-age{flex:none;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.hp-sub-badge{display:inline-flex;align-items:center;gap:4px;margin-left:6px;color:var(--dsw-static-blue-450);font-variant-numeric:tabular-nums}
+@media (prefers-reduced-motion:reduce){.hp-sub-running,.hp-sub-live-dot{animation:none}}
+/* The task's own spacing is a margin, so the two-line clamp clips on the line box instead of letting half of the next line show through its padding. */
+.hp-sub-task{margin:0 0 8px;padding:0 10px 0 26px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);white-space:pre-wrap;word-break:break-word}
 .hp-sub-clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .hp-sub-entries{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px;border-top:.5px solid var(--dsw-alias-border-l2)}
 .hp-sub-text{margin:0;white-space:pre-wrap;word-break:break-word}
@@ -1200,7 +1316,7 @@ export function EditableUserMessage(props: ChatNodeViewProps<'user'> & InjectFac
   </div>;
 }
 
-// ---- sidebar marks: host session rows expose no slot, so rows get a data attribute and CSS draws the logo in the empty status cell ----
+// ---- sidebar marks: CSS draws logos in idle leading slots and over running status dots ----
 // Brand marks: DeepSeek whale from dsh-client-ui-primitives FishLogo; OpenAI and Claude from Simple Icons (CC0).
 const FISH_LOGO_PATH = 'M22.9168 1.43018C22.6713 1.31018 22.5658 1.53918 22.4223 1.65519C22.3733 1.69269 22.3318 1.74169 22.2903 1.78669C21.9317 2.1697 21.5127 2.42121 20.9657 2.39121C20.1657 2.34621 19.4827 2.59771 18.8787 3.20973C18.7502 2.45521 18.3236 2.0047 17.6746 1.71569C17.3351 1.56568 16.9916 1.41518 16.7536 1.08867C16.5876 0.856163 16.5421 0.597155 16.4591 0.341647C16.4061 0.187643 16.3536 0.0301382 16.1761 0.00363739C15.9836 -0.0263635 15.9081 0.135141 15.8326 0.270145C15.5306 0.822162 15.4136 1.43018 15.4251 2.0462C15.4516 3.43174 16.0366 4.53527 17.1991 5.3203C17.3311 5.4103 17.3651 5.5003 17.3236 5.63181C17.2441 5.90231 17.1501 6.16482 17.0671 6.43533C17.0141 6.60784 16.9351 6.64584 16.7501 6.57033C16.1121 6.30383 15.5611 5.90931 15.074 5.4328C14.2475 4.63328 13.5 3.75075 12.568 3.05973C12.349 2.89822 12.13 2.74822 11.9034 2.60522C10.9524 1.68169 12.028 0.923165 12.277 0.833162C12.5375 0.739159 12.3675 0.41615 11.5259 0.42015C10.6844 0.42365 9.91439 0.705658 8.93286 1.08117C8.78935 1.13767 8.63835 1.17867 8.48384 1.21267C7.59332 1.04367 6.66829 1.00617 5.70226 1.11517C3.88321 1.31768 2.43016 2.1777 1.36213 3.64575C0.0790928 5.4103 -0.222916 7.41536 0.146595 9.50642C0.535106 11.7105 1.66014 13.535 3.38869 14.9616C5.18125 16.4406 7.24581 17.1657 9.60138 17.0266C11.0319 16.9441 12.6245 16.7526 14.421 15.2321C14.874 15.4576 15.3496 15.5476 16.1381 15.6151C16.7456 15.6716 17.3306 15.5851 17.7836 15.4911C18.4931 15.3411 18.4441 14.6841 18.1876 14.5636C16.1081 13.595 16.5646 13.9891 16.1496 13.67C17.2061 12.42 18.8202 10.1979 19.3182 7.17235C19.3672 6.83834 19.4297 6.36783 19.4222 6.09732C19.4182 5.93231 19.4562 5.86831 19.6447 5.84931C20.1657 5.78931 20.6712 5.64681 21.1357 5.3913C22.4833 4.65528 23.0268 3.44624 23.1548 1.9972C23.1738 1.77569 23.1508 1.54668 22.9168 1.43018ZM11.1749 14.4736C9.15936 12.889 8.18184 12.3675 7.77832 12.39C7.40081 12.4125 7.46881 12.8445 7.55182 13.126C7.63882 13.404 7.75182 13.5955 7.91033 13.8396C8.01983 14.0011 8.09533 14.2411 7.80083 14.4216C7.15181 14.8231 6.02327 14.2866 5.97027 14.2601C4.65673 13.4865 3.5587 12.4655 2.78467 11.069C2.03715 9.72493 1.60314 8.28289 1.53164 6.74384C1.51264 6.37233 1.62214 6.24082 1.99215 6.17332C2.47916 6.08332 2.98118 6.06432 3.46769 6.13582C5.52476 6.43633 7.27581 7.35586 8.74385 8.8129C9.58188 9.64243 10.2159 10.634 10.8689 11.6025C11.5634 12.631 12.3105 13.611 13.262 14.4146C13.598 14.6961 13.866 14.9101 14.1225 15.0681C13.349 15.1546 12.058 15.1731 11.1749 14.4746L11.1749 14.4736ZM12.141 8.25988C12.141 8.09488 12.273 7.96338 12.439 7.96338C12.4765 7.96338 12.5105 7.97088 12.541 7.98188C12.5825 7.99688 12.6205 8.01938 12.6505 8.05338C12.7035 8.10588 12.7335 8.18088 12.7335 8.25988C12.7335 8.42489 12.6015 8.55639 12.4355 8.55639C12.2695 8.55639 12.141 8.42489 12.141 8.25988ZM15.1415 9.79893C14.949 9.87793 14.7565 9.94544 14.5715 9.95294C14.2845 9.96794 13.9715 9.85143 13.8015 9.70893C13.5375 9.48742 13.3485 9.36342 13.2695 8.97691C13.2355 8.8119 13.2545 8.55639 13.2845 8.40989C13.3525 8.09438 13.277 7.89187 13.0545 7.70787C12.8735 7.55786 12.643 7.51636 12.39 7.51636C12.2955 7.51636 12.209 7.47486 12.1445 7.44136C12.039 7.38886 11.9519 7.25735 12.035 7.09585C12.0615 7.04335 12.19 6.91584 12.22 6.89334C12.5635 6.69784 12.9595 6.76184 13.326 6.90834C13.6655 7.04735 13.9225 7.30236 14.292 7.66287C14.6695 8.09838 14.7375 8.21838 14.9525 8.54539C15.1225 8.8009 15.277 9.06341 15.3831 9.36392C15.4471 9.55142 15.3641 9.70493 15.1415 9.79893Z';
 const OPENAI_PATH = 'M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z';
@@ -1212,19 +1328,20 @@ const logos: Record<State['harness'], { mask: string; color: string }> = {
   'claude-code': { color: '#D97757', mask: svg('0 0 24 24', CLAUDE_PATH) },
 };
 const delegatedMask = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><mask id="m"><circle cx="5" cy="5" r="5" fill="#fff"/><path d="M3 3l4 4M7 4v3H4" stroke="#000" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="5" cy="5" r="5" mask="url(#m)"/></svg>')}")`;
+const emptyStatusCell = '>span:first-child:is(:empty,:has(> [data-slot="sidebar.session.row.leading"]:empty))';
 const markStyles = Object.entries(logos).map(([harness, { mask, color }]) =>
-  `[data-hp-harness="${harness}"]>span:first-child:empty::before,[data-hp-harness="${harness}"]:not([data-hp-closed])>span:first-child::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`).join('\n')
+  `[data-hp-harness="${harness}"]${emptyStatusCell}::before,[data-hp-harness="${harness}"]:not([data-hp-closed])>span:first-child::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`).join('\n')
   // A running turn replaces the host's status dots with its breathing brand mark; an idle live Harness stays static.
   + `\n[data-hp-running]>span:first-child>*{display:none}`
   + `\n[data-hp-running]>span:first-child::before{animation:hp-logo-breathe 1.4s ease-in-out infinite}`
   + `\n@keyframes hp-logo-breathe{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.06)}}`
   + `\n@media (prefers-reduced-motion:reduce){[data-hp-running]>span:first-child::before{animation:none}}`
   // Delegated sessions: a solid badge with a cut-out arrow on the logo's bottom-right corner, in the logo's state color.
-  + `\n[data-hp-delegated]>span:first-child:empty{position:relative}[data-hp-delegated]>span:first-child:empty::after{content:"";position:absolute;right:-2px;bottom:0;width:9px;height:9px;background:#4D6BFE;-webkit-mask:${delegatedMask} center/contain no-repeat;mask:${delegatedMask} center/contain no-repeat}`
+  + `\n[data-hp-delegated]${emptyStatusCell}{position:relative}[data-hp-delegated]${emptyStatusCell}::after{content:"";position:absolute;right:-2px;bottom:0;width:9px;height:9px;background:#4D6BFE;-webkit-mask:${delegatedMask} center/contain no-repeat;mask:${delegatedMask} center/contain no-repeat}`
   // Closed sessions (no live Harness process, or an unloaded DSH agent) show the logo and badge in gray.
-  + `\n[data-hp-closed]>span:first-child:empty::before,[data-hp-closed]>span:first-child:empty::after{background:var(--dsw-alias-label-tertiary)}`;
+  + `\n[data-hp-closed]${emptyStatusCell}::before,[data-hp-closed]${emptyStatusCell}::after{background:var(--dsw-alias-label-tertiary)}`;
 /** Session id from the row's React props (the host's SessionNodeItem receives `node`); undefined for non-session rows. */
-// ponytail: reads React internals because the host has no session-row slot; replace with a slot once DSH offers one.
+// ponytail: reads React internals to mark rows even when status dots replace the leading slot; use row metadata if DSH exposes it.
 function rowSessionId(row: Element): string | undefined {
   const key = Object.keys(row).find(name => name.startsWith('__reactFiber$'));
   let fiber = key ? (row as unknown as Record<string, { return?: unknown; memoizedProps?: { node?: { id?: unknown } } }>)[key] : undefined;
@@ -1507,10 +1624,14 @@ export async function apply(ctx: Context): Promise<void> {
   // Optional: a DSH build without the right sidebar simply has no subagents tab.
   ctx.inject(['sidebarRightTabs', 'remote.harness'], scope => {
     const id = 'dsh-harness-provider/subagents', t = ctx.locale.bind('harness');
+    const face = (sessionId: string) => ({ sessionId, load: () => value(scope.remote.harness.subagents({ sessionId })) });
     scope.effect(() => scope.sidebarRightTabs.register({ id, kind: 'harness-subagents', title: () => t('subagents'),
       guide: [{ id: 'open', order: 40, title: () => t('subagents'), description: () => t('subagentsDescription') }] }), 'harness: subagents tab type');
     scope.effect(() => scope.slots.inject('sidebar.right.pane.tab', () => scope.slots.register({ name: 'sidebar.right.pane.tab', key: id, locale: 'harness',
-      inject: sessionId => ({ load: () => value(scope.remote.harness.subagents({ sessionId })) }) }, SubagentsTab)), 'harness: subagents tab');
+      inject: face }, SubagentsTab)), 'harness: subagents tab');
+    // The chip carries the same list, so "is one still running?" answers without opening the panel.
+    scope.effect(() => scope.slots.inject('sidebar.right.pane.tab.title', () => scope.slots.register({ name: 'sidebar.right.pane.tab.title', key: id, locale: 'harness',
+      inject: face }, SubagentsTitle)), 'harness: subagents chip');
     scope.effect(() => scope.slots.inject('sidebar.right.tab.guide.entry', () => scope.slots.register({ name: 'sidebar.right.tab.guide.entry', key: id, locale: 'harness' },
       GuideEntry)), 'harness: subagents guide card');
   });
