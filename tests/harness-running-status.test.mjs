@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { build } from 'esbuild';
 import { chromium } from '@playwright/test';
 
-test('Harness running status follows the session before agent output and after the turn ends', async () => {
+test('Harness selector shows no turn status label while idle or running', async () => {
   const require = createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
   const bundle = await build({ stdin: { contents: await readFile('src/client.tsx', 'utf8') + `
 import { createRoot } from 'react-dom/client';
@@ -20,7 +20,7 @@ function App() {
   const useSessions = pick => pick({ byId: { session: { running, blank: false, retainedBy: { mainView: 0 } } } });
   return <HarnessSelect sessionId="session" useSessions={useSessions} read={read} select={read} quota={idle}
     viewing={idle} modelProvider={() => null} changed={noop} secretStatus={idle} answerSecret={idle}
-    recover={read} t={key => ({ harness: '选择 Harness', taskRunning: '任务执行中', taskIdle: '本轮已结束' }[key] ?? key)} />;
+    recover={read} t={key => ({ harness: '选择 Harness' }[key] ?? key)} />;
 }
 root.render(<App />);`, resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false,
     platform: 'browser', format: 'iife', jsx: 'automatic',
@@ -32,13 +32,13 @@ root.render(<App />);`, resolveDir: resolve('src'), loader: 'tsx' }, bundle: tru
     await page.addScriptTag({ content: bundle.outputFiles[0].text });
     await page.getByRole('button', { name: '选择 Harness' }).waitFor();
     await page.getByText('Codex', { exact: true }).first().waitFor();
-    assert.equal(await page.locator('[data-hp-run-state]').textContent(), '本轮已结束');
+    const statuses = page.locator('.hp-root [role=status]');
+    assert.equal(await statuses.count(), 0);
     await page.evaluate(() => window.setRunning(true));
     await page.waitForTimeout(50);
-    assert.equal(await page.locator('[data-hp-run-state]').count(), 1);
-    assert.equal(await page.locator('[data-hp-run-state]').textContent(), '任务执行中');
+    assert.equal(await statuses.count(), 0);
     await page.evaluate(() => window.setRunning(false));
     await page.waitForTimeout(50);
-    assert.equal(await page.locator('[data-hp-run-state]').textContent(), '本轮已结束');
+    assert.equal(await statuses.count(), 0);
   } finally { await browser.close(); }
 });
