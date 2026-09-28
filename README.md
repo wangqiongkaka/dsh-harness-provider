@@ -23,7 +23,7 @@
 ## 前置条件
 
 - Node.js 22 或更高版本。
-- 使用 DSH 0.1.7-rc.2 的 Web Profile，本插件按该版本的消息来源、工具结果、预设注册表和实时配置接口构建与验证。
+- 使用 DSH 0.1.7-rc.2 的 Web Profile，或 DSH 0.2.0-rc.1 桌面版。本插件按这些版本的消息来源、工具结果、预设注册表和实时配置接口构建与验证。
 - 已安装并完成登录或环境配置的 [Codex CLI](https://developers.openai.com/codex/cli/) 或 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)。
 
 ## 安装
@@ -31,9 +31,11 @@
 将发布包加入 DSH Profile，然后启动 DSH：
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.2.0.tgz
+dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.2.1.tgz
 dsh --profile web
 ```
+
+桌面版可在插件管理器中安装同一个 `dsh-harness-provider-0.2.1.tgz`，然后重新启动 DSH。
 
 外部 Harness 不需要 DeepSeek API Key。首次引导时可以选择“稍后配置”；插件会在当前会话使用外部 Harness 时跳过 DeepSeek 凭据引导。
 
@@ -190,7 +192,7 @@ npm run check
 
 `npm run dev:link` 会链接参考仓库中的 `@deepseek-ai/*` 包，每次运行 `npm install` 后都需要重新执行。`npm run check` 依次执行类型检查、构建和全部测试。
 
-在 DSH `0.1.7-rc.2` 参考构建上运行 `npm run check`，覆盖工具结果、通知来源、实时额度配置、并行调用日志、取消与会话冷恢复。
+在 DSH `0.1.7-rc.2` 参考构建上运行 `npm run check`；并使用 DSH `0.2.0-rc.1` 桌面版发行包验证类型检查、构建和发行版测试。覆盖工具结果、通知来源、实时额度配置、并行调用日志、取消与会话冷恢复。
 
 其他验证命令：
 
