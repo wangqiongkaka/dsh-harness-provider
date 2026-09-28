@@ -87,7 +87,7 @@ function fakeAdapter(log,native) {
 
 test('real DSH loop persists streams/tools, handles cancellation, and cold-resumes external identity', {timeout:10000}, async()=>{
  const root=await mkdtemp(join(tmpdir(),'dsh-harness-runner-'));
- const contexts=[],logs=[],native={turns:0};
+ const contexts=[],logs=[],native={turns:0},stopping=[];
  const bindings=new Bindings(join(root,'bindings'));
  const id=SessionId('integration-session');
  const frames=[];
@@ -97,6 +97,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
   const adapter=fakeAdapter(logs,native);
   const runner=new DshRunner(ctx,bindings,{codex:adapter});
+  ctx.on('agent/turn-stopping',({agent,turn})=>stopping.push({turn,lastEvent:agent.session.snapshotEvents().at(-1)?.type}));
   ctx.on('agent/assistant-stream',({frame})=>frames.push(frame));
   ctx.on('agent/inbox/inserted',({agent})=>runner.drainSteering(agent));
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
@@ -108,6 +109,8 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   const first=await mount();
   const {agent}=await first.ctx.agents.create({sessionId:id,meta:{cwd:root}});
   await prompt(agent,'one');await prompt(agent,'two');
+  assert.deepEqual(stopping.slice(0,2),[{turn:1,lastEvent:'step/end'},{turn:2,lastEvent:'step/end'}],
+    'Harness turns must reach turn-stopping before turn/end so workspace changes can be announced in the current turn');
   const ends=agent.session.snapshotEvents().filter(e=>e.type==='turn/end');
   assert.deepEqual(ends.map(e=>e.data.reason.kind),['completed','completed']);
   assert.equal(agent.session.snapshotEvents().filter(e=>e.type==='tool/result').length,2);

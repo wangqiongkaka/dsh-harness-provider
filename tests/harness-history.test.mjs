@@ -84,14 +84,16 @@ test('editing a prompt forks before its turn, resends it with the kept attachmen
     await h.bindings.write({version:1,sessionId:'session',harness:'codex',cwd:f.root,locked:true,nativeRef:{harnessId:'codex',nativeSessionId:'native',formatVersion:1},turns:[{turn:1,key:'first'},{turn:2,key:'last'}]});
     const user=(text,rpcId,extra=[])=>f.agent.session.append('user/message',{id:rpcId,content:[{type:'text',text},...extra],source:{kind:'user',rpcId}});
     const image={type:'image',attachment:{id:'img'}};
-    f.agent.session.append('step/start',{turn:1,step:1});user('one','r1');
-    f.agent.session.append('step/start',{turn:2,step:1});const second=user('two','r2',[image]);
+    f.agent.session.append('turn/start',{turn:1});f.agent.session.append('step/start',{turn:1,step:1});user('one','r1');
+    f.agent.session.append('turn/start',{turn:2});f.agent.session.append('step/start',{turn:2,step:1});const second=user('two','r2',[image]);
     const queued=user('queued','r3');
     f.agent.session.append('assistant/message',{turn:2,step:1});const steering=user('steer','r4');
     await writeFile(join(f.root,'keep.txt'),'worktree changes');
     await assert.rejects(h.edit({sessionId:'session',seq:steering.seq,text:'x',requestId:'e0'}),/开头的用户消息/);
     const state=await h.edit({sessionId:'session',seq:second.seq,text:'two, edited',requestId:'e1'});
     assert.deepEqual(state.editableTurns,[1]);
+    assert.deepEqual(state.supersededTurns,[2]);
+    assert.deepEqual((await h.state({sessionId:'session'})).supersededTurns,[2]);
     assert.deepEqual(f.calls.filter(call=>'fork' in call),[{fork:'first'}]);
     const binding=await h.bindings.read('session');
     assert.equal(binding.nativeRef.nativeSessionId,'forked');assert.deepEqual(binding.turns,[{turn:1,key:'first'}]);
@@ -106,5 +108,11 @@ test('editing a prompt forks before its turn, resends it with the kept attachmen
     assert.equal(f.calls.filter(call=>'fork' in call).length,1);
     // The rewound turn no longer has a native boundary.
     await assert.rejects(h.edit({sessionId:'session',seq:second.seq,text:'again',requestId:'e2'}),/原生边界无法确认/);
+    f.agent.session.append('turn/start',{turn:3});f.agent.session.append('step/start',{turn:3,step:1});
+    const replacement=user('two, edited','e1-replayed');
+    await h.bindings.write({...await h.bindings.read('session'),turns:[{turn:1,key:'first'},{turn:3,key:'last'}]});
+    const editedAgain=await h.edit({sessionId:'session',seq:replacement.seq,text:'two, edited again',requestId:'e3'});
+    assert.deepEqual(editedAgain.supersededTurns,[2,3]);
+    assert.deepEqual((await h.state({sessionId:'session'})).supersededTurns,[2,3]);
   } finally {await f.close();}
 });

@@ -11,6 +11,8 @@ export const stateSchema = z.object({
   recoveryRequired: z.boolean(),
   /** DSH turns whose native boundary is known, so their prompt can be edited and rerun in place. */
   editableTurns: z.array(z.number().int()),
+  /** Turns replaced by a later edit; kept in the event log but hidden from the chat. */
+  supersededTurns: z.array(z.number().int()),
 });
 export const selectRequest = address.extend({ harness: selection });
 export const modelRequest = address.extend({ model: z.string().min(1) });

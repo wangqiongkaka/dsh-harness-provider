@@ -68,6 +68,19 @@ type DiscussionResult = { peerReview: boolean; participants: Array<{ sessionId: 
 const userMessageAt = (events: readonly SessionEvent[], rpcId: string) => events.findIndex(event =>
   event.type === 'user/message' && event.data.source.kind === 'user' && 'rpcId' in event.data.source && event.data.source.rpcId === rpcId);
 
+/** Edited turns remain in DSH's append-only log, but no longer belong to the visible conversation. */
+function supersededTurns(events: readonly SessionEvent[]): number[] {
+  const starts: Array<{ seq: number; turn: number }> = [], hidden = new Set<number>();
+  for (const event of events) {
+    if (event.type === 'turn/start') starts.push({ seq: event.seq, turn: event.data.turn });
+    if (event.type !== 'user/message') continue;
+    const source = event.data?.source as { kind?: string; form?: string; summary?: string; rewindFromSeq?: number } | undefined;
+    if (source?.kind !== 'dsh-harness-provider' || source.form !== 'notice' || source.summary !== '消息已编辑' || source.rewindFromSeq === undefined) continue;
+    for (const start of starts) if (start.seq >= source.rewindFromSeq) hidden.add(start.turn);
+  }
+  return [...hidden];
+}
+
 /** Replaces a Service method for the scope's lifetime; a later plugin's replacement is left intact on dispose. */
 function override<T extends object, K extends keyof T>(scope: Context, target: T, key: K, replacement: T[K], label: string): void {
   const descriptor = Object.getOwnPropertyDescriptor(target, key);
@@ -352,7 +365,7 @@ export class HarnessService extends TypertRemoteService {
     });
   }
 
-  /** Reruns a user prompt with new text: the native context goes back to before its turn, the old transcript stays above a notice. */
+  /** Reruns a user prompt with new text from its native context boundary. */
   async edit(raw: unknown) {
     const { sessionId, seq, text, requestId } = editRequest.parse(raw);
     return this.bindings.serial(sessionId, async () => {
@@ -360,7 +373,7 @@ export class HarnessService extends TypertRemoteService {
       if (!binding) throw new Error('只有 Codex / Claude Code 会话支持编辑消息');
       const events = agent.session.snapshotEvents();
       const typed = (event: SessionEvent | undefined): event is Extract<SessionEvent, { type: 'user/message' }> => event?.type === 'user/message' && event.data.source.kind === 'user';
-      if (events.some(event => typed(event) && (event.data.source as { rpcId?: string }).rpcId === requestId)) return this.view(binding);
+      if (events.some(event => typed(event) && (event.data.source as { rpcId?: string }).rpcId === requestId)) return this.view(binding, false, events);
       // A turn's prompt is the run of user messages right after its step/start; steering arrives later and cannot be edited alone.
       let start = events.findIndex(event => event.seq === seq);
       const target = events[start];
@@ -375,12 +388,12 @@ export class HarnessService extends TypertRemoteService {
       if (!content.length) throw new RemoteError('gateway/bad-request', '请输入文字或保留附件', {});
       await this.rewind(agent, binding, index);
       const fromSeq = events.find(event => event.type === 'turn/start' && event.data.turn === head.data.turn)?.seq ?? head.seq;
-      await this.notice(agent, '消息已编辑', '已撤销该消息及之后的原生对话上下文，并按编辑后的内容重新执行；工作区文件保持原状。上方原记录保留供查阅。', fromSeq);
+      await this.notice(agent, '消息已编辑', '已撤销该消息及之后的原生对话上下文，并按编辑后的内容重新执行；工作区文件保持原状。', fromSeq);
       prompt.forEach((event, offset) => {
         agent.followup(createUserMessage({ content: event === target ? content : event.data.content,
           source: { kind: 'user', rpcId: event === target ? requestId : `${requestId}#${offset}` } }));
       });
-      return this.view(binding);
+      return this.view(binding, false, agent.session.snapshotEvents());
     });
   }
 
@@ -413,11 +426,11 @@ export class HarnessService extends TypertRemoteService {
     const binding = await this.bindings.read(sessionId);
     if (binding?.pending && agent.status !== 'running' && !agent.inbox.nextTurn.length && !agent.inbox.nextStep.length) {
       await this.autoCheck(sessionId);
-      return this.view(await this.bindings.read(sessionId));
+      return this.view(await this.bindings.read(sessionId), false, agent.session.snapshotEvents());
     }
     this.checks.delete(sessionId);
     const nativeDelegation = binding ? undefined : await this.bindings.readDelegated(sessionId);
-    if (binding || nativeDelegation || !this.fresh(agent)) return this.view(binding, nativeDelegation?.locked || (!binding && !this.unstarted(agent)));
+    if (binding || nativeDelegation || !this.fresh(agent)) return this.view(binding, nativeDelegation?.locked || (!binding && !this.unstarted(agent)), agent.session.snapshotEvents());
     // A fresh session starts on the Harness picked last time; failures fall back to native silently.
     const remembered = (await this.bindings.readDefaults()).harness;
     if (!remembered || remembered === 'dsh' || !agent.session.header.cwd) return this.view();
@@ -1238,10 +1251,11 @@ export class HarnessService extends TypertRemoteService {
     return apiKey ? { provider, baseURL, apiKey, source: provider } : null;
   }
 
-  private view(binding?: Binding, nativeLocked = false) {
+  private view(binding?: Binding, nativeLocked = false, events: readonly SessionEvent[] = []) {
     return { harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? nativeLocked,
       model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null,
-      configs: binding?.configs ?? {}, recoveryRequired: !!binding?.pending, editableTurns: binding?.turns?.map(entry => entry.turn) ?? [] };
+      configs: binding?.configs ?? {}, recoveryRequired: !!binding?.pending, editableTurns: binding?.turns?.map(entry => entry.turn) ?? [],
+      supersededTurns: supersededTurns(events) };
   }
   /** Whether the session runs on an external Harness, after its remembered Harness selection has been applied. */
   private async boundHarness(sessionId: string): Promise<boolean> {

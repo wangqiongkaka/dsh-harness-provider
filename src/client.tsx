@@ -1465,13 +1465,23 @@ export async function apply(ctx: Context): Promise<void> {
     };
     // Every user bubble reads the same state after a turn; concurrent reads share one request.
     const reads = new Map<string, Promise<State>>();
+    const hiddenStyle = document.createElement('style');
+    hiddenStyle.setAttribute('data-plugin', 'dsh-harness-provider-edits');
+    let activeSession: string | undefined;
+    const hiddenTurns = new Set<number>();
+    function paintEditedTurns(id: string, state: State) {
+      if (id !== activeSession) return;
+      for (const turn of state.supersededTurns) hiddenTurns.add(turn);
+      hiddenStyle.textContent = [...hiddenTurns].map(turn => `[data-chat-flow] > [data-chat-turn="${turn}"]{display:none!important}`).join('\n');
+    }
     const editApi: EditInjected = {
       read: id => {
         let read = reads.get(id);
-        if (!read) { reads.set(id, read = api.read(id)); read.finally(() => reads.delete(id)).catch(() => {}); }
+        if (!read) { reads.set(id, read = api.read(id).then(state => { paintEditedTurns(id, state); return state; })); read.finally(() => reads.delete(id)).catch(() => {}); }
         return read;
       },
-      edit: (sessionId, seq, text, requestId) => value(scope.remote.harness.edit({ sessionId, seq, text, requestId })),
+      edit: (sessionId, seq, text, requestId) => value(scope.remote.harness.edit({ sessionId, seq, text, requestId }))
+        .then(state => { paintEditedTurns(sessionId, state); return state; }),
       host: () => scope.slots.entries('conversation.chat.node').filter(entry => entry.options.key === 'user' && entry.component !== EditableUserMessage)
         .sort((a, b) => (a.options.priority ?? 0) - (b.options.priority ?? 0))[0]?.component as ComponentType<ChatNodeViewProps<'user'>> | undefined,
       ht: ctx.locale.bind('harness'),
@@ -1480,6 +1490,11 @@ export async function apply(ctx: Context): Promise<void> {
       const {byId}=scope.sessions.list.getSnapshot();
       // The open session is the one the main view retains (the snapshot has no `current` since DSH 0.1.6).
       const current=Object.values(byId).find(session => (session.retainedBy.mainView ?? 0) > 0)?.id;
+      if (current !== activeSession) {
+        activeSession = current;
+        hiddenTurns.clear();
+        hiddenStyle.textContent = '';
+      }
       for (const id of known.keys()) if (!(id in byId)) known.delete(id);
       for (const id of fetched) if (known.get(id) === 'dsh' && id !== current) fetched.delete(id);
       schedule();
@@ -1497,8 +1512,10 @@ export async function apply(ctx: Context): Promise<void> {
       if (!external && nativeSeats.length) { for (const dispose of nativeSeats) dispose(); nativeSeats = []; }
     }
     scope.effect(()=>{
+      document.head.append(hiddenStyle);
       const stop=scope.sessions.list.subscribe(syncModel);
-      return ()=>{stop();for (const dispose of nativeSeats) dispose();};
+      syncModel();
+      return ()=>{stop();hiddenStyle.remove();for (const dispose of nativeSeats) dispose();};
     },'harness: native model seat');
     scope.effect(()=>{
       const observer=new MutationObserver(schedule);

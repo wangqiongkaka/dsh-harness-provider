@@ -95,7 +95,7 @@ async function dismiss(){
  }
 }
 async function send(text,reply){
- const replies=page.getByText(reply,{exact:true});
+ const replies=page.getByText(reply,{exact:false});
  const before=await replies.count();
  const editor=page.locator('[contenteditable="true"][role="textbox"]');
  await editor.fill(text);await editor.press('Enter');
@@ -248,8 +248,8 @@ try{
   console.log('PASS: the real composer created a delegated Codex session with an image and displayed its native reply');
   console.log('PASS: report-back defaults off and, when explicitly enabled, wakes the source Claude Code session');
  }else{
- await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:'codex-web-probe'});
  await page.reload();await dismiss();
+ const codexSessionId=(await page.locator('[role="treeitem"][aria-selected="true"][data-row-key^="session:"]').getAttribute('data-row-key')).slice('session:'.length);
  const selector=page.getByLabel('Select Harness',{exact:true});await selector.waitFor();
  // The Harness selector is a menu: open it, pick the option; the chip then shows the bound Harness.
  const choose=async name=>{await selector.click();await page.getByRole('menuitemradio',{name,exact:true}).click();await expect(selector).toHaveText(name);};
@@ -268,7 +268,7 @@ try{
  console.log('PASS: DSH restart preserves the session list, transcript, and native Codex context');
  await expect(page.getByRole('button',{name:'会话操作',exact:true})).toHaveCount(0);
  await expect(page.getByRole('button',{name:'恢复会话',exact:true})).toHaveCount(0);
- await rpc('harness/rollback',{sessionId:'codex-web-probe'});
+ await rpc('harness/rollback',{sessionId:codexSessionId});
  await send('After rollback marker','Codex after rollback');
  const afterRollback=JSON.stringify(codex.requests.at(-1).body.input);
  assert.ok(afterRollback.includes('Remember first marker'));
@@ -287,15 +287,20 @@ try{
  await editBox.press('Enter');
  await expect(page.getByText('Codex after edit',{exact:true})).toHaveCount(1,{timeout:45000});
  await expect(page.getByLabel('Select Harness model',{exact:true})).toBeEnabled({timeout:45000});
+ await expect(userRow('Continue with second marker')).toBeHidden();
+ await expect(userRow('After rollback marker')).toBeHidden();
+ await expect(userRow('Second marker edited')).toBeVisible();
  const afterEdit=JSON.stringify(codex.requests.at(-1).body.input);
  assert.ok(afterEdit.includes('Remember first marker') && afterEdit.includes('Second marker edited'),afterEdit);
  for(const dropped of ['Continue with second marker','After rollback marker']) assert.equal(afterEdit.includes(dropped),false,dropped);
  await page.screenshot({path:resolve('.cache/edit-result-web.png')});
  console.log('PASS: editing a finished Codex prompt in its bubble reruns from it with only the earlier native context');
- const bindingPath=join(dshHome,'harness-plugin',createHash('sha256').update('codex-web-probe').digest('hex')+'.json');
+ const bindingPath=join(dshHome,'harness-plugin',createHash('sha256').update(codexSessionId).digest('hex')+'.json');
  const uncertain=JSON.parse(await readFile(bindingPath,'utf8'));uncertain.pending='probe-uncertain';uncertain.pendingNative='not-in-native-history';
  await writeFile(bindingPath,JSON.stringify(uncertain));
  await page.reload();await dismiss();
+ await expect(userRow('Continue with second marker')).toBeHidden();
+ await expect(userRow('Second marker edited')).toBeVisible();
  await page.getByRole('button',{name:'恢复会话',exact:true}).click();
  await page.getByRole('button',{name:'核对原生记录',exact:true}).click();
  await page.getByText('无法确认原请求的执行结果；没有重发任何请求。',{exact:true}).waitFor();
@@ -304,10 +309,10 @@ try{
  const recoveryResult=await (await recovered).json();
  assert.equal(recoveryResult.result?.value?.recoveryRequired,false,JSON.stringify(recoveryResult));
  await expect(page.getByRole('button',{name:'恢复会话',exact:true})).toHaveCount(0);
- assert.equal((await rpc('harness/state',{sessionId:'codex-web-probe'})).recoveryRequired,false);
+ assert.equal((await rpc('harness/state',{sessionId:codexSessionId})).recoveryRequired,false);
  assert.equal(codex.requests.length,5);
  console.log('PASS: recovery UI keeps unknown results paused until explicit unlock, without model resubmission');
- const fork=await rpc('session/fork',{sessionId:'codex-web-probe'});
+ const fork=await rpc('session/fork',{sessionId:codexSessionId});
  assert.equal((await rpc('harness/state',{sessionId:fork.sessionId})).harness,'codex');
  console.log('PASS: rollback API removes the last native turn from future context; session fork retains Harness binding');
  await page.getByRole('button').filter({hasText:'New Session'}).first().click();

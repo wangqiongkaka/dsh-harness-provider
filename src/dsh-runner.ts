@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis';
-import type { Agent } from '@deepseek-ai/dsh-agent';
+import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { UserMessage, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
@@ -283,6 +283,8 @@ export class DshRunner {
       await cancelWork;
       try { await output.finish(); } finally { agent.session.append('step/end', { turn, step: output.step }); }
     }
+    // The intercepted pre-step returns no Host messages, so its loop skips the usual turn-stopping event.
+    await agentEvents(this.ctx, agent).serial('agent/turn-stopping', { turn, signal });
   }
 
   private async saveState(binding: Binding, state: HarnessSessionState): Promise<void> {
