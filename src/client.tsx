@@ -76,7 +76,7 @@ const zh = {
   delegate: '委派', delegateMode: '委派模式', delegateDescription: '创建独立会话执行任务', delegateTask: '当前处于委派模式：描述任务，将交给所选 Harness 在新的独立会话中执行；输入 / 可先用当前会话的 skill（如交接）', delegateCreated: '已创建委派会话', delegatePrepared: '正在当前会话执行 skill，完成后自动创建委派会话', commands: '指令',
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
   worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code',
-  pickModel: '{harness} 的模型与推理强度', pickLast: '沿用上次',
+  pickModel: '{harness} 的模型与推理强度', pickDefault: '默认',
   settingsNav: 'Harness', settingsIntro: '接入 Codex / Claude Code 的默认行为。修改立即保存到当前 Profile 的配置文件；进展反馈说明、讨论等待上限和调试输出在原生进程下次启动时生效。',
   settingsReadOnly: '当前连接不能修改配置，以下内容只读。', settingsUnavailable: '当前 Profile 没有提供本插件的配置。', settingsReset: '恢复默认',
   settingsRejected: '未保存：取值无效或超出范围。',
@@ -133,7 +133,7 @@ const en: Record<keyof typeof zh,string> = {
   delegate:'Delegate', delegateMode:'Delegation mode', delegateDescription:'Create an independent session for this task', delegateTask:'Delegation mode: describe the task for the selected Harness to run in a new session; type / to run one of this session\'s skills (such as a hand-off) first', delegateCreated:'Delegation session created', delegatePrepared:'Running the skill in this session; the delegation starts when it finishes', commands:'Commands',
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
   worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex and Claude Code only',
-  pickModel:'{harness} model and effort', pickLast:'Last used',
+  pickModel:'{harness} model and effort', pickDefault:'Default',
   settingsNav:'Harness', settingsIntro:'Defaults for Codex and Claude Code. Changes save to this profile\'s configuration at once; the progress feedback contract, the discussion wait and debug output apply when a native process next starts.',
   settingsReadOnly:'This connection cannot change configuration; the values below are read-only.', settingsUnavailable:'This profile does not serve the plugin\'s configuration.', settingsReset:'Reset',
   settingsRejected:'Not saved: the value is invalid or out of range.',
@@ -407,9 +407,15 @@ function DelegatePick({ harness, pick, load, disabled, onChange, t }: { harness:
   }, [open, catalog, load, harness]);
   const name = harness === 'codex' ? 'Codex' : 'Claude Code';
   const model = catalog?.models.find(entry => entry.id === pick.model);
-  const modelLabel = pick.model ? model?.label ?? pick.model : t('pickLast');
-  const efforts = (catalog?.thinkingOptions ?? []).filter(option => !model?.thinkingOptionIds || model.thinkingOptionIds.includes(option.id));
+  const modelLabel = pick.model ? model?.label ?? pick.model : t('pickDefault');
+  // Without a pick the session starts on the catalog's default, so its thinking levels and default level are the ones offered.
+  const effective = model ?? catalog?.models.find(entry => entry.id === catalog.defaultModel?.id);
+  const efforts = (catalog?.thinkingOptions ?? []).filter(option => !effective?.thinkingOptionIds || effective.thinkingOptionIds.includes(option.id));
   const effortText = pick.thinking ? effortLabel(t, pick.thinking, catalog?.thinkingOptions.find(option => option.id === pick.thinking)?.label ?? pick.thinking) : undefined;
+  const defaultModel = catalog?.defaultModel?.label;
+  const defaultEffort = efforts.find(option => option.id === catalog?.defaultThinkingOptionId);
+  const defaultEffortText = defaultEffort && effortLabel(t, defaultEffort.id, defaultEffort.label);
+  const withDefault = (value?: string) => value ? `${t('pickDefault')} · ${value}` : t('pickDefault');
   const choose = (next: NonNullable<Picks[Target]>) => { onChange(next); close(); };
   return <div ref={root} className="hp-anchor">
     <button type="button" className="hp-chip" aria-label={t('pickModel', { harness: name })} aria-haspopup="menu" aria-expanded={open}
@@ -420,8 +426,8 @@ function DelegatePick({ harness, pick, load, disabled, onChange, t }: { harness:
     </button>
     {open && <div className="hp-menu hp-menu-left" role="menu" aria-label={t('pickModel', { harness: name })} aria-busy={!catalog}>
       {pane === 'root' && <>
-        <Cell label={t('menuModel')} value={modelLabel} onClick={() => setPane('model')} />
-        {(!catalog || efforts.length > 0) && <Cell label={t('menuEffort')} value={effortText ?? t('pickLast')} onClick={() => setPane('effort')} />}
+        <Cell label={t('menuModel')} value={pick.model ? modelLabel : withDefault(defaultModel)} onClick={() => setPane('model')} />
+        {(!catalog || efforts.length > 0) && <Cell label={t('menuEffort')} value={effortText ?? withDefault(defaultEffortText)} onClick={() => setPane('effort')} />}
       </>}
       {pane !== 'root' && <>
         <button type="button" role="menuitem" className="hp-cell" onClick={() => setPane('root')}><span className="hp-cell-back"><Back /></span><span className="hp-cell-label">{t(pane === 'model' ? 'menuModel' : 'menuEffort')}</span></button>
@@ -430,13 +436,13 @@ function DelegatePick({ harness, pick, load, disabled, onChange, t }: { harness:
         {catalog?.error && <div className="hp-error"><span>{catalog.error}</span><button type="button" className="hp-retry" onClick={() => setCatalog(undefined)}>{t('retry')}</button></div>}
       </>}
       {pane === 'model' && catalog && !catalog.error && <>
-        <Option label={t('pickLast')} selected={!pick.model} onClick={() => choose({ ...pick, model: undefined })} />
+        <Option label={t('pickDefault')} hint={defaultModel} selected={!pick.model} onClick={() => choose({ ...pick, model: undefined })} />
         {catalog.models.map(entry => <Option key={entry.id} label={entry.label} hint={entry.resolved && entry.resolved !== entry.label ? entry.resolved : undefined} selected={entry.id === pick.model}
           // A thinking level the newly picked model lacks is dropped rather than sent and rejected.
           onClick={() => choose({ model: entry.id, thinking: pick.thinking && (!entry.thinkingOptionIds || entry.thinkingOptionIds.includes(pick.thinking)) ? pick.thinking : undefined })} />)}
       </>}
       {pane === 'effort' && catalog && !catalog.error && <>
-        <Option label={t('pickLast')} selected={!pick.thinking} onClick={() => choose({ ...pick, thinking: undefined })} />
+        <Option label={t('pickDefault')} hint={defaultEffortText} selected={!pick.thinking} onClick={() => choose({ ...pick, thinking: undefined })} />
         {efforts.map(option => <Option key={option.id} label={effortLabel(t, option.id, option.label)} selected={option.id === pick.thinking} onClick={() => choose({ ...pick, thinking: option.id })} />)}
       </>}
     </div>}

@@ -888,12 +888,18 @@ export class HarnessService extends TypertRemoteService {
     const inspection = await this.inspection(binding);
     if ('error' in inspection) return { ...empty, error: inspection.error };
     const { catalog } = inspection;
-    const fallback = catalog.defaultModel && catalog.models.find(model => model.ref.id === catalog.defaultModel!.id);
+    // A delegation target's default is what a delegation without a pick starts with: the Harness's last pick while the catalog still offers it (as in `bind`).
+    const remembered = harness ? (await this.bindings.readDefaults())[harness] : undefined;
+    const last = remembered?.model && catalog.models.find(model => model.ref.id === remembered.model!.id);
+    const defaultId = last ? last.ref.id : catalog.defaultModel?.id;
+    const fallback = defaultId !== undefined ? catalog.models.find(model => model.ref.id === defaultId) : undefined;
+    const allowed = fallback?.supportedThinkingOptionIds ?? catalog.thinkingOptions.map(option => option.id);
+    const lastThinking = remembered?.thinking && catalog.thinkingOptions.some(option => option.id === remembered.thinking) && allowed.includes(remembered.thinking) ? remembered.thinking : undefined;
     return {
       models: catalog.models.map(model => ({ id: model.ref.id, label: model.label, resolved: model.resolvedModelLabel ?? null, thinkingOptionIds: model.supportedThinkingOptionIds ?? null })),
-      defaultModel: catalog.defaultModel ? { id: catalog.defaultModel.id, label: fallback?.label ?? catalog.defaultModel.id, resolved: fallback?.resolvedModelLabel ?? null } : null,
+      defaultModel: defaultId !== undefined ? { id: defaultId, label: fallback?.label ?? defaultId, resolved: fallback?.resolvedModelLabel ?? null } : null,
       thinkingOptions: catalog.thinkingOptions.map(option => ({ id: option.id, label: option.label })),
-      defaultThinkingOptionId: catalog.defaultThinkingOptionId ?? null,
+      defaultThinkingOptionId: lastThinking ?? catalog.defaultThinkingOptionId ?? null,
       permissionModes: (inspection.permissionModes?.modes ?? []).map(mode => ({ id: mode.id, label: mode.label, dangerous: mode.dangerous === true })),
       defaultPermissionModeId: inspection.permissionModes?.defaultModeId ?? null,
       configOptions: (catalog.configOptions ?? []).map(option => ({ id: option.id, label: option.label, description: option.description ?? null,

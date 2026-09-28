@@ -137,5 +137,15 @@ test('delegation and discussion start sessions on a validated model and thinking
   h.discussions.set('source',{requestId:'discussion-chars',content:[{type:'text',text:'Answer at length'}]});
   const long=await h.discuss('source',{assignments:[{harness:'codex',task:'Long answer'}]});
   assert.equal(long.participants[0].text,'x'.repeat(1000));
+
+  // The dock's "default" is what a delegation without a pick starts with: the last pick while still offered, else the Harness default.
+  await h.bindings.writeDefaults({codex:{model:{id:'fast'},thinking:'low'},'claude-code':{model:{id:'fast'},thinking:'high'}});
+  let dock=await h.models({sessionId:'source',harness:'codex'});
+  assert.deepEqual([dock.defaultModel?.id,dock.defaultModel?.label,dock.defaultThinkingOptionId],['fast','Fast','low']);
+  dock=await h.models({sessionId:'source',harness:'claude-code'});
+  assert.deepEqual([dock.defaultModel?.id,dock.defaultThinkingOptionId],['fast',null],'a remembered level the default model lacks is not shown');
+  await h.bindings.writeDefaults({codex:{model:{id:'gone'}}});
+  dock=await h.models({sessionId:'source',harness:'codex'});
+  assert.equal(dock.defaultModel?.id,'deep','a remembered model the catalog no longer offers falls back to the Harness default');
  } finally { await ctx.fiber.dispose();await rm(root,{recursive:true,force:true}); }
 });

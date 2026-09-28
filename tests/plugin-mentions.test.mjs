@@ -207,14 +207,14 @@ test('the delegation dock offers a model and effort pick per selected Codex / Cl
  await module.exports.apply({remote:{harness:{},async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
   inject(keys,apply){if(keys.length===1&&keys[0]==='slots')apply({slots,effect(fn){fn();}});}});
  const React=require('react'),{renderToStaticMarkup}=require('react-dom/server'),Dock=components.get('conversation.input.dock');
- const t=(key,params)=>({pickLast:'沿用上次',native:'DSH 原生',pickModel:`${params?.harness} 的模型与推理强度`})[key]??key;
+ const t=(key,params)=>({pickDefault:'默认',native:'DSH 原生',pickModel:`${params?.harness} 的模型与推理强度`})[key]??key;
  const sent=[],read=[];
  const remote={models:async request=>{read.push(request);return {ok:true,value:{}};},delegateFromUser:async request=>{sent.push(request);return {ok:true,value:{sessionId:'child',harness:'codex',accepted:true}};}};
  const claim=module.exports.delegationClaim(remote,{sessionId:'draft'},t);
  module.exports.setTaskMode('draft',claim);
  const render=()=>renderToStaticMarkup(React.createElement(Dock,{sessionId:'draft',inputActions:{setDraft(){}},t,input:{phase:'claimed',claim:{name:'delegate',token:'/delegate '},draft:'/delegate task',attachmentIds:[],draftRev:1,occurrences:[],queue:[]}}));
  let html=render();
- assert.match(html,/aria-label="Codex 的模型与推理强度"/);assert.match(html,/Codex · 沿用上次/);
+ assert.match(html,/aria-label="Codex 的模型与推理强度"/);assert.match(html,/Codex · 默认/);
  assert.doesNotMatch(html,/Claude Code · /,'only selected targets get a pick');
  assert.equal(read.length,0,'the catalog is read on first open, not on entering delegation mode');
  const options=module.exports.delegationOptions;
