@@ -14,7 +14,7 @@
 - 使用 Harness 原生的模型、推理强度和权限配置。
 - 流式显示回复、Claude Code 思考、命令、文件操作、网页访问、计划、提问和审批；Codex 的 reasoning summary 不展示。
 - 支持图片输入、工具图片输出和本地文件附件。
-- 显示上下文用量、账户额度（原生会话切换模型厂商后立即刷新；Codex / Claude Code 额度对话一轮后同步，旧值先行展示）、输出速度、token 和缓存命中。
+- 显示上下文用量、账户额度（原生会话切换模型厂商后立即刷新；Codex / Claude Code 额度对话一轮后同步，旧值先行展示）、输出速度、token 和缓存命中。Claude Code 的模型窗口由原生适配器读取，首次使用时可能短暂显示估计值。
 - 支持停止、运行中追加消息、分支、回滚和异常恢复；分支在发送第一条消息前可切换到其他 Harness。
 - 可手动将独立任务委派到新的 DSH 原生、Codex 或 Claude Code 会话。
 - 可手动开启讨论模式，由主 Agent 按任务并发性分配一个或多个会话并汇总结论。
@@ -23,7 +23,7 @@
 ## 前置条件
 
 - Node.js 22 或更高版本。
-- 使用 DSH 0.1.7-rc.2 的 Web Profile，或 DSH 0.2.0-rc.1 桌面版。本插件按这些版本的消息来源、工具结果、预设注册表和实时配置接口构建与验证。
+- 使用 DSH 0.1.7-rc.2 的 Web Profile，或 DSH 0.2.0-rc.1 / 0.2.0-rc.2 桌面版。本插件按这些版本的消息来源、工具结果、预设注册表和实时配置接口构建与验证。
 - 已安装并完成登录或环境配置的 [Codex CLI](https://developers.openai.com/codex/cli/) 或 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)。
 
 ## 安装
@@ -192,7 +192,7 @@ npm run check
 
 `npm run dev:link` 会链接参考仓库中的 `@deepseek-ai/*` 包，每次运行 `npm install` 后都需要重新执行。`npm run check` 依次执行类型检查、构建和全部测试。
 
-在 DSH `0.1.7-rc.2` 参考构建上运行 `npm run check`；并使用 DSH `0.2.0-rc.1` 桌面版发行包验证类型检查、构建和发行版测试。覆盖工具结果、通知来源、实时额度配置、并行调用日志、取消与会话冷恢复。
+在 DSH `0.1.7-rc.2` 参考构建上运行 `npm run check`；DSH `0.2.0-rc.1` 桌面版发行包还验证了类型检查、构建和发行版测试，覆盖工具结果、通知来源、实时额度配置、并行调用日志、取消与会话冷恢复。DSH `0.2.0-rc.2` 桌面版已验证安装、冷启动和插件加载。
 
 其他验证命令：
 
