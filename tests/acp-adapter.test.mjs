@@ -669,6 +669,9 @@ test('replayed history keeps tool states and output, and only a turn that ends o
     { input: 'failed tool', userId: 'h4', replyId: 'r4', reply: 'the command failed', updates: [bash('t4', 'failed')] },
     { input: 'limit', userId: 'h5', replyId: 'r5', reply: 'partial', updates: [{ sessionUpdate: 'session_info_update', _meta: { jetbrains: { air: { version: 1, sessionFailure: { id: 'l', revision: 1, category: 'limit', severity: 'error', title: 'Usage limit reached', actions: [] } } } } }] },
     { input: 'silent', userId: 'h6' },
+    // Claude Code records a stop as a user message of its own after the partial reply.
+    { input: 'stopped', userId: 'h7', replyId: 'r7', reply: 'half an answer' },
+    { input: '[Request interrupted by user]', userId: 'h8' },
   ]));
   const ref = { harnessId: 'codex', nativeSessionId: 'native-session', formatVersion: 1 };
   const snapshotWith = async turnOutcomes => {
@@ -685,6 +688,7 @@ test('replayed history keeps tool states and output, and only a turn that ends o
       ['failed tool', 'succeeded', null],
       ['limit', 'failed', 'Usage limit reached'],
       ['silent', 'unknown', '原生记录没有该轮的回复'],
+      ['stopped', 'cancelled', '原生记录显示该轮已被用户中断'],
     ]);
     assert.deepEqual(turns[0].items[0], { item: { type: 'commandExecution', itemId: 't1', command: 'npm test', description: 'Run tests', output: 'ok 12', outputTruncated: false }, outcome: { status: 'succeeded' } });
     assert.equal(turns[2].items[0].item.output, 'exit 1');

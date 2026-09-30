@@ -308,7 +308,11 @@ interface TranscriptTurn {
   tools?: Map<string, { call: acp.ToolCallUpdate; snapshot: HostItemSnapshot }>; openTools?: Set<string>;
   /** A failure the agent restored into history (Claude Code's usage-limit notice). */
   failure?: string;
+  /** The agent recorded that the user stopped this turn. */
+  interrupted?: boolean;
 }
+/** Claude Code records a stopped turn as a user message of its own right after it (the Agent SDK matches it the same way). */
+const INTERRUPTION_MARKER = /^\[Request interrupted by user[^\]]*\]$/;
 class Transcript {
   readonly turns: TranscriptTurn[] = [];
   constructor(private readonly outputLimit: () => number = () => DEFAULT_LIMITS.toolOutputChars) {}
@@ -330,6 +334,7 @@ class Transcript {
     if (update.sessionUpdate === 'user_message_chunk') {
       const chunk = update.content.type === 'text' ? update.content.text : '';
       if (last && update.messageId && last.userMessageId === update.messageId) { last.input += chunk; last.hash = turnHash(last.input); return; }
+      if (last && INTERRUPTION_MARKER.test(chunk.trim())) { last.interrupted = true; return; }
       this.begin(chunk, update.messageId ?? undefined);
       return;
     }
@@ -373,11 +378,12 @@ class Transcript {
   }
 }
 /**
- * ACP history carries no turn end state, so it is inferred conservatively: only a turn that ends on the agent's own
+ * ACP history carries no turn end state, so it is inferred conservatively: a stop the agent recorded cancels the turn, and only a turn that ends on the agent's own
  * message after every tool finished counts as done. Anything else stays unknown for the user to judge.
  */
 function inferredOutcome(turn: TranscriptTurn): HostTurnSnapshot['outcome'] {
   if (turn.failure) return { status: 'failed', error: error('nativeFailure', turn.failure) };
+  if (turn.interrupted) return { status: 'cancelled', reason: '原生记录显示该轮已被用户中断' };
   if (!turn.hasOutput) return { status: 'unknown', reason: '原生记录没有该轮的回复' };
   if (turn.openTools?.size) return { status: 'unknown', reason: '原生记录中该轮有未完成的工具调用' };
   if (turn.items.at(-1)?.item.type !== 'agentMessage') return { status: 'unknown', reason: '原生记录中该轮停在工具调用，没有收尾回复' };
