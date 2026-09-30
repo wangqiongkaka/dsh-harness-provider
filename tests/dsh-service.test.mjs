@@ -233,3 +233,40 @@ test('a finished turn re-probes the harness account in the background while quot
   assert.equal(accounts,2);
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });
+
+test('remote pages read and write only the plugin settings namespace through the Harness RPC',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-settings-'));
+ const ctx=new Context();
+ class NativeCommands extends Service {
+  constructor(ctx){super(ctx,'sessionController');}
+  async resolveAgent(){return {};} async prompt(){} async fork(){} async selectModel(){} updateQueue(){}
+ }
+ let revision=3,present=true;const describes=[],mutations=[];
+ const settings={writable:true,describe(options){describes.push(options);return [
+  {ns:'other',value:{secret:'x'},user:{},revision:9,schema:{}},
+  ...present?[{ns:'harness-plugin',value:{idleCloseSeconds:30},base:{idleCloseSeconds:60},user:{idleCloseSeconds:30},revision,schema:{},secrets:[]}]:[]];},
+  async mutate(ns,ops,expected){mutations.push([ns,ops,expected]);if(expected!==revision)throw Object.assign(new Error('internal /path detail'),{code:'SETTINGS_CONFLICT'});revision++;}};
+ const adapter={async inspect(){return {status:'notInstalled',error:{code:'notInstalled',message:'x'}};},async close(){}};
+ try{
+  await ctx.plugin(Typert);await ctx.plugin(NativeCommands);
+  ctx.provide('agents',{get:()=>undefined});ctx.provide('sessions',{});ctx.provide('userQuestions',{});ctx.provide('attachments',{});ctx.provide('fileUploads',{});
+  await ctx.plugin({inject,apply(scope){new HarnessService(scope,root,{codex:adapter,'claude-code':adapter});}});
+  const h=ctx.harness;
+  assert.deepEqual(await h.readSettings({}),null,'no settings service: nothing to show');
+  ctx.provide('settings',settings);
+  assert.deepEqual(await h.readSettings({}),{value:{idleCloseSeconds:30},user:{idleCloseSeconds:30},revision:3,writable:true},'only the projected view of this namespace');
+  assert.ok(describes.every(options=>options?.redactSecrets===true),'remote reads are always redacted');
+  const ops=[{op:'set',path:['delegateReportBack'],value:true},{op:'unset',path:['idleCloseSeconds']}];
+  assert.deepEqual(await h.updateSettings({ops,revision:3}),{value:{idleCloseSeconds:30},user:{idleCloseSeconds:30},revision:4,writable:true});
+  assert.deepEqual(mutations,[['harness-plugin',ops,3]]);
+  assert.equal(await h.updateSettings({ops,revision:3}),null,'a stale revision is refused without the internal error');
+  await assert.rejects(h.updateSettings({ops:[{op:'set',path:['root'],value:'/tmp'}]}),'the state directory is not remotely editable');
+  await assert.rejects(h.updateSettings({ops:[{op:'set',path:['nope'],value:1}]}));
+  await assert.rejects(h.updateSettings({ops:[{op:'set',path:['codexCommand'],value:'/tmp/evil'}]}),'nor the Harness executables');
+  await assert.rejects(h.updateSettings({ops:[{op:'set',path:['acpStderr','deep'],value:true}]}));
+  assert.equal(mutations.length,2,'rejected keys never reach the settings service');
+  present=false;
+  assert.equal(await h.readSettings({}),null,'a namespace the Host does not serve reads as null');
+  assert.equal(await h.updateSettings({ops,revision:4}),null);
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});

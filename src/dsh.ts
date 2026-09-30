@@ -36,7 +36,7 @@ import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT
 import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
-import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest } from './remote.js';
+import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest, SETTINGS_ENTRY, updateSettingsRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest } from './delegation.js';
 import { createWorktree, mergeWorktree, removeWorktree, worktreeChanged } from './worktree.js';
 import { Config, defaultSettings, settingsOf, type SettingsSource } from './settings.js';
@@ -1170,6 +1170,26 @@ export class HarnessService extends TypertRemoteService {
     await this.agent(sessionId);
     this.runner.viewed(sessionId);
     return null;
+  }
+
+  /** This plugin's settings for a remote page, which gets no Host settings form; secrets redacted, other plugins' namespaces never exposed. */
+  async readSettings(raw: unknown) {
+    z.object({}).strict().parse(raw);
+    const settings = this.ctx.get('settings');
+    const entry = settings?.describe({ redactSecrets: true }).find(row => row.ns === SETTINGS_ENTRY);
+    return settings && entry ? { value: entry.value as Record<string, unknown>, user: entry.user, revision: entry.revision, writable: settings.writable } : null;
+  }
+
+  /** Edits from a remote page; null when the Host refuses them (stale revision, invalid value), without the Host's error detail. */
+  async updateSettings(raw: unknown) {
+    const { ops, revision } = updateSettingsRequest.parse(raw);
+    // The state directory and the Harness executables stay off the page, so a remote page cannot point the Host at another program.
+    const bad = ops.find(op => ['root', 'codexCommand', 'claudeCommand'].includes(op.path[0]) || !Object.hasOwn(Config.dict!, op.path[0]));
+    if (bad) throw new RemoteError('gateway/bad-request', `不能修改设置项 ${bad.path[0]}`, {});
+    const settings = this.ctx.get('settings');
+    if (!settings) return null;
+    try { await settings.mutate(SETTINGS_ENTRY, ops as Parameters<typeof settings.mutate>[1], revision); } catch { return null; }
+    return this.readSettings({});
   }
 
   /** DSH's own subagents: the durable descendant tree, each child's log observed read-only (its parent owns the child Agent). */

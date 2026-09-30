@@ -94,6 +94,16 @@ export const secretStatusSchema = z.object({ id: z.string(), title: z.string(), 
   z.object({ id: z.string(), type: z.literal('text'), prompt: z.string(), secret: z.boolean(), multiline: z.boolean(), optional: z.boolean(), placeholder: z.string().optional() }),
   z.object({ id: z.string(), type: z.literal('choice'), prompt: z.string(), multiple: z.boolean(), allowOther: z.boolean(), optional: z.boolean(), options: z.array(z.object({ value: z.string(), label: z.string(), description: z.string().optional() })) }),
 ])) }).nullable();
+/** This plugin's settings for a page without the Host settings form (a remote browser); null when the Host does not serve them. */
+export const settingsViewSchema = z.object({ value: z.record(z.string(), z.unknown()), user: z.unknown(), revision: z.number().int(), writable: z.boolean() }).nullable();
+/** Top-level field edits, fenced by the revision last read; the Host checks the field names against `Config`. */
+export const updateSettingsRequest = z.object({
+  ops: z.array(z.discriminatedUnion('op', [
+    z.object({ op: z.literal('set'), path: z.tuple([z.string().min(1)]), value: z.json() }).strict(),
+    z.object({ op: z.literal('unset'), path: z.tuple([z.string().min(1)]) }).strict(),
+  ])).min(1).max(50),
+  revision: z.number().int().nonnegative().optional(),
+}).strict();
 const codec = (schema: z.ZodType) => ({ mode: 'strict' as const, typeSymbol: 'dsh-harness-provider#Contract', create: () => schema });
 export const descriptors: InvocationDescriptor[] = [
   ['recover', recoveryRequest, recoverySchema], ['rollback', address, stateSchema], ['edit', editRequest, stateSchema],
@@ -105,6 +115,7 @@ export const descriptors: InvocationDescriptor[] = [
   ['delegateFromUser', delegateFromUserRequest, delegationAcceptedSchema],
   ['startDiscussionFromUser', startDiscussionFromUserRequest, discussionAcceptedSchema],
   ['subagents', address, subagentsSchema], ['plugins', address, pluginsSchema], ['viewing', address, z.null()],
+  ['readSettings', z.object({}).strict(), settingsViewSchema], ['updateSettings', updateSettingsRequest, settingsViewSchema],
 ].map(([method, request, result]) => ({
   id: `dsh-harness-provider#harness/${method}`, service: 'harness', namespace: 'harness', method: method as string,
   invocation: { kind: 'direct' },

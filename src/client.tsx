@@ -4,7 +4,8 @@ import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
 import type {} from '@deepseek-ai/dsh-api-remotes/client';
 import type {} from '@deepseek-ai/dsh-api-session-controller/client';
 import type {} from '@deepseek-ai/dsh-client-locale/client';
-import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client';
+import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client';
+import type {} from '@deepseek-ai/dsh-settings/types';
 import type { DraftAttachmentId, SubmitOutcome } from '@deepseek-ai/dsh-client-ui-conversation/client';
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client';
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
@@ -15,7 +16,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-commands/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client';
 import type { Settings } from './settings.js';
-import { contribution, SETTINGS_ENTRY, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema } from './remote.js';
+import { contribution, SETTINGS_ENTRY, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema, type settingsViewSchema, type updateSettingsRequest } from './remote.js';
 import type { z } from 'zod';
 
 type State = z.infer<typeof stateSchema>;
@@ -25,6 +26,7 @@ type Quota = z.infer<typeof quotaSchema>;
 type SecretStatus = z.infer<typeof secretStatusSchema>;
 type Subagents = z.infer<typeof subagentsSchema>;
 type Plugin = z.infer<typeof pluginsSchema>[number];
+type SettingsView = z.infer<typeof settingsViewSchema>;
 type Api = {
   recover(request: {sessionId: string; action: 'check' | 'unlock'}): Promise<RemoteResult<State & {detail: string}>>;
   secretStatus(request: {sessionId: string}): Promise<RemoteResult<SecretStatus>>;
@@ -42,6 +44,8 @@ type Api = {
   viewing(request: {sessionId: string}): Promise<RemoteResult<null>>;
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
   plugins(request: {sessionId: string}): Promise<RemoteResult<Plugin[]>>;
+  readSettings(request: Record<string, never>): Promise<RemoteResult<SettingsView>>;
+  updateSettings(request: z.input<typeof updateSettingsRequest>): Promise<RemoteResult<SettingsView>>;
   edit(request: {sessionId: string; seq: number; text: string; requestId: string}): Promise<RemoteResult<State>>;
   delegateFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; reportBack: boolean; worktree: boolean; picks: Picks; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId?: string; harness: State['harness']; accepted: true}>>;
   startDiscussionFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
@@ -325,6 +329,37 @@ const delegationOptions = new Map<string, DelegationOptions>();
 /** The plugin's live configuration, once the Settings form has a value; delegation and discussion defaults come from it. */
 let settingsForm: ConfigForm<Settings> | undefined;
 const pluginSettings = () => settingsForm?.getSnapshot().value;
+/**
+ * The settings form of a page the Host keeps process-local (a remote browser, `mode: 'memory'`): the same reads and
+ * revision-fenced writes, through this plugin's own RPC. Writes run one at a time, each fenced by the revision the
+ * previous one produced; a refused write re-reads the Host and reports false.
+ */
+function remoteSettingsForm(api: Pick<Api, 'readSettings' | 'updateSettings'>): ConfigForm<Settings> & { load(): Promise<void> } {
+  let snapshot: ConfigFormSnapshot<Settings> = { status: 'loading', value: undefined, base: undefined, user: undefined, revision: undefined, writable: false, mode: 'memory' };
+  const listeners = new Set<() => void>();
+  let tail: Promise<unknown> = Promise.resolve();
+  const publish = (view: SettingsView) => {
+    snapshot = view ? { status: 'ready', value: view.value as Settings, base: undefined, user: view.user, revision: view.revision, writable: view.writable, mode: 'memory' }
+      : { ...snapshot, status: 'unavailable', writable: false };
+    for (const listener of listeners) listener();
+  };
+  const load = async () => publish(await value(api.readSettings({})));
+  const mutate: ConfigForm<Settings>['mutate'] = (ops, expectedRevision) => {
+    const task = tail.then(async () => {
+      const view = await value(api.updateSettings({ ops: ops as z.input<typeof updateSettingsRequest>['ops'], revision: expectedRevision ?? snapshot.revision }));
+      if (view) publish(view); else await load();
+      return !!view;
+    });
+    tail = task.catch(() => {});
+    return task;
+  };
+  return {
+    load, mutate, getSnapshot: () => snapshot,
+    subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    set: (field, next) => mutate([{ op: 'set', path: [field], value: next as never }]),
+    unset: field => mutate([{ op: 'unset', path: [field] }]),
+  };
+}
 const freshOptions = (): DelegationOptions => {
   const settings = pluginSettings();
   const harnesses: State['harness'][] = settings?.delegateHarnesses?.length ? [...settings.delegateHarnesses] : ['codex'];
@@ -1643,12 +1678,37 @@ export async function apply(ctx: Context): Promise<void> {
   // The Settings nav row, after Agent presets; present only while the Host serves this plugin's configuration.
   ctx.inject(['slots', 'configForms'], scope => {
     const t = ctx.locale.bind('harness'), form = scope.configForms.get<Settings>(SETTINGS_ENTRY);
+    if (form.getSnapshot().mode === 'memory') return;
     settingsForm = form;
     scope.effect(() => () => { if (settingsForm === form) settingsForm = undefined; }, 'harness: settings form');
     scope.effect(() => scope.configForms.whileServed([SETTINGS_ENTRY], () => scope.slots.inject('settings.section', () => scope.slots.register({
       name: 'settings.section', id: 'harness', order: 25, label: () => t('settingsNav'), locale: 'harness',
       inject: () => ({ hooks: { harnessSettings: form }, form }),
     }, HarnessSettingsSection))), 'harness: settings page');
+  });
+  // A remote browser (phone through the proxy) gets a process-local Host form that never loads; the same page then
+  // reads and writes this plugin's namespace through the Harness RPC, and the row follows whether the Host serves it.
+  ctx.inject(['slots', 'configForms', 'remote.harness'], scope => {
+    if (scope.configForms.get<Settings>(SETTINGS_ENTRY).getSnapshot().mode !== 'memory') return;
+    const t = ctx.locale.bind('harness'), form = remoteSettingsForm(scope.remote.harness);
+    const reload = () => { void form.load().catch(() => {}); };
+    settingsForm = form;
+    scope.effect(() => () => { if (settingsForm === form) settingsForm = undefined; }, 'harness: remote settings form');
+    scope.effect(() => {
+      let off: (() => void) | undefined;
+      const sync = () => {
+        const ready = form.getSnapshot().status === 'ready';
+        if (ready && !off) off = scope.slots.inject('settings.section', () => scope.slots.register({
+          name: 'settings.section', id: 'harness', order: 25, label: () => t('settingsNav'), locale: 'harness',
+          inject: () => ({ hooks: { harnessSettings: form }, form }),
+        }, HarnessSettingsSection));
+        else if (!ready && off) { off(); off = undefined; }
+      };
+      const disposers = [form.subscribe(sync), scope.remote.$on('settings/document-updated', ns => { if (ns === SETTINGS_ENTRY) reload(); }),
+        scope.on('connection/reset', reload)];
+      reload();
+      return () => { for (const dispose of disposers) dispose(); off?.(); };
+    }, 'harness: remote settings page');
   });
   ctx.inject(['slots'], scope => {
     scope.effect(() => scope.slots.inject('conversation.input.dock', () => scope.slots.register({
