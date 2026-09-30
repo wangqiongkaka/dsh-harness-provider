@@ -166,7 +166,9 @@ const capabilitiesOf = (agent: acp.AgentCapabilities | undefined, catalogs: Cata
 
 // ── Elicitation forms → Host questions ──────────────────────────────────────────────────────────────────────────────
 
-const CUSTOM_ANSWER = '_askUserQuestionCustomAnswer';
+// Claude ACP follows each AskUserQuestion field `question_<n>` with its free-text "Other" box `question_<n>_custom`
+// and marks the pair only for JetBrains AIR clients (claude-agent-acp dist/elicitation.js), so the key names it.
+const CUSTOM_ANSWER = /^(question_\d+)_custom$/;
 interface FormField { id: string; kind: 'string' | 'number' | 'integer' | 'boolean' | 'array'; customFor?: string }
 interface Form { questions: HostQuestion[]; fields: FormField[] }
 /** Primitive object fields the DSH question UI can represent; null when the form needs something else. */
@@ -177,8 +179,8 @@ export function formOf(schema: acp.ElicitationSchema): Form | null {
   for (const [id, raw] of Object.entries(schema.properties ?? {})) {
     const property = raw as Record<string, unknown> & { type: string };
     const meta = record(property._meta);
-    const custom = record(meta[CUSTOM_ANSWER]);
-    if (custom.isCustomAnswer === true && typeof custom.questionId === 'string') { fields.push({ id, kind: 'string', customFor: custom.questionId }); continue; }
+    const customFor = CUSTOM_ANSWER.exec(id)?.[1];
+    if (customFor && property.type === 'string' && schema.properties?.[customFor]) { fields.push({ id, kind: 'string', customFor }); continue; }
     const prompt = text(property.title, 200) ?? text(property.description, 200) ?? id;
     const enumOptions = (value: unknown) => Array.isArray(value) && value.every(entry => record(entry).const !== undefined && typeof record(entry).title === 'string')
       ? value.map(entry => ({ value: String(record(entry).const), label: record(entry).title as string, ...(text(record(entry).description) ? { description: text(record(entry).description)! } : {}) })) : null;

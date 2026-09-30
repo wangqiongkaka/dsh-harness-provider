@@ -93,7 +93,7 @@ const app = agent({ name: 'peer' })
         features: { type: 'array', title: 'Features', items: { anyOf: [{ const: 'logs', title: 'Logs' }, { const: 'metrics', title: 'Metrics' }] } },
         token: { type: 'string', title: 'Token', _meta: { codex: { isSecret: true } } },
         question_0: { type: 'string', title: 'Pick', oneOf: [{ const: 'A', title: 'A' }, { const: 'B', title: 'B' }] },
-        question_0_custom: { type: 'string', title: 'Other', _meta: { _askUserQuestionCustomAnswer: { questionId: 'question_0', isCustomAnswer: true } } },
+        question_0_custom: { type: 'string', title: 'Other', description: 'Type your own answer, or add a note to the option you chose above (optional).' },
       } } });
       note({ form: answer });
       await reply('form:' + answer.action); return end();
