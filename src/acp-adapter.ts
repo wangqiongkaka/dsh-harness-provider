@@ -65,7 +65,7 @@ export interface AcpLimits { requestTimeoutMs: number; loadTimeoutMs: number; to
 const clientCapabilities = (profile: AcpProfile): acp.ClientCapabilities => ({
   session: { compaction: {}, configOptions: { boolean: {} } }, elicitation: { form: {}, url: {} }, plan: {},
   // `subagent-transcript`: Claude Code forwards a tagged subagent's text and reasoning too, not only its tool calls.
-  _meta: { steering: { supported: true }, 'subagent-transcript': true,
+  _meta: { steering: { supported: true }, 'subagent-transcript': true, terminal_output_delta: true,
     // `asyncTasks`: both agents then announce backgrounded shells, which outlive the turn and die with the process.
     jetbrains: { air: { version: 1, capabilities: ['sessionFailure', 'recommendedValue', 'asyncTasks', ...(profile.nativeSubagents ? ['nativeSubagentSessions'] : [])] } } },
 });
@@ -152,7 +152,7 @@ export function catalogsOf(opened: Opened): Catalogs {
         currentValue: option.currentValue, ...(isSelect(option) ? { choices: selectOptions(option).map(entry => ({ value: entry.value, label: entry.name,
           ...(text(entry.description, 256) ? { description: text(entry.description, 256)! } : {}) })) } : {}) })) },
     ...(modes ? { permissionModes: { modes: modes.availableModes.map(mode => ({ id: harnessPermissionModeIdSchema.parse(mode.id), label: mode.name,
-      ...(text(mode.description) ? { description: text(mode.description)! } : {}), ...(record(mode._meta).kind === 'full_access' ? { dangerous: true } : {}) })),
+      ...(text(mode.description) ? { description: text(mode.description)! } : {}), ...((record(record(record(mode._meta).jetbrains).air).kind ?? record(mode._meta).kind) === 'full_access' ? { dangerous: true } : {}) })),
       defaultModeId: harnessPermissionModeIdSchema.parse(modes.currentModeId) } } : {}),
     ...(model ? { modelConfigId: model.id, currentModel: model.currentValue } : {}),
     ...(thinking ? { thinkingConfigId: thinking.id, currentThinking: thinking.currentValue } : {}),
@@ -349,6 +349,7 @@ class Transcript {
     } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
       const tools = last.tools ??= new Map(), open = last.openTools ??= new Set();
       const entry = tools.get(update.toolCallId);
+      update = terminalUpdate(update, entry ? replayedOutput(entry.call) : '', this.outputLimit());
       const call = { ...entry?.call, ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined && value !== null)) } as acp.ToolCallUpdate;
       if (call.name === 'AskUserQuestion') return;
       let item = toolItem(call);
@@ -397,6 +398,14 @@ function replayedOutput(call: acp.ToolCallUpdate): string {
   if (Array.isArray(raw)) return raw.flatMap(part => record(part).type === 'text' && typeof record(part).text === 'string' ? [record(part).text as string] : []).join('\n');
   return (call.content ?? []).flatMap(part => part.type === 'content' && part.content.type === 'text' ? [part.content.text] : []).join('');
 }
+/** Codex 2 AIR terminal chunks append; its final event carries the exit code instead of rawOutput. */
+function terminalUpdate<T extends acp.ToolCallUpdate>(call: T, previousOutput: string, limit: number): T {
+  const meta = record(call._meta), delta = record(meta.terminal_output_delta).data;
+  const exitCode = record(meta.terminal_exit).exit_code;
+  if (typeof delta !== 'string' && typeof exitCode !== 'number') return call;
+  return { ...call, rawOutput: { ...record(call.rawOutput), output: (previousOutput + (typeof delta === 'string' ? delta : '')).slice(0, limit + 1),
+    ...(typeof exitCode === 'number' ? { exitCode } : {}) } };
+}
 const commandOf = (raw: unknown): string | undefined => {
   const value = record(raw).command;
   return typeof value === 'string' && value.trim() ? value : Array.isArray(value) && value.every(part => typeof part === 'string') && value.length ? value.join(' ') : undefined;
@@ -409,6 +418,7 @@ function toolItem(call: acp.ToolCall | acp.ToolCallUpdate): HostItemOf<'commandE
   // Claude Code's Bash carries the user-facing purpose in `description`; the activity card shows it ahead of the command.
   const description = text(record(call.rawInput).description, 200) ?? (title && title !== command ? title : undefined);
   if (command) return { type: 'commandExecution', itemId: hostItemIdSchema.parse(call.toolCallId), command,
+    ...(typeof record(call.rawOutput).exitCode === 'number' ? { exitCode: record(call.rawOutput).exitCode as number } : {}),
     ...(description ? { description } : {}), ...(text(record(call.rawInput).cwd, 1000) ? { cwd: text(record(call.rawInput).cwd, 1000)! } : {}) };
   const native = dshTool(call);
   return { type: 'toolExecution', itemId: hostItemIdSchema.parse(call.toolCallId), toolName: native?.toolName ?? text(call.name, 120) ?? title ?? call.kind ?? 'tool',
@@ -505,6 +515,7 @@ class Subagents {
       this.#push(agent, { kind, text: update.content.text });
     } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
       const key = `${id}\0${update.toolCallId}`, known = this.#tools.get(key);
+      update = terminalUpdate(update, known ? replayedOutput(known.call) : '', SUBAGENT_OUTPUT_LIMIT);
       const call = { ...known?.call, ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined && value !== null)) } as acp.ToolCallUpdate;
       const status = call.status === 'completed' || call.status === 'failed' ? call.status : 'running';
       const fields = { title: text(record(call.rawInput).description, 200) ?? text(call.title, 200) ?? commandOf(call.rawInput)?.slice(0, 200) ?? text(call.name, 120) ?? 'tool',
@@ -924,9 +935,11 @@ class AcpSession implements HarnessSession {
         return;
       }
       case 'tool_call': case 'tool_call_update': {
+        const toolCallId = update.toolCallId;
         this.#completeMessage(active, { status: 'succeeded' });
         this.#completeThought(active, { status: 'succeeded' });
         let item = active.tools.get(update.toolCallId);
+        update = terminalUpdate(update, item?.type === 'commandExecution' ? item.output ?? '' : item?.output?.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('') ?? '', limitsOf(this.#profile).toolOutputChars);
         if (!item) {
           // Agents announce a call before its input has streamed (Claude Code's Bash); the card waits for the input or a terminal status.
           const merged = { ...active.announced.get(update.toolCallId), ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined && value !== null)) } as acp.ToolCallUpdate;
@@ -939,7 +952,7 @@ class AcpSession implements HarnessSession {
           if (ended && merged.kind === 'edit' && edits.length && !dshTool(merged)) {
             active.announced.delete(update.toolCallId);
             const outcome: HostItemOutcome = update.status === 'completed' ? { status: 'succeeded' } : { status: 'failed', error: error('nativeFailure', 'File edit failed') };
-            edits.forEach((diff, index) => this.#emitDone(active, diffTool(`${update.toolCallId}#${index}`, diff), outcome));
+            edits.forEach((diff, index) => this.#emitDone(active, diffTool(`${toolCallId}#${index}`, diff), outcome));
             return;
           }
           // Claude streams Bash input one field at a time; wait for its required description before creating the DSH row.
@@ -957,12 +970,12 @@ class AcpSession implements HarnessSession {
         const describing = hasInput(update.rawInput) && !terminal;
         const rawOutput = typeof update.rawOutput === 'string' ? update.rawOutput : typeof record(update.rawOutput).output === 'string' ? record(update.rawOutput).output as string : typeof record(update.rawOutput).aggregatedOutput === 'string' ? record(update.rawOutput).aggregatedOutput as string : undefined;
         const outputText = describing ? '' : item.type === 'commandExecution' && terminal && rawOutput !== undefined ? rawOutput
-          : (update.content ?? []).flatMap(part => part.type === 'content' && part.content.type === 'text' ? [part.content.text] : []).join('');
+          : (update.content ?? []).flatMap(part => part.type === 'content' && part.content.type === 'text' ? [part.content.text] : []).join('') || rawOutput || '';
         const images = describing ? [] : (update.content ?? []).flatMap(part => part.type === 'content' && part.content.type === 'image' ? [{ type: 'image' as const, mimeType: part.content.mimeType, base64Data: part.content.data }] : []);
         const diffs = (update.content ?? []).flatMap(part => part.type === 'diff' ? [part] : []);
         if (outputText || images.length) {
           const { text: output, truncated } = truncate(outputText, limitsOf(this.#profile).toolOutputChars);
-          if (item.type === 'commandExecution') { item = { ...item, output, outputTruncated: truncated }; }
+          if (item.type === 'commandExecution') { item = { ...item, output, outputTruncated: truncated || item.outputTruncated === true }; }
           else item = { ...item, output: { content: [...(output ? [{ type: 'text' as const, text: output }] : []), ...images], ...(truncated ? { truncated } : {}) } };
           active.tools.set(update.toolCallId, item);
         }
@@ -975,7 +988,7 @@ class AcpSession implements HarnessSession {
           this.#emit({ type: 'item.completed', turnId, snapshot });
           // Claude Code's Edit/Write row already shows its change; any other call's diffs become edit rows of their own.
           if (item.type !== 'toolExecution' || (item.toolName !== 'edit' && item.toolName !== 'write')) {
-            diffs.forEach((diff, index) => this.#emitDone(active, diffTool(`${update.toolCallId}#${index}`, diff), outcome));
+            diffs.forEach((diff, index) => this.#emitDone(active, diffTool(`${toolCallId}#${index}`, diff), outcome));
           }
         }
         return;

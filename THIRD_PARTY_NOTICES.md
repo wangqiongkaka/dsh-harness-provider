@@ -2,7 +2,7 @@
 
 The plugin bundles Zod 4.4.3 (MIT), the Agent Client Protocol TypeScript SDK
 `@agentclientprotocol/sdk` 1.4.0 (Apache-2.0), the ACP agent adapters
-`@agentclientprotocol/codex-acp` 1.12.0 (Apache-2.0) and
+`@agentclientprotocol/codex-acp` 2.0.1 (Apache-2.0) and
 `@agentclientprotocol/claude-agent-acp` 0.78.0 (Apache-2.0), and the Anthropic Claude
 Agent SDK 0.3.270 (used by claude-agent-acp and by the plugin's account-quota probe). The
 Claude Agent SDK is governed by Anthropic's own terms, not this project's MIT license. The

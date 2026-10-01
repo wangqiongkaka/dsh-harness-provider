@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { discussionSandbox } from '../scripts/discussion-sandbox.mjs';
+import { catalogsOf } from '../dist/acp-adapter.js';
 import { Context } from '@deepseek-ai/cordis';
 import Agents from '@deepseek-ai/dsh-agent';
 import Loop from '@deepseek-ai/dsh-agent-loop';
@@ -47,14 +48,20 @@ test('Claude discussion restricts tools and disables inherited execution hooks o
  assert.equal(profile.sessionMeta('create').claudeCode,undefined);
 });
 
-test('bundled Codex uses a real read-only sandbox; unpatched upstream remains writable', async () => {
+test('Codex upstream read-only is restored; discussion locks every mode and inherited capability', async () => {
  const source=await readFile('node_modules/@agentclientprotocol/codex-acp/dist/index.js','utf8');
  const patched=discussionSandbox(source);
  const mode=(code,discussion)=>{
   const start=code.indexOf('var AgentMode = class '),end=code.indexOf('  static ReadOnly',start);
   return JSON.parse(runInNewContext(`${code.slice(start,end)} }; JSON.stringify(new AgentMode('read-only','','','','on-request','user',{type:'workspaceWrite'},'workspace-write'));`,{process:{env:{DSH_DISCUSSION_READ_ONLY:discussion?'1':undefined}}}));
  };
- assert.equal(mode(source,true).sandboxPolicy.type,'workspaceWrite','old behavior demonstrates the upstream hole');
+ const startMode=source.indexOf('var AgentMode = class '),endMode=source.indexOf('// src/',startMode);
+ const upstream=JSON.parse(runInNewContext(`${source.slice(startMode,endMode)}; JSON.stringify(AgentMode.ReadOnly);`));
+ assert.equal(upstream.sandboxPolicy.type,'readOnly');
+ assert.equal(upstream.sandboxMode,'read-only');
+ const modes=JSON.parse(runInNewContext(`${source.slice(source.indexOf('// src/AirExtension.ts'),source.indexOf('// src/tool-calls/AcpToolCallRenderer.ts'))}\n${source.slice(startMode,endMode)}; JSON.stringify(AgentMode.Agent.toSessionModeState(true));`));
+ assert.equal(catalogsOf({modes}).permissionModes.modes.find(mode=>mode.id==='agent-full-access').dangerous,true);
+ assert.equal(mode(source,true).sandboxPolicy.type,'workspaceWrite','other upstream modes remain writable');
  assert.equal(mode(patched,true).sandboxPolicy.type,'readOnly');
  assert.equal(mode(patched,true).sandboxMode,'read-only');
  assert.equal(mode(patched,false).sandboxPolicy.type,'workspaceWrite');

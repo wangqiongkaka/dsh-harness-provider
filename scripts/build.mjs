@@ -15,6 +15,12 @@ const quietBypassNotice = {
     pluginBuild.onLoad({ filter: /codex-acp[\\/]dist[\\/]index\.js$/ }, async ({ path }) => ({
       contents: discussionSandbox(await readFile(path, 'utf8')), loader: 'js',
     }));
+    // Claude replays marker-only /rename as a user turn although the CLI handled it locally.
+    pluginBuild.onLoad({ filter: /claude-agent-acp[\\/]dist[\\/]acp-agent\.js$/ }, async ({ path }) => {
+      const source = await readFile(path, 'utf8'), seam = 'const REPLAY_HIDDEN_COMMANDS = new Set([\n';
+      if (source.split(seam).length !== 2) throw new Error('claude-agent-acp local command replay seam changed');
+      return { contents: source.replace(seam, seam + '    "/rename",\n'), loader: 'js' };
+    });
     pluginBuild.onLoad({ filter: /claude-agent-sdk[\\/]sdk\.mjs$/ }, async ({ path }) => {
       const source = await readFile(path, 'utf8');
       const notice = /return"canUseTool will not be invoked: permissionMode 'bypassPermissions'[^"]*";/g;

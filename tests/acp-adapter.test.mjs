@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { AcpAdapter, modelRef } from '../dist/acp-adapter.js';
 import { codexPlugins, codexTurnOutcomes } from '../dist/acp-profiles.js';
 import { Context } from '@deepseek-ai/cordis';
@@ -118,6 +119,16 @@ const app = agent({ name: 'peer' })
       } } } } });
       await reply('reply:' + text); return end();
     }
+    if (text === 'codex-v2') {
+      const updates = JSON.parse(readFileSync(process.env.PEER_UPDATES, 'utf8'));
+      for (const entry of updates) await update(entry);
+      await update({ sessionUpdate: 'subagent_spawned', subagentSessionId: 'child-v2', name: 'worker', task: 'Run command', capabilities: {} });
+      for (const entry of updates) await ctx.notify('session/update', { sessionId: 'child-v2', update: entry });
+      await update({ sessionUpdate: 'subagent_state_update', subagentSessionId: 'child-v2', state: 'completed' });
+      await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: 'done' } });
+      entries.push({ input: raw, userId, reply: 'done', replyId, updates }); save(entries);
+      return end();
+    }
     if (text === 'tool') {
       await update({ sessionUpdate: 'agent_thought_chunk', messageId: 'th1', content: { type: 'text', text: 'thinking' } });
       // Claude streams command before the required description; the client must not freeze the incomplete input.
@@ -216,6 +227,71 @@ async function until(iterator, type) {
   while (true) { const next = await iterator.next(); assert.equal(next.done, false); seen.push(next.value); if (next.value.kind === 'event' && next.value.event.type === type) return seen; }
 }
 const events = (seen, type) => seen.filter(entry => entry.kind === 'event' && entry.event.type === type).map(entry => entry.event);
+
+test('bundled Claude hides marker-only rename history and preserves literal prompts, mixed prose and custom skills', async () => {
+  const source = await readFile('dist/claude-agent-acp.mjs', 'utf8');
+  const start = source.indexOf('var LOCAL_ONLY_COMMANDS ='), end = source.indexOf('function isSyntheticLoginMessage', start);
+  assert.ok(start >= 0 && end > start, 'Claude replay parser seam must exist in the shipped bundle');
+  const strip = runInNewContext(source.slice(start, end) + '\nstripLocalCommandMetadata');
+  const rename = '<command-name>/rename</command-name><command-message>rename</command-message><command-args>first</command-args>';
+  assert.equal(strip(rename), null);
+  assert.equal(strip('/rename first'), '/rename first');
+  assert.equal(strip(rename + '用户正文'), '用户正文');
+  assert.equal(strip('<command-name>/my-skill</command-name><command-args>task</command-args>'), '/my-skill task');
+  assert.equal(strip('<local-command-stdout>Renamed</local-command-stdout>'), null);
+  assert.equal(strip([{ type: 'text', text: rename }]), null);
+});
+
+test('Codex 2 tool contract preserves terminal deltas, exit codes, search results and turn keys on replay', { timeout: 20000 }, async () => {
+  const source = await readFile('node_modules/@agentclientprotocol/codex-acp/dist/index.js', 'utf8');
+  const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
+  const upstream = runInNewContext([
+    section('// src/CommandUtils.ts', '// src/tool-calls/reporters/SandboxPermissionReporter.ts'),
+    section('// src/tool-calls/reporters/ToolStatus.ts', '// src/ContextCompactionMeta.ts'),
+    section('// src/tool-calls/ClientCapabilities.ts', '// src/tool-calls/reporters/McpStartupReporter.ts'),
+    '({ CommandReporter, AcpToolCallRenderer, ClientCapabilities })',
+  ].join('\n'));
+  const f = await fixture();
+  const path = join(f.root, 'updates.json');
+  let limit = 64000;
+  const adapter = new AcpAdapter({ profile: { ...f.profile, limits: () => ({ toolOutputChars: limit }) }, environment: { PEER_UPDATES: path } });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const capabilities = (await f.notes()).find(note => note.initialize).initialize;
+    const renderer = new upstream.AcpToolCallRenderer(upstream.ClientCapabilities.from(capabilities));
+    const reporter = new upstream.CommandReporter();
+    const item = { id: 'cmd-v2', command: 'echo hello', cwd: '/tmp', source: 'unifiedExecStartup', commandActions: [], status: 'inProgress' };
+    const updates = [reporter.started(item), reporter.outputDelta(item.id, 'hello'), reporter.outputDelta(item.id, '\n'),
+      reporter.completed({ ...item, status: 'completed', aggregatedOutput: 'hello\n', exitCode: 0 })].map(facts => renderer.render(facts));
+    const search = { ...item, id: 'search-v2', commandActions: [{ type: 'search', query: 'hello', path: 'src' }] };
+    updates.push(renderer.render(reporter.started(search)), renderer.render(reporter.completed({ ...search, status: 'completed', aggregatedOutput: 'src/a.ts\n', exitCode: 0 })));
+    const failed = { ...item, id: 'failed-v2' };
+    updates.push(renderer.render(reporter.started(failed)), renderer.render(reporter.completed({ ...failed, status: 'failed', aggregatedOutput: 'error\n', exitCode: 1 })));
+    await writeFile(path, JSON.stringify(updates));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-v2', input: [{ type: 'text', text: 'codex-v2' }] }));
+    const seen = await until(output, 'turn.completed');
+    const items = events(seen, 'item.completed').map(event => event.snapshot.item);
+    const command = items.find(item => item.itemId === 'cmd-v2');
+    assert.deepEqual([command.output, command.exitCode], ['hello\n', 0]);
+    assert.equal(items.find(item => item.itemId === 'search-v2').output.content[0].text, 'src/a.ts\n');
+    assert.deepEqual(session.subagents()[0].entries.map(entry => entry.output), ['hello', 'src/a.ts', 'error']);
+    assert.deepEqual([items.find(item => item.itemId === 'failed-v2').output, items.find(item => item.itemId === 'failed-v2').exitCode], ['error\n', 1]);
+    assert.equal(events(seen, 'item.completed').find(event => event.snapshot.item.itemId === 'failed-v2').snapshot.outcome.status, 'failed');
+    const turnKey = events(seen, 'turn.completed')[0].nativeTurnRef.nativeTurnKey;
+    limit = 3;
+    value(await session.execute({ type: 'turn.start', turnId: 'host-v2-limit', input: [{ type: 'text', text: 'codex-v2' }] }));
+    const truncated = events(await until(output, 'turn.completed'), 'item.completed').find(event => event.snapshot.item.itemId === 'cmd-v2').snapshot.item;
+    assert.deepEqual([truncated.output, truncated.outputTruncated, truncated.exitCode], ['hel', true, 0]);
+    await session.close();
+    limit = 64000;
+    const resumed = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: session.initialState.nativeRef }));
+    const turn = value(await resumed.readSnapshot()).turns[0];
+    assert.equal(turn.nativeTurnRef.nativeTurnKey, turnKey);
+    assert.deepEqual([turn.items[0].item.output, turn.items[0].item.exitCode], ['hello\n', 0]);
+    await resumed.close();
+  } finally { await adapter.close(); await f.close(); }
+});
 const interaction = async iterator => { while (true) { const next = await iterator.next(); if (next.value.kind === 'interaction') return next.value.interaction; } };
 /** Subagent timestamps come from the clock; the rest of the projection is what these cases pin down. */
 const untimed = list => list.map(({ startedAt, updatedAt, finishedAt, ...agent }) => agent);

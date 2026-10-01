@@ -19,6 +19,7 @@ await writeFile(join(codexHome,'skills','probe-skill','SKILL.md'),'---\nname: pr
 await writeFile(join(workspace,'.claude','skills','claude-probe-skill','SKILL.md'),'---\nname: claude-probe-skill\ndescription: claude probe skill\n---\nCLAUDE_PROBE_SKILL_BODY\n');
 const codexFixture=await startResponsesFixture([{kind:'complete',text:'native-one'},{kind:'complete',text:'native-two'},{kind:'complete',text:'native-three'},{kind:'complete',text:'native-four'},{kind:'complete',text:'native-five'}]);
 const claudeFixture=await startMessagesFixture({kind:'complete',text:'native-claude-reply'});
+const codexProxy=await delayedFixture(codexFixture.baseUrl);
 const proxy=await delayedFixture(claudeFixture.baseUrl);
 await writeFile(join(codexHome,'config.toml'),`model = "fixture-model"
 model_provider = "fixture"
@@ -27,7 +28,7 @@ sandbox_mode = "read-only"
 check_for_update_on_startup = false
 [model_providers.fixture]
 name = "Local fixture"
-base_url = "${codexFixture.baseUrl}"
+base_url = "${codexProxy.baseUrl}"
 env_key = "OPENAI_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
@@ -95,4 +96,4 @@ try{
   await resumed.close();await second.close();
   console.log(`PASS: real ${harness} multi-turn, durable turn keys, new-process resume and prior context sent to the local model fixture`);
  }
-}finally{await Promise.allSettled(adapters.map(a=>a.close()));await proxy.close();await codexFixture.close();await claudeFixture.close();await rm(root,{recursive:true,force:true});}
+}finally{await Promise.allSettled(adapters.map(a=>a.close()));await proxy.close();await codexProxy.close();await codexFixture.close();await claudeFixture.close();await rm(root,{recursive:true,force:true});}

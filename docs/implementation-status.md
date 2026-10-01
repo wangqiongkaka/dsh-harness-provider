@@ -2,6 +2,14 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## Codex ACP 2.0.1（2026-10-01）
+
+- `@agentclientprotocol/codex-acp` 从 1.12.0 升级到 2.0.1，ACP SDK 保持 1.5.1。新版 `node_modules/@agentclientprotocol/codex-acp/dist/index.js` 的 `CommandReporter` / `AcpToolCallRenderer` 将 AIR 终端输出改为 `_meta.terminal_output_delta`，退出码放在 `_meta.terminal_exit`；客户端声明增量能力，实时、历史回放与子代理共用转换逻辑并保留输出上限。非终端搜索结果的 `rawOutput` 同样显示。
+- 新版 `AgentMode.ReadOnly` 已恢复真正只读，且新增 `workspace-write` 预设；讨论仍保留强制只读与禁用继承执行能力的构建补丁。完全访问模式的危险标记读取 `_meta.jetbrains.air.kind`，同时兼容旧字段。文件 diff 未声明 `diffPatch` 能力，继续使用上游提供的 `oldText` / `newText` 格式。
+- 回归用例直接执行已安装新版的事件渲染代码，验证增量输出、失败退出码、截断、子代理输出与恢复后的轮次键；输出与危险标记用例均已在修复前失败。
+- 验证：`npm run check` 通过（120 项测试，含类型检查与构建）；真实 Codex CLI 0.159.2 的目录探测、多轮对话、技能、按轮分支、新进程恢复与轮次键一致性通过，Codex / Claude 的实际只读写入探针均通过。原生模型夹具复用 `delayedFixture` 为 Codex 回复生成唯一消息 ID，避免新版按消息 ID 截止分页时被夹具重复 ID 提前截断。
+- Claude 分支历史差异已一并修复：`node_modules/@agentclientprotocol/claude-agent-acp/dist/acp-agent.js` 的 `REPLAY_HIDDEN_COMMANDS` 漏了本地 `/rename`，导致插件开场命名被恢复成用户轮次。`scripts/build.mjs` 仅为打包产物补齐该列表，并校验替换位置；普通 `/rename` 文本、混合正文、自定义技能仍保留。打包产物的回归测试已在修复前失败；最终 `npm run check` 121 项通过，真实 Codex / Claude 探针的分支、恢复、轮次键、技能与 Claude 运行中插入消息全部通过。
+
 ## 子代理运行态可见性（2026-09-26）
 
 ### 问题
