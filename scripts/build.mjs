@@ -63,6 +63,7 @@ await build({
 await mkdir('dist/licenses', { recursive: true });
 for (const [source, target] of [
   ['node_modules/zod/LICENSE', 'zod.txt'],
+  ['node_modules/@agentclientprotocol/sdk/LICENSE', 'acp-sdk.txt'],
   ['node_modules/@anthropic-ai/claude-agent-sdk/LICENSE.md', 'claude-agent-sdk.md'],
   ['node_modules/@anthropic-ai/claude-agent-sdk/README.md', 'claude-agent-sdk-README.md'],
   ['node_modules/@agentclientprotocol/codex-acp/LICENSE', 'codex-acp.txt'],

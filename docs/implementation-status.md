@@ -2,6 +2,29 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## ACP 2.1.0 同步兼容（2026-10-01）
+
+- Codex ACP 更新至 `2.1.0`；Claude ACP `0.84.0`、ACP SDK `1.5.1`、Claude Agent SDK `0.3.284` 保持当前版本。本次按 npm 发布包的 ACP v1 接口实现，未切换尚未发布的 v2 路由。
+- 文件工具实时与回放共用映射：读取 AIR 的 `content.diff`，支持 Write 的 `path`、`file_text`、`file_content` 别名；保留稀疏更新直到完成，通用多文件补丁恢复为逐文件编辑行。依据：`node_modules/@agentclientprotocol/claude-agent-acp/dist/tool-calls/renderer.js`、`dist/tool-calls/reporters/file-edit.js`。
+- 自定义答案按 AIR 的布尔或对象元数据关联问题，保留旧 Claude 字段名兼容。单选允许一个选项加一段备注；Codex 纯自定义答案写入主字段，Claude 写入备注字段。保密选择及备注通过现有临时保密面板发送，不写入普通问题记录。依据：Claude `dist/elicitation.js` 和 Codex `dist/index.js` 的 `buildUserInputRequest` / `convertUserInputResponse`。
+- 审批读取 `_meta.jetbrains.air.permission`，兼容旧字段并保留长标题；网页工具识别新版 `{ query, action }`；本地图片 `resource_link` 进入已有持久附件通道，拒绝远程链接及普通文件。依据：Claude `dist/permissions/presentation.js`，Codex `dist/index.js` 的 `WebSearchReporter`、`ViewImageReporter`、`ImageGenerationReporter`。
+- 声明 `session.notices`，结构化通知、Claude `informational` 与连接提醒投射为宿主 notice，不当作模型回答或历史完成证据。工具未完成时，通知仍按已有消息顺序等待工具结果。依据：Claude `dist/session-notices.js` / `dist/acp-agent.js`。
+- `config_option_update` 替换完整目录与校验集，同步模型、思考、权限和附加配置；活跃会话菜单直接读取当前目录，委派目标仍读取独立默认目录。打开菜单重新加载，避免旧绑定值覆盖当前值。
+- `_auth/status_update` 更新临时账户状态；身份变化或认证失败使旧额度和目录缓存失效，旧账户在途探测不能写回新缓存。相同身份重复上报继续复用缓存。界面显示上游账户标签，账户信息不保存到绑定；共享轮询按依赖匹配结果，切换账户来源或会话时立即隐藏旧值。依据：两适配器的 `dist/auth-status.js`（Codex 合并在 `dist/index.js`）。
+- 保留 SDK 32 MiB 输入帧限制，超限的具体传输错误使轮次和会话报告故障；边界内的工具输出仍受插件输出上限约束。依据：SDK `dist/stream.js`、`dist/stream-limits.js`。
+- 保留讨论只读、隐藏 `/rename` 回放、SDK 提示屏蔽及子代理线协议兼容；许可证声明更新并打包 SDK 原始许可证。原生 ACP 探针不再固定 Homebrew 路径。
+- 验证：`npm run check` 全部 127 项通过，包含类型检查与构建；9 项相关回归在修改前源码上均失败；旧轮询显示旧额度的浏览器回归也在修正前失败，还原后全部通过。真实 Codex / Claude 原生恢复、轮次键、按轮分支、技能和 Claude 运行中插入通过；两 CLI 的实际工具写入均被只读讨论阻止；浏览器保密面板验证密码及选择备注遮蔽、按会话提交和提交后清除。完整网页探针覆盖两种 Harness 的对话、重启恢复、编辑重跑、回滚、分支和侧栏标识。
+- Review 后修正（同日，`npm run check` 133 项通过；下列各项的新测试均先在修正前的代码上失败）：
+  - 模型、权限菜单：打开时通过已有的重载计数重新读取目录；关闭不再打断选择请求，选择后按钮恢复可用并显示新值。
+  - `config_option_update` 重建目录时保留 `session/new` 的 `models` 扩展，各模型支持的思考强度不再丢失。
+  - 已显示为 `edit` / `write` 的行保留工具输入，不被 Claude PostToolUse hook 的分段 diff 改写（`dist/diff.js` 的 `toolUpdateFromDiffToolResponse` 按 hunk 拆分）；实时与回放一致。只带状态的完成更新保留已有文本，图片不再覆盖文本。
+  - 本地图片读取失败、超限或格式不支持时，在工具结果里写一行说明，不再让整轮失败。
+  - 共享轮询区分“身份依赖”和“刷新依赖”：只有会话、账户来源或账户变化才隐藏旧值，轮次开始和结束只重新读取。
+  - 账户身份按上游 `sameIdentity` 的口径比较（kind，加 `account` 的邮箱或 `api_key` 的来源），同一登录的不同载荷不再清缓存；首次上报不清缓存，除非是未登录。账户状态按 Harness 保存在内存中，会话进程关闭后仍显示。
+  - 适配器在轮次之外发出的通知，等当前步结束后再写入会话记录，不会插在工具调用与结果之间。
+  - 活跃目录与配置当前值使用同一判定：只有同一 Harness 的活跃会话才代表该绑定。
+  - 修正后用重新打包的插件重跑了完整网页探针和保密面板探针，均通过；原生 ACP 探针与讨论只读探针未重跑。
+
 ## Codex ACP 2.0.1（2026-10-01）
 
 - `@agentclientprotocol/codex-acp` 从 1.12.0 升级到 2.0.1，ACP SDK 保持 1.5.1。新版 `node_modules/@agentclientprotocol/codex-acp/dist/index.js` 的 `CommandReporter` / `AcpToolCallRenderer` 将 AIR 终端输出改为 `_meta.terminal_output_delta`，退出码放在 `_meta.terminal_exit`；客户端声明增量能力，实时、历史回放与子代理共用转换逻辑并保留输出上限。非终端搜索结果的 `rawOutput` 同样显示。

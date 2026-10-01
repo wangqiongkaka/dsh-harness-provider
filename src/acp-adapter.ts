@@ -1,3 +1,5 @@
+import { isAbsolute } from 'node:path';
+import { fileURLToPath } from 'node:url';
 /**
  * Agent Client Protocol (ACP v1) sessions behind the Host contract. One adapter per agent program; each session owns
  * one agent process. Codex and Claude Code differ only by the profile in acp-profiles.ts.
@@ -63,7 +65,7 @@ export interface AcpProfile {
 export interface AcpLimits { requestTimeoutMs: number; loadTimeoutMs: number; toolOutputChars: number; stderr: boolean; cancelTimeoutMs: number }
 
 const clientCapabilities = (profile: AcpProfile): acp.ClientCapabilities => ({
-  session: { compaction: {}, configOptions: { boolean: {} } }, elicitation: { form: {}, url: {} }, plan: {},
+  session: { compaction: {}, notices: {}, configOptions: { boolean: {} } }, elicitation: { form: {}, url: {} }, plan: {},
   // `subagent-transcript`: Claude Code forwards a tagged subagent's text and reasoning too, not only its tool calls.
   _meta: { steering: { supported: true }, 'subagent-transcript': true, terminal_output_delta: true,
     // `asyncTasks`: both agents then announce backgrounded shells, which outlive the turn and die with the process.
@@ -132,7 +134,8 @@ export function catalogsOf(opened: Opened): Catalogs {
   const model = options.filter(isSelect).find(option => option.category === 'model');
   const thinking = options.filter(isSelect).find(option => option.category === 'thought_level');
   const auxiliary = options.filter(option => option !== model && option !== thinking && option.category !== 'mode');
-  const modes = opened.modes;
+  const mode = options.filter(isSelect).find(option => option.category === 'mode');
+  const modes = mode ? { currentModeId: mode.currentValue, availableModes: selectOptions(mode).map(option => ({ id: option.value, name: option.name, description: option.description, _meta: option._meta })) } : opened.modes;
   const efforts = new Map<string, Set<string>>();
   for (const entry of record(record(opened as unknown).models).availableModels as unknown[] ?? []) {
     const match = /^(.+)\[([^\]]+)\]$/u.exec(String(record(entry).modelId ?? ''));
@@ -166,10 +169,9 @@ const capabilitiesOf = (agent: acp.AgentCapabilities | undefined, catalogs: Cata
 
 // ── Elicitation forms → Host questions ──────────────────────────────────────────────────────────────────────────────
 
-// Claude ACP follows each AskUserQuestion field `question_<n>` with its free-text "Other" box `question_<n>_custom`
-// and marks the pair only for JetBrains AIR clients (claude-agent-acp dist/elicitation.js), so the key names it.
+// AIR associates companions through metadata; older Claude ACP only names `question_<n>_custom`.
 const CUSTOM_ANSWER = /^(question_\d+)_custom$/;
-interface FormField { id: string; kind: 'string' | 'number' | 'integer' | 'boolean' | 'array'; customFor?: string }
+interface FormField { id: string; kind: 'string' | 'number' | 'integer' | 'boolean' | 'array'; customFor?: string; typedCustom?: boolean; secret?: boolean }
 interface Form { questions: HostQuestion[]; fields: FormField[] }
 /** Primitive object fields the DSH question UI can represent; null when the form needs something else. */
 export function formOf(schema: acp.ElicitationSchema): Form | null {
@@ -179,13 +181,15 @@ export function formOf(schema: acp.ElicitationSchema): Form | null {
   for (const [id, raw] of Object.entries(schema.properties ?? {})) {
     const property = raw as Record<string, unknown> & { type: string };
     const meta = record(property._meta);
-    const customFor = CUSTOM_ANSWER.exec(id)?.[1];
-    if (customFor && property.type === 'string' && schema.properties?.[customFor]) { fields.push({ id, kind: 'string', customFor }); continue; }
+    const custom = record(record(meta.jetbrains).air).customAnswer;
+    const secret = property.writeOnly === true || property.format === 'password' || record(meta.codex).isSecret === true;
+    const customFor = (custom === true ? text(record(meta.codex).questionId) : record(custom).isCustomAnswer === true ? text(record(custom).questionId) : undefined) ?? CUSTOM_ANSWER.exec(id)?.[1];
+    if (customFor && property.type === 'string' && schema.properties?.[customFor]) { fields.push({ id, kind: 'string', customFor, typedCustom: custom === true, secret }); continue; }
     const prompt = text(property.title, 200) ?? text(property.description, 200) ?? id;
     const enumOptions = (value: unknown) => Array.isArray(value) && value.every(entry => record(entry).const !== undefined && typeof record(entry).title === 'string')
       ? value.map(entry => ({ value: String(record(entry).const), label: record(entry).title as string, ...(text(record(entry).description) ? { description: text(record(entry).description)! } : {}) })) : null;
     const plain = (value: unknown) => Array.isArray(value) && value.length && value.every(entry => ['string', 'number'].includes(typeof entry)) ? value.map(entry => ({ value: String(entry), label: String(entry) })) : null;
-    const choice = (options: HostChoiceQuestion['options'], multiple: boolean): HostChoiceQuestion => ({ id, type: 'choice', prompt, options, multiple, allowOther: false, optional: !required.has(id) });
+    const choice = (options: HostChoiceQuestion['options'], multiple: boolean): HostChoiceQuestion => ({ id, type: 'choice', prompt, options, multiple, allowOther: false, optional: !required.has(id), ...(secret ? { secret } : {}) });
     if (property.type === 'array') {
       const items = record(property.items);
       const options = enumOptions(items.anyOf) ?? plain(items.enum);
@@ -196,12 +200,11 @@ export function formOf(schema: acp.ElicitationSchema): Form | null {
     const options = enumOptions(property.oneOf) ?? plain(property.enum) ?? (property.type === 'boolean' ? [{ value: 'true', label: 'Yes' }, { value: 'false', label: 'No' }] : null);
     fields.push({ id, kind: property.type as FormField['kind'] });
     if (options) { questions.push(choice(options, false)); continue; }
-    const secret = property.writeOnly === true || property.format === 'password' || record(meta.codex).isSecret === true;
     questions.push({ id, type: 'text', prompt, multiline: false, secret, optional: !required.has(id),
       ...(text(property.description, 200) && text(property.description, 200) !== prompt ? { placeholder: text(property.description, 200)! } : {}),
       ...(typeof property.default === 'string' && !secret ? { prefill: property.default } : {}) });
   }
-  for (const field of fields) if (field.customFor) { const question = questions.find(entry => entry.id === field.customFor); if (question?.type === 'choice') question.allowOther = true; }
+  for (const field of fields) if (field.customFor) { const question = questions.find(entry => entry.id === field.customFor); if (question?.type === 'choice') { question.allowOther = true; if (field.secret) question.secret = true; } }
   return questions.length ? { questions, fields } : null;
 }
 /** Answers back into the schema's value types; free-text "other" answers of a choice go to its companion custom field. */
@@ -213,7 +216,8 @@ export function formContent(form: Form, answers: Record<string, string[]>): Reco
     const values = question?.type === 'choice' ? given.filter(answer => question.options.some(option => option.value === answer)) : given;
     const custom = question?.type === 'choice' ? given.filter(answer => !question.options.some(option => option.value === answer)) : [];
     const companion = form.fields.find(entry => entry.customFor === field.id);
-    if (companion && custom.length) content[companion.id] = custom.join(', ');
+    if (companion && custom.length && !(companion.typedCustom && !values.length)) content[companion.id] = custom.join(', ');
+    if (companion?.typedCustom && !values.length && custom.length) { content[field.id] = custom.join(', '); continue; }
     if (!values.length) { if (!companion && custom.length) content[field.id] = custom.join(', '); continue; }
     if (field.kind === 'array') content[field.id] = values;
     else if (field.kind === 'number' || field.kind === 'integer') {
@@ -231,6 +235,7 @@ const fields = (form: Form) => form.fields.filter(field => !field.customFor);
 
 interface Handlers {
   update(notification: acp.SessionNotification): void;
+  authStatus?(status: unknown): void;
   permission(request: acp.RequestPermissionRequest, signal: AbortSignal): Promise<acp.RequestPermissionResponse>;
   elicitation(request: acp.CreateElicitationRequest, signal: AbortSignal): Promise<acp.CreateElicitationResponse>;
   elicitationComplete(notification: acp.CompleteElicitationNotification): void;
@@ -258,14 +263,22 @@ class AcpProcess {
       const update = 'method' in message && message.method === 'session/update' ? record(record(message.params).update).sessionUpdate : undefined;
       controller.enqueue(typeof update === 'string' && SUBAGENT_LIFECYCLE.has(update) ? { ...message, method: SUBAGENT_UPDATE } as acp.AnyMessage : message);
     } })) };
+    const reader = stream.readable.getReader();
+    const readable = new ReadableStream<acp.AnyMessage>({
+      async pull(controller) {
+        try { const next = await reader.read(); if (next.done) controller.close(); else controller.enqueue(next.value); }
+        catch (cause) { handlers.fault(cause); controller.error(cause); }
+      },
+      cancel: reason => reader.cancel(reason),
+    });
     const app = client({ name: pkg.name })
       .onNotification('session/update', ({ params }) => handlers.update(params))
       .onNotification(SUBAGENT_UPDATE, params => params as acp.SessionNotification, ({ params }) => handlers.update(params))
       .onNotification('elicitation/complete', ({ params }) => handlers.elicitationComplete(params))
-      .onNotification('_auth/status_update', params => params, () => {})
+      .onNotification('_auth/status_update', params => params, ({ params }) => handlers.authStatus?.(record(params).authStatus))
       .onRequest('session/request_permission', ({ params, signal }) => handlers.permission(params, signal))
       .onRequest('elicitation/create', ({ params, signal }) => handlers.elicitation(params, signal));
-    const process_ = new AcpProcess(child, app.connect(stream), exited);
+    const process_ = new AcpProcess(child, app.connect({ ...stream, readable }), exited);
     process_.requestTimeoutMs = () => limitsOf(profile).requestTimeoutMs;
     void Promise.race([process_.connection.closed, exited]).then(() => { if (process_.live) { process_.live = false; handlers.fault(new Error(`${profile.harnessId} agent exited`)); } });
     try {
@@ -339,6 +352,11 @@ class Transcript {
       return;
     }
     if (!last) return;
+    const notice = noticeOf(update);
+    if (notice) {
+      if (update.sessionUpdate === 'session_info_update' && sessionFailure(update._meta)?.severity === 'error') last.failure = notice.title;
+      return;
+    }
     if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
       const previous = last.items.at(-1);
       if (previous?.item.type === 'agentMessage' && update.messageId && this.agentMessageId === update.messageId) previous.item.text += update.content.text;
@@ -353,10 +371,13 @@ class Transcript {
       const call = { ...entry?.call, ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined && value !== null)) } as acp.ToolCallUpdate;
       if (call.name === 'AskUserQuestion') return;
       let item = toolItem(call);
+      const shown = entry?.snapshot.item;
+      if (shown?.type === 'toolExecution' && fileRow(shown) && item.type === 'toolExecution') item = { ...item, toolName: shown.toolName, arguments: shown.arguments };
       const output = replayedOutput(call);
-      if (output) {
+      const images = toolImages(call);
+      if (output || images.length) {
         const { text, truncated } = truncate(output, this.outputLimit());
-        item = item.type === 'commandExecution' ? { ...item, output: text, outputTruncated: truncated } : { ...item, output: { content: [{ type: 'text', text }], ...(truncated ? { truncated } : {}) } };
+        item = item.type === 'commandExecution' ? { ...item, output: text, outputTruncated: truncated } : { ...item, output: { content: [...(text ? [{ type: 'text' as const, text }] : []), ...images], ...(truncated ? { truncated } : {}) } };
       }
       const outcome: HostItemOutcome = call.status === 'completed' ? { status: 'succeeded' } : call.status === 'failed' ? { status: 'failed', error: error('nativeFailure', 'Tool failed') }
         : { status: 'cancelled', reason: '原生记录未显示该工具完成' };
@@ -373,7 +394,12 @@ class Transcript {
   snapshot(harnessId: HarnessId, nativeSessionId: string, native?: Map<string, HostTurnSnapshot['outcome']>): HostTurnSnapshot[] {
     return this.turns.map(turn => ({
       nativeTurnRef: { harnessId, nativeSessionId, nativeTurnKey: this.key(turn), formatVersion: 1 },
-      input: [{ type: 'text', text: turn.input }], items: turn.items,
+      input: [{ type: 'text', text: turn.input }], items: turn.items.flatMap(snapshot => {
+        const call = turn.tools?.get(snapshot.item.itemId)?.call;
+        const diffs = call?.content?.filter(part => part.type === 'diff') ?? [];
+        return call?.kind === 'edit' && !dshTool(call) && diffs.length
+          ? diffs.map((diff, index) => ({ item: diffTool(`${call.toolCallId}#${index}`, diff), outcome: snapshot.outcome })) : [snapshot];
+      }),
       outcome: (turn.userMessageId ? native?.get(turn.userMessageId) : undefined) ?? inferredOutcome(turn),
     }));
   }
@@ -398,6 +424,19 @@ function replayedOutput(call: acp.ToolCallUpdate): string {
   if (Array.isArray(raw)) return raw.flatMap(part => record(part).type === 'text' && typeof record(part).text === 'string' ? [record(part).text as string] : []).join('\n');
   return (call.content ?? []).flatMap(part => part.type === 'content' && part.content.type === 'text' ? [part.content.text] : []).join('');
 }
+/** Only local image links enter the existing durable attachment path. */
+function toolImages(call: acp.ToolCallUpdate): NonNullable<HostItemOf<'toolExecution'>['output']>['content'] {
+  return (call.content ?? []).flatMap<NonNullable<HostItemOf<'toolExecution'>['output']>['content'][number]>(part => {
+    if (part.type !== 'content') return [];
+    const content = part.content;
+    if (content.type === 'image') return [{ type: 'image' as const, mimeType: content.mimeType, base64Data: content.data }];
+    if (content.type !== 'resource_link') return [];
+    try {
+      const path = content.uri.startsWith('file:') ? fileURLToPath(content.uri) : content.uri;
+      return isAbsolute(path) && (/\.(png|jpe?g|webp|gif)$/iu.test(path) || content.mimeType?.startsWith('image/')) ? [{ type: 'imageFile' as const, path }] : [];
+    } catch { return []; }
+  });
+}
 /** Codex 2 AIR terminal chunks append; its final event carries the exit code instead of rawOutput. */
 function terminalUpdate<T extends acp.ToolCallUpdate>(call: T, previousOutput: string, limit: number): T {
   const meta = record(call._meta), delta = record(meta.terminal_output_delta).data;
@@ -412,6 +451,11 @@ const commandOf = (raw: unknown): string | undefined => {
 };
 const hasInput = (value: unknown) => value !== undefined && value !== null && (typeof value !== 'object' || Object.keys(record(value)).length > 0);
 const jsonOf = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value ?? null)) as JsonValue;
+/**
+ * A row already shown as DSH's `edit` / `write` holds the tool's input. Claude Code's PostToolUse hook later replaces the
+ * call's content with one diff per hunk (claude-agent-acp dist/diff.js), which is neither that input nor a whole file.
+ */
+const fileRow = (item: HostItem): boolean => item.type === 'toolExecution' && (item.toolName === 'edit' || item.toolName === 'write');
 function toolItem(call: acp.ToolCall | acp.ToolCallUpdate): HostItemOf<'commandExecution'> | HostItemOf<'toolExecution'> {
   const command = call.kind === 'execute' ? commandOf(call.rawInput) : undefined;
   const title = text(call.title, 200);
@@ -431,18 +475,24 @@ function toolItem(call: acp.ToolCall | acp.ToolCallUpdate): HostItemOf<'commandE
  */
 function dshTool(call: acp.ToolCall | acp.ToolCallUpdate): { toolName: string; arguments: JsonValue } | undefined {
   const input = record(call.rawInput);
+  const diff = call.content?.find(part => part.type === 'diff');
   const row = (toolName: string, args: Record<string, unknown>) => ({ toolName, arguments: jsonOf(args) });
   switch (call.name) {
     case 'Read': return text(input.file_path) ? row('read', { file_path: input.file_path, offset: input.offset, limit: input.limit }) : undefined;
     case 'Grep': return typeof input.pattern === 'string' ? row('grep', { pattern: input.pattern, path: input.path, include: input.glob }) : undefined;
     case 'Glob': return typeof input.pattern === 'string' ? row('glob', { pattern: input.pattern, path: input.path }) : undefined;
-    case 'Edit': return text(input.file_path) && typeof input.new_string === 'string'
-      ? row('edit', { file_path: input.file_path, old_string: input.old_string, new_string: input.new_string, replace_all: input.replace_all }) : undefined;
-    case 'Write': return text(input.file_path) && typeof input.content === 'string' ? row('write', { file_path: input.file_path, content: input.content }) : undefined;
+    case 'Edit': return diff?.type === 'diff' ? row('edit', { file_path: diff.path, old_string: diff.oldText ?? '', new_string: diff.newText, replace_all: input.replace_all })
+      : text(input.file_path) && typeof input.new_string === 'string' ? row('edit', { file_path: input.file_path, old_string: input.old_string, new_string: input.new_string, replace_all: input.replace_all }) : undefined;
+    case 'Write': {
+      const path = typeof input.file_path === 'string' ? input.file_path : input.path;
+      const content = input.content ?? input.file_text ?? input.file_content;
+      return diff?.type === 'diff' ? row('write', { file_path: diff.path, content: diff.newText })
+        : text(path) && typeof content === 'string' ? row('write', { file_path: path, content }) : undefined;
+    }
     case 'WebFetch': return text(input.url) ? row('web_fetch', { url: input.url }) : undefined;
     case 'WebSearch': return text(input.query) ? row('web_search', { queries: [input.query] }) : undefined;
   }
-  if (input.type === 'webSearch') {
+  if (input.type === 'webSearch' || (call.kind === 'search' && ['search', 'openPage', 'findInPage'].includes(String(record(input.action).type)))) {
     const action = record(input.action);
     if (text(action.url)) return row('web_fetch', { url: action.url });
     const queries = (Array.isArray(action.queries) && action.queries.length ? action.queries : [action.query ?? input.query]).filter(query => text(query));
@@ -453,6 +503,19 @@ function dshTool(call: acp.ToolCall | acp.ToolCallUpdate): { toolName: string; a
   if (read) return row('read', { file_path: call.locations?.[0]?.path ?? read[1] });
   const search = call.kind === 'search' && /^Search for '(.+)'(?: in (.+))?$/s.exec(title);
   if (search) return row('grep', { pattern: search[1], path: search[2] });
+  return undefined;
+}
+/** Structured notices and Claude's legacy informational chunks are lifecycle data, never an answer. */
+function noticeOf(update: acp.SessionUpdate): HostItemOf<'notice'> | undefined {
+  if (update.sessionUpdate === 'notice') return { type: 'notice', itemId: newItemId(), severity: update.severity === 'warning' || update.severity === 'error' ? update.severity : 'info', title: update.title, text: update.description ?? '' };
+  if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text' && record(record(update._meta).claudeCode).kind === 'informational') {
+    return { type: 'notice', itemId: newItemId(), severity: record(record(update._meta).claudeCode).level === 'warning' ? 'warning' : 'info', title: 'Harness 提示', text: update.content.text };
+  }
+  if (update.sessionUpdate === 'session_info_update') {
+    const failure = sessionFailure(update._meta);
+    const title = failure?.title ?? text(record(record(record(update._meta).codex).error).message, 500);
+    if (title && !title.startsWith(SKILLS_CONTEXT_BUDGET_NOTICE)) return { type: 'notice', itemId: newItemId(), severity: failure?.severity === 'error' ? 'error' : 'warning', title, text: failure?.details ?? '' };
+  }
   return undefined;
 }
 // ── Subagents: what each one said and did, for the sidebar; never part of the main transcript ─────────────────────────
@@ -543,7 +606,7 @@ const stamp = (): string => new Date().toISOString();
 
 /** A reported diff as DSH's own edit row (or write row for a new file); the edit card reads its hunk from these arguments. */
 const diffTool = (itemId: string, diff: acp.Diff): HostItemOf<'toolExecution'> => ({ type: 'toolExecution', itemId: hostItemIdSchema.parse(itemId), namespace: 'edit',
-  ...(diff.oldText ? { toolName: 'edit', arguments: { file_path: diff.path, old_string: diff.oldText, new_string: diff.newText } }
+  ...(typeof diff.oldText === 'string' ? { toolName: 'edit', arguments: { file_path: diff.path, old_string: diff.oldText, new_string: diff.newText } }
     : { toolName: 'write', arguments: { file_path: diff.path, content: diff.newText } }) });
 
 // ── Session ─────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -563,7 +626,7 @@ interface SessionOptions { profile: AcpProfile; environment: NodeJS.ProcessEnv; 
 
 class AcpSession implements HarnessSession {
   readonly harnessId: HarnessId;
-  readonly capabilities: HarnessSessionCapabilities;
+  capabilities: HarnessSessionCapabilities;
   readonly initialUsage: HostUsage | null;
   readonly #channel = new HarnessOutputChannel<HarnessOutput>();
   readonly outputs = this.#channel.outputs;
@@ -576,7 +639,10 @@ class AcpSession implements HarnessSession {
   readonly #cwd: string;
   readonly #profile: AcpProfile;
   readonly #environment: NodeJS.ProcessEnv;
-  readonly #catalogs: Catalogs;
+  #catalogs: Catalogs;
+  #modes: Opened['modes'];
+  /** The `models` extension of session/new: per-model effort support, which no later update repeats. */
+  readonly #models: unknown;
   readonly #onClosed: () => void;
   #state: HarnessSessionState;
   #initialized = false;
@@ -593,7 +659,7 @@ class AcpSession implements HarnessSession {
     this.#profile = options.profile; this.#environment = options.environment; this.#process = process_; this.#sessionId = sessionId; this.#cwd = options.input.cwd; this.#onClosed = options.onClosed;
     this.#transcript = new Transcript(() => limitsOf(options.profile).toolOutputChars);
     this.harnessId = harnessIdSchema.parse(options.profile.harnessId);
-    this.#catalogs = catalogs;
+    this.#catalogs = catalogs; this.#modes = opened.modes; this.#models = record(opened as unknown).models;
     this.#commands = commands;
     this.capabilities = capabilitiesOf(process_.initialized.agentCapabilities, catalogs);
     this.#titlePending = options.input.kind === 'create' && !!options.profile.titleCommand;
@@ -614,6 +680,7 @@ class AcpSession implements HarnessSession {
     let session: AcpSession | undefined;
     const replay: acp.SessionNotification[] = [];
     let commands: acp.AvailableCommand[] | undefined;
+    let authStatus: unknown;
     let sessionId = input.kind === 'resume' ? input.nativeRef.nativeSessionId : undefined;
     const process_ = await AcpProcess.connect(profile, { ...options.environment, DSH_DISCUSSION_READ_ONLY: input.discussion ? '1' : undefined }, input.cwd, {
       update: notification => {
@@ -622,6 +689,7 @@ class AcpSession implements HarnessSession {
         if (notification.sessionId === sessionId && notification.update.sessionUpdate === 'available_commands_update') commands = notification.update.availableCommands;
         else replay.push(notification);
       },
+      authStatus: status => { if (session) session.#authChanged(status); else authStatus = status; },
       permission: (params, signal) => session ? session.#permission(params, signal) : Promise.resolve({ outcome: { outcome: 'cancelled' } }),
       elicitation: (params, signal) => session ? session.#elicitation(params, signal) : Promise.resolve({ action: 'cancel' }),
       elicitationComplete: params => { if (session) session.#elicitationComplete(params); },
@@ -641,6 +709,7 @@ class AcpSession implements HarnessSession {
       const skills = (await waitFor(() => commands, 3_000)) ?? [];
       session = new AcpSession(options, process_, sessionId, opened, catalogs, skillsOf(profile, skills));
       session.#rawCommands = skills;
+      session.#authChanged(authStatus);
       for (const { sessionId: owner, update } of replay) if (!session.#trackTask(update) && !session.#routeSubagent(owner, update)) session.#transcript.replay(update);
       await session.#applyHints(input);
       session.#initialized = true;
@@ -665,6 +734,9 @@ class AcpSession implements HarnessSession {
   /** State once the requested model / thinking / permission have been applied. */
   get initialState(): HarnessSessionState { return this.#state; }
 
+  inspect(): Extract<HarnessInspection, { status: 'ready' }> {
+    return { status: 'ready', catalog: this.#catalogs.catalog, ...(this.#catalogs.permissionModes ? { permissionModes: this.#catalogs.permissionModes } : {}), capabilities: this.capabilities };
+  }
   async listSkills(): Promise<HarnessSkill[]> { return this.#commands; }
   subagents(): HarnessSubagent[] { return this.#subagents.list(); }
   hasBackgroundTasks(): boolean { return this.#backgroundTasks.size > 0; }
@@ -740,12 +812,14 @@ class AcpSession implements HarnessSession {
           if (this.#active) return failed('sessionBusy', 'Model selection requires an idle session', true);
           if (!this.#catalogs.modelConfigId) return failed('unsupported', 'Harness does not select models');
           const value = modelValue(command.model);
+          if (!this.#catalogs.catalog.models.some(model => model.ref.id === command.model.id)) return failed('invalidRequest', 'Unknown model');
           await this.#setConfig(this.#catalogs.modelConfigId, value);
           return { ok: true, value: { completed: true } };
         }
         case 'thinking.select': {
           if (this.#active) return failed('sessionBusy', 'Thinking selection requires an idle session', true);
           if (!this.#catalogs.thinkingConfigId) return failed('unsupported', 'Harness does not select thinking levels');
+          if (!this.#catalogs.catalog.thinkingOptions.some(option => option.id === command.thinkingOptionId)) return failed('invalidRequest', 'Unknown thinking level');
           await this.#setConfig(this.#catalogs.thinkingConfigId, command.thinkingOptionId);
           return { ok: true, value: { completed: true } };
         }
@@ -763,7 +837,11 @@ class AcpSession implements HarnessSession {
           return { ok: true, value: { completed: true } };
         }
       }
-    } catch (cause) { return { ok: false, error: toError(cause, 'ACP operation failed') }; }
+    } catch (cause) {
+      const failure = toError(cause, 'ACP operation failed');
+      if (failure.code === 'authenticationRequired') this.#authChanged({ kind: 'none', label: '未登录' });
+      return { ok: false, error: failure };
+    }
   }
 
   async #setConfig(configId: string, value: string | boolean): Promise<void> {
@@ -774,17 +852,36 @@ class AcpSession implements HarnessSession {
   }
   async #setMode(modeId: string): Promise<void> {
     await request(this.#process, 'session/set_mode', { sessionId: this.#sessionId, modeId });
+    this.#modeChanged(modeId);
+  }
+  #modeChanged(modeId: string): void {
+    if (this.#modes) this.#modes = { ...this.#modes, currentModeId: modeId };
+    this.#catalogs.currentMode = modeId;
+    if (this.#catalogs.permissionModes) this.#catalogs.permissionModes.defaultModeId = harnessPermissionModeIdSchema.parse(modeId);
     this.#publish({ ...this.#state, effectivePermissionModeId: harnessPermissionModeIdSchema.parse(modeId) });
   }
   #configChanged(options: acp.SessionConfigOption[]): void {
-    let state = this.#state;
-    for (const option of options) {
-      if (isSelect(option) && option.id === this.#catalogs.modelConfigId) state = { ...state, effectiveModel: modelRef(option.currentValue), resolvedModelLabel: selectOptions(option).find(entry => entry.value === option.currentValue)?.name ?? option.currentValue };
-      else if (isSelect(option) && option.id === this.#catalogs.thinkingConfigId) state = { ...state, effectiveThinkingOptionId: harnessThinkingOptionIdSchema.parse(option.currentValue) };
-      else if (isSelect(option) && option.category === 'mode') state = { ...state, effectivePermissionModeId: harnessPermissionModeIdSchema.parse(option.currentValue) };
-      else if (this.#catalogs.configOptions.has(option.id)) state = { ...state, configValues: { ...state.configValues, [option.id]: option.currentValue } };
-    }
-    if (state !== this.#state) this.#publish(state);
+    const catalogs = this.#catalogs = catalogsOf({ configOptions: options, ...(this.#modes ? { modes: this.#modes } : {}), ...(this.#models ? { models: this.#models } : {}) } as Opened);
+    this.capabilities = capabilitiesOf(this.#process.initialized.agentCapabilities, catalogs);
+    const { effectiveModel: _model, resolvedModelLabel: _label, effectiveThinkingOptionId: _thinking, availableThinkingOptions: _options,
+      effectivePermissionModeId: _mode, configValues: _configs, ...base } = this.#state;
+    this.#publish({ ...base,
+      ...(catalogs.currentModel ? { effectiveModel: modelRef(catalogs.currentModel), resolvedModelLabel: catalogs.catalog.models.find(model => model.ref.id === modelRef(catalogs.currentModel!).id)?.label ?? catalogs.currentModel } : {}),
+      ...(catalogs.currentThinking ? { effectiveThinkingOptionId: harnessThinkingOptionIdSchema.parse(catalogs.currentThinking), availableThinkingOptions: catalogs.catalog.thinkingOptions } : {}),
+      ...(catalogs.currentMode ? { effectivePermissionModeId: harnessPermissionModeIdSchema.parse(catalogs.currentMode) } : {}),
+      configValues: Object.fromEntries([...catalogs.configOptions].map(([id, option]) => [id, option.currentValue])),
+    });
+  }
+  #authChanged(raw: unknown): void {
+    const status = record(raw);
+    const kind = text(status.kind, 80), label = text(status.label, 500);
+    if (!kind || !label) return;
+    const account = record(status.account);
+    const authStatus = { kind, label, ...(text(status.detail, 500) ? { detail: text(status.detail, 500)! } : {}),
+      ...(status.account ? { account: Object.fromEntries(['email', 'plan', 'organization'].flatMap(key => text(account[key], 500) ? [[key, text(account[key], 500)!]] : [])) } : {}) };
+    if (JSON.stringify(authStatus) === JSON.stringify(this.#state.authStatus)) return;
+    this.#state = { ...this.#state, authStatus };
+    this.#emit({ type: 'session.auth.changed', authStatus });
   }
   #publish(state: HarnessSessionState): void {
     this.#state = state;
@@ -816,7 +913,11 @@ class AcpSession implements HarnessSession {
     this.#active = active;
     this.#emit({ type: 'turn.started', turnId: command.turnId, nativeTurnRef: this.#turnRef(this.#transcript.key(transcript)) });
     this.#process.agent.request<acp.PromptResponse>('session/prompt', { sessionId: this.#sessionId, prompt: blocks })
-      .then(response => this.#finishPrompt(active, response), cause => this.#finish(active, active.cancelled ? { status: 'cancelled', reason: 'Cancelled by user' } : { status: 'failed', error: toError(cause, 'Turn failed') }));
+      .then(response => this.#finishPrompt(active, response), cause => {
+        const failure = toError(cause, 'Turn failed');
+        if (failure.code === 'authenticationRequired') this.#authChanged({ kind: 'none', label: '未登录' });
+        this.#finish(active, active.cancelled ? { status: 'cancelled', reason: 'Cancelled by user' } : { status: 'failed', error: failure });
+      });
     return { ok: true, value: { turnId: command.turnId } };
   }
   #turnRef(key: string) { return { harnessId: this.harnessId, nativeSessionId: this.#sessionId, nativeTurnKey: key, formatVersion: 1 as const }; }
@@ -896,12 +997,21 @@ class AcpSession implements HarnessSession {
   #update(update: acp.SessionUpdate): void {
     if (update.sessionUpdate === 'available_commands_update') { this.#rawCommands = update.availableCommands; this.#commands = skillsOf(this.#profile, update.availableCommands); return; }
     if (update.sessionUpdate === 'config_option_update') { this.#configChanged(update.configOptions); return; }
-    if (update.sessionUpdate === 'current_mode_update') { this.#publish({ ...this.#state, effectivePermissionModeId: harnessPermissionModeIdSchema.parse(update.currentModeId) }); return; }
+    if (update.sessionUpdate === 'current_mode_update') { this.#modeChanged(update.currentModeId); return; }
     if (update.sessionUpdate === 'usage_update') {
       if (update.size > 0) this.#publishUsage({ contextUsedTokens: update.used, contextWindowTokens: update.size }, this.#active?.hostId);
       return;
     }
     const active = this.#active;
+    const notice = noticeOf(update);
+    if (notice) {
+      if (active) {
+        this.#completeMessage(active, { status: 'succeeded' });
+        this.#emit({ type: 'item.started', turnId: active.hostId, item: notice });
+        this.#emit({ type: 'item.completed', turnId: active.hostId, snapshot: { item: notice, outcome: { status: 'succeeded' } } });
+      } else this.#emit({ type: 'session.notice', notice });
+      return;
+    }
     if (!active) return;
     active.transcript.hasOutput ||= ['agent_message_chunk', 'tool_call'].includes(update.sessionUpdate);
     const { hostId: turnId } = active;
@@ -940,10 +1050,10 @@ class AcpSession implements HarnessSession {
         this.#completeThought(active, { status: 'succeeded' });
         let item = active.tools.get(update.toolCallId);
         update = terminalUpdate(update, item?.type === 'commandExecution' ? item.output ?? '' : item?.output?.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('') ?? '', limitsOf(this.#profile).toolOutputChars);
+        const merged = { ...active.announced.get(update.toolCallId), ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined && value !== null)) } as acp.ToolCallUpdate;
+        active.announced.set(update.toolCallId, merged);
         if (!item) {
-          // Agents announce a call before its input has streamed (Claude Code's Bash); the card waits for the input or a terminal status.
-          const merged = { ...active.announced.get(update.toolCallId), ...Object.fromEntries(Object.entries(update).filter(([, value]) => value !== undefined && value !== null)) } as acp.ToolCallUpdate;
-          active.announced.set(update.toolCallId, merged);
+          // Agents announce a call before its input has streamed; keep sparse reports through completion.
           const ended = update.status === 'completed' || update.status === 'failed';
           // Claude Code asks through an elicitation; the host records that exchange as its own question row.
           if (merged.name === 'AskUserQuestion') { if (ended) active.announced.delete(update.toolCallId); return; }
@@ -960,34 +1070,41 @@ class AcpSession implements HarnessSession {
             && !text(record(merged.rawInput).description, 200) && !ended) return;
           if (!hasInput(merged.rawInput) && !ended) return;
           if (!merged.title && !merged.name) return;
-          active.announced.delete(update.toolCallId);
           item = toolItem({ ...merged, title: merged.title ?? merged.name ?? 'tool' });
           active.tools.set(update.toolCallId, item);
           this.#emit({ type: 'item.started', turnId, item });
         }
+        const native = dshTool(merged);
+        if (item.type === 'toolExecution' && native && !fileRow(item)) item = { ...item, toolName: native.toolName, arguments: native.arguments };
         // An update that delivers the input describes the call (Claude Code repeats the Bash description there); its content is not output.
         const terminal = update.status === 'completed' || update.status === 'failed';
         const describing = hasInput(update.rawInput) && !terminal;
         const rawOutput = typeof update.rawOutput === 'string' ? update.rawOutput : typeof record(update.rawOutput).output === 'string' ? record(update.rawOutput).output as string : typeof record(update.rawOutput).aggregatedOutput === 'string' ? record(update.rawOutput).aggregatedOutput as string : undefined;
         const outputText = describing ? '' : item.type === 'commandExecution' && terminal && rawOutput !== undefined ? rawOutput
           : (update.content ?? []).flatMap(part => part.type === 'content' && part.content.type === 'text' ? [part.content.text] : []).join('') || rawOutput || '';
-        const images = describing ? [] : (update.content ?? []).flatMap(part => part.type === 'content' && part.content.type === 'image' ? [{ type: 'image' as const, mimeType: part.content.mimeType, base64Data: part.content.data }] : []);
-        const diffs = (update.content ?? []).flatMap(part => part.type === 'diff' ? [part] : []);
+        const images = describing ? [] : toolImages(merged);
+        const diffs = (merged.content ?? []).flatMap(part => part.type === 'diff' ? [part] : []);
         if (outputText || images.length) {
           const { text: output, truncated } = truncate(outputText, limitsOf(this.#profile).toolOutputChars);
           if (item.type === 'commandExecution') { item = { ...item, output, outputTruncated: truncated || item.outputTruncated === true }; }
-          else item = { ...item, output: { content: [...(output ? [{ type: 'text' as const, text: output }] : []), ...images], ...(truncated ? { truncated } : {}) } };
+          else {
+            // Images come from the whole call; an update without text of its own (a bare completion) keeps the text already shown.
+            const kept = outputText ? undefined : item.output;
+            item = { ...item, output: { content: [...(kept ? kept.content.filter(part => part.type === 'text') : output ? [{ type: 'text' as const, text: output }] : []), ...images],
+              ...(truncated || kept?.truncated ? { truncated: true } : {}) } };
+          }
           active.tools.set(update.toolCallId, item);
         }
         if (item.type === 'commandExecution' && typeof record(update.rawOutput).exitCode === 'number') { item = { ...item, exitCode: record(update.rawOutput).exitCode as number }; active.tools.set(update.toolCallId, item); }
         if (update.status === 'completed' || update.status === 'failed') {
           active.tools.delete(update.toolCallId);
+          active.announced.delete(update.toolCallId);
           const outcome: HostItemOutcome = update.status === 'completed' ? { status: 'succeeded' } : { status: 'failed', error: error('nativeFailure', `Tool '${item.type === 'commandExecution' ? item.command : item.toolName}' failed`) };
           const snapshot = { item, outcome };
           active.transcript.items.push(snapshot);
           this.#emit({ type: 'item.completed', turnId, snapshot });
           // Claude Code's Edit/Write row already shows its change; any other call's diffs become edit rows of their own.
-          if (item.type !== 'toolExecution' || (item.toolName !== 'edit' && item.toolName !== 'write')) {
+          if (!fileRow(item)) {
             diffs.forEach((diff, index) => this.#emitDone(active, diffTool(`${toolCallId}#${index}`, diff), outcome));
           }
         }
@@ -1008,15 +1125,6 @@ class AcpSession implements HarnessSession {
           active.compaction.delete(update.compactionId);
           this.#emit({ type: 'item.completed', turnId, snapshot: { item, outcome: update.status === 'completed' ? { status: 'succeeded' } : update.status === 'cancelled' ? { status: 'cancelled' } : { status: 'failed', error: error('nativeFailure', update.error ?? 'Context compaction failed', true) } } });
         }
-        return;
-      }
-      case 'session_info_update': {
-        const notice = text(record(record(record(update._meta).codex).error).message, 500) ?? (() => { const failure = sessionFailure(update._meta); return failure && `${failure.title}${failure.details ? `\n${failure.details}` : ''}`; })();
-        if (!notice || notice.startsWith(SKILLS_CONTEXT_BUDGET_NOTICE)) return;
-        this.#completeMessage(active, { status: 'succeeded' });
-        const item: HostItem = { type: 'agentMessage', itemId: newItemId(), text: notice };
-        this.#emit({ type: 'item.started', turnId, item });
-        this.#emit({ type: 'item.completed', turnId, snapshot: { item, outcome: { status: 'succeeded' } } });
         return;
       }
       default: return;
@@ -1054,9 +1162,10 @@ class AcpSession implements HarnessSession {
   #permission(params: acp.RequestPermissionRequest, signal: AbortSignal): Promise<acp.RequestPermissionResponse> {
     const active = this.#active;
     if (!active || !this.#owns(params.sessionId) || !params.options.length) return Promise.resolve({ outcome: { outcome: 'cancelled' } });
-    const presentation = record(record(params._meta).permission);
+    const meta = record(params._meta);
+    const presentation = record(record(record(meta.jetbrains).air).permission ?? meta.permission);
     const command = commandOf(params.toolCall.rawInput);
-    const title = text(presentation.title, 200) ?? text(params.toolCall.title, 200) ?? command ?? text(params.toolCall.name, 120) ?? 'Approval required';
+    const title = text(presentation.title, 4000) ?? text(params.toolCall.title, 4000) ?? command ?? text(params.toolCall.name, 120) ?? 'Approval required';
     const description = [text(presentation.description), command && command !== title ? command : undefined,
       ...(params.toolCall.locations ?? []).map(location => location.path).slice(0, 5)].filter((value): value is string => !!value).join('\n');
     const interaction: HostApprovalInteraction = {

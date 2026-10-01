@@ -1,14 +1,13 @@
-# Third-party code
+# 第三方代码
 
-The plugin bundles Zod 4.4.3 (MIT), the Agent Client Protocol TypeScript SDK
-`@agentclientprotocol/sdk` 1.4.0 (Apache-2.0), the ACP agent adapters
-`@agentclientprotocol/codex-acp` 2.0.1 (Apache-2.0) and
-`@agentclientprotocol/claude-agent-acp` 0.78.0 (Apache-2.0), and the Anthropic Claude
-Agent SDK 0.3.270 (used by claude-agent-acp and by the plugin's account-quota probe). The
-Claude Agent SDK is governed by Anthropic's own terms, not this project's MIT license. The
-Host–Harness contract is adapted from codexhost (MIT, Copyright 2026 BytePioneer-AI).
-Original notices and the SDK README are included in `dist/licenses/`.
+本插件打包以下依赖：
 
-DSH and Cordis are supplied by the host. Codex and Claude Code executables are installed
-separately and retain their own licenses and authentication; the bundled `@openai/codex`
-package dependency of codex-acp is not shipped.
+- Zod 4.4.3，以及 Claude ACP 使用的 Zod 4.6.5（MIT）。
+- `@agentclientprotocol/sdk` 1.5.1（Apache-2.0）。
+- `@agentclientprotocol/codex-acp` 2.1.0（Apache-2.0）。
+- `@agentclientprotocol/claude-agent-acp` 0.84.0（Apache-2.0）。
+- Anthropic Claude Agent SDK 0.3.284，用于 Claude ACP 和账户额度探测；适用 Anthropic 自有条款，不适用本项目 MIT 许可证。
+
+Host–Harness 契约改编自 codexhost（MIT，Copyright 2026 BytePioneer-AI）。原始许可证和 SDK README 位于 `dist/licenses/`。
+
+DSH 和 Cordis 由宿主提供。Codex 和 Claude Code 可执行文件由用户单独安装，保留其原有许可证和认证方式；Codex ACP 的 `@openai/codex` 依赖不随插件打包。

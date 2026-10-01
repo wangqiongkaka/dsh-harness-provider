@@ -86,7 +86,9 @@ interface SessionHints {
 }
 export type OpenSessionInput = (SessionHints & { kind: 'create' }) | (SessionHints & { kind: 'resume'; nativeRef: NativeSessionRef });
 
+export interface HarnessAuthStatus { kind: string; label: string; detail?: string; account?: { email?: string; plan?: string; organization?: string } }
 export interface HarnessSessionState {
+  authStatus?: HarnessAuthStatus;
   nativeRef?: NativeSessionRef; effectiveModel?: HarnessModelRef; resolvedModelLabel?: string;
   effectiveThinkingOptionId?: HarnessThinkingOptionId; availableThinkingOptions?: HarnessThinkingOption[];
   effectivePermissionModeId?: HarnessPermissionModeId;
@@ -104,7 +106,7 @@ export interface ConfigSelectCommand { type: 'config.select'; configId: string; 
 
 export interface HostChoiceQuestion {
   id: string; type: 'choice'; prompt: string; options: Array<{ value: string; label: string; description?: string }>;
-  multiple: boolean; allowOther: boolean; optional: boolean;
+  multiple: boolean; allowOther: boolean; optional: boolean; secret?: boolean;
 }
 export interface HostTextQuestion { id: string; type: 'text'; prompt: string; multiline: boolean; secret: boolean; optional: boolean; placeholder?: string; prefill?: string }
 export type HostQuestion = HostChoiceQuestion | HostTextQuestion;
@@ -157,6 +159,7 @@ export type HostItem =
   | { type: 'agentMessage'; itemId: HostItemId; text: string }
   | { type: 'reasoning'; itemId: HostItemId; text: string }
   | { type: 'contextCompaction'; itemId: HostItemId }
+  | { type: 'notice'; itemId: HostItemId; severity: 'info' | 'warning' | 'error'; title: string; text: string }
   | { type: 'commandExecution'; itemId: HostItemId; command: string; description?: string; cwd?: string; output?: string; outputTruncated?: boolean; exitCode?: number | null; durationMs?: number }
   | { type: 'toolExecution'; itemId: HostItemId; toolName: string; namespace?: string; arguments: JsonValue; output?: HostToolOutput; durationMs?: number }
   | { type: 'fileChange'; itemId: HostItemId; changes: HostFileChange[] }
@@ -177,6 +180,8 @@ export type HostEvent =
   | { type: 'session.state.changed'; state: HarnessSessionState }
   | { type: 'session.usage.changed'; usage: HostUsage | null; observedForTurnId?: HostTurnId }
   | { type: 'session.faulted'; error: HarnessError }
+  | { type: 'session.auth.changed'; authStatus: HarnessAuthStatus }
+  | { type: 'session.notice'; notice: HostItemOf<'notice'> }
   | { type: 'turn.started'; turnId: HostTurnId; nativeTurnRef?: NativeTurnRef }
   | { type: 'turn.completed'; turnId: HostTurnId; nativeTurnRef?: NativeTurnRef; outcome: TurnOutcome }
   | { type: 'item.started'; turnId: HostTurnId; item: HostItem }
@@ -197,6 +202,8 @@ export interface HarnessSession {
   refreshUsage?(): Promise<void>;
   /** The agent's current slash-menu entries when it publishes them per session. */
   listSkills?(): Promise<HarnessSkill[]>;
+  /** The current directory pushed by this session, without opening a probe process. */
+  inspect?(): Extract<HarnessInspection, { status: 'ready' }>;
   readSnapshot?(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>>;
   /** Subagents the Harness ran in this session (live and replayed), oldest first, with what each one said and did. */
   subagents?(): HarnessSubagent[];
@@ -272,7 +279,9 @@ export function validateHostInteractionResponse(interaction: HostInteraction | u
     const answers = response.answers[question.id] ?? [];
     if (!question.optional && !answers.length) return invalidRequest('Question Response omits a required answer');
     if (question.type === 'text') { if (answers.length > 1) return invalidRequest('Text Question accepts at most one answer'); continue; }
-    if (!question.multiple && answers.length > 1) return invalidRequest('Single-choice Question accepts at most one answer');
+    const selected = answers.filter(answer => question.options.some(option => option.value === answer));
+    if (!question.multiple && selected.length > 1) return invalidRequest('Single-choice Question accepts at most one choice');
+    if (answers.length - selected.length > 1) return invalidRequest('Choice Question accepts at most one custom answer');
     if (!question.allowOther && answers.some(answer => !question.options.some(option => option.value === answer))) return invalidRequest('Question Response contains an undeclared choice');
   }
   return null;

@@ -7,6 +7,7 @@ export const selection = z.enum(['dsh', 'codex', 'claude-code']);
 export const address = z.object({ sessionId: z.string().min(1) }).strict();
 export const stateSchema = z.object({
   harness: selection, locked: z.boolean(), model: z.string().nullable(), thinking: z.string().nullable(), permission: z.string().nullable(),
+  authStatus: z.object({ kind: z.string(), label: z.string(), detail: z.string().optional(), account: z.object({ email: z.string().optional(), plan: z.string().optional(), organization: z.string().optional() }).optional() }).optional(),
   configs: z.record(z.string(), z.union([z.string(), z.boolean()])),
   recoveryRequired: z.boolean(),
   /** DSH turns whose native boundary is known, so their prompt can be edited and rerun in place. */
@@ -92,7 +93,7 @@ export const recoverySchema = stateSchema.extend({ detail: z.string() });
 export const secretAnswerRequest = address.extend({ id: z.string().min(1), answers: z.record(z.string(), z.array(z.string().min(1).max(64_000))), cancelled: z.boolean().optional() });
 export const secretStatusSchema = z.object({ id: z.string(), title: z.string(), questions: z.array(z.discriminatedUnion('type', [
   z.object({ id: z.string(), type: z.literal('text'), prompt: z.string(), secret: z.boolean(), multiline: z.boolean(), optional: z.boolean(), placeholder: z.string().optional() }),
-  z.object({ id: z.string(), type: z.literal('choice'), prompt: z.string(), multiple: z.boolean(), allowOther: z.boolean(), optional: z.boolean(), options: z.array(z.object({ value: z.string(), label: z.string(), description: z.string().optional() })) }),
+  z.object({ id: z.string(), type: z.literal('choice'), prompt: z.string(), secret: z.boolean().optional(), multiple: z.boolean(), allowOther: z.boolean(), optional: z.boolean(), options: z.array(z.object({ value: z.string(), label: z.string(), description: z.string().optional() })) }),
 ])) }).nullable();
 /** This plugin's settings for a page without the Host settings form (a remote browser); null when the Host does not serve them. */
 export const settingsViewSchema = z.object({ value: z.record(z.string(), z.unknown()), user: z.unknown(), revision: z.number().int(), writable: z.boolean() }).nullable();

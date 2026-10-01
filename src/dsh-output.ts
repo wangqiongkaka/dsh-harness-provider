@@ -57,7 +57,7 @@ export class DshOutput {
       this.emit({ type: 'start', attemptId: entry.attemptId, revision: this.revision(), ...this.position });
       this.push(item.itemId, { type: 'block-start', index: 0, blockType: item.type === 'reasoning' ? 'reasoning' : 'text' });
       if (item.text) this.push(item.itemId, { type: item.type === 'reasoning' ? 'reasoning-delta' : 'text-delta', index: 0, text: item.text });
-    } else if (item.type !== 'contextCompaction' && item.type !== 'subagentDelegation') {
+    } else if (item.type !== 'contextCompaction' && item.type !== 'subagentDelegation' && item.type !== 'notice') {
       this.call(toolCall(item));
     }
   }
@@ -98,12 +98,12 @@ export class DshOutput {
         stream: [...entry.stream.snapshot()], ...(interrupted ? { interrupted: true as const } : {}),
       } };
       if (item.type === 'reasoning') this.flush();
-    } else if (item.type === 'contextCompaction' || item.type === 'subagentDelegation') {
+    } else if (item.type === 'contextCompaction' || item.type === 'subagentDelegation' || item.type === 'notice') {
       this.flush();
       this.agent.session.append('user/message', createUserMessage({
         source: { kind: 'dsh-harness-provider', form: 'notice',
-          summary: item.type === 'contextCompaction' ? 'Harness context compaction' : 'Harness subagent activity' },
-        content: [{ type: 'text', text: JSON.stringify(snapshot) }],
+          summary: item.type === 'notice' ? item.title : item.type === 'contextCompaction' ? 'Harness context compaction' : 'Harness subagent activity' },
+        content: [{ type: 'text', text: item.type === 'notice' ? `${item.title}${item.text ? `\n${item.text}` : ''}` : JSON.stringify(snapshot) }],
       }), { surfaceOp: 'append' });
     } else {
       this.flush();
@@ -228,30 +228,38 @@ function toolCall(item: HostItem): Extract<ContentBlock, { type: 'tool-call' }> 
   const args = item.type === 'toolExecution' ? item.arguments : item;
   return { type: 'tool-call', id: ToolCallId(item.itemId), name, arguments: JSON.stringify(args) };
 }
+const TOOL_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'] as const;
+/** A local image a tool points at, read within the host's image limits. */
+async function readToolImage(ctx: Context, path: string): Promise<{ type: 'image'; mimeType: string; base64Data: string }> {
+  if (!isAbsolute(path)) throw new Error('工具图片需要绝对路径');
+  const file = await open(path, 'r');
+  try {
+    const stat = await file.stat(), limit = ctx.attachments.imageLimits.maxImageBytes;
+    if (!stat.isFile() || stat.size > limit) throw new Error('工具图片不是普通文件或超过大小限制');
+    const bytes = Buffer.alloc(Math.min(stat.size + 1, limit + 1));
+    const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+    if (bytesRead > stat.size) throw new Error('工具图片在读取期间发生变化');
+    const data = bytes.subarray(0, bytesRead);
+    const mimeType = data[0] === 0x89 ? 'image/png' : data[0] === 0xff ? 'image/jpeg' : data.toString('ascii', 0, 3) === 'GIF' ? 'image/gif'
+      : data.toString('ascii', 8, 12) === 'WEBP' ? 'image/webp' : undefined;
+    if (!mimeType) throw new Error('不支持的工具图片格式');
+    return { type: 'image', mimeType, base64Data: data.toString('base64') };
+  } finally { await file.close(); }
+}
 async function toolOutput(ctx: Context, item: HostItem): Promise<ContentBlock[]> {
   if (item.type === 'commandExecution') return [{ type: 'text', text: item.output ?? '' }];
   if (item.type === 'toolExecution' && item.output) {
-    const images = await Promise.all(item.output.content.filter(part => part.type !== 'text').map(async part => {
-      if (part.type === 'image') return part;
-      if (!isAbsolute(part.path)) throw new Error('工具图片需要绝对路径');
-      const file = await open(part.path, 'r');
-      try {
-        const stat = await file.stat(), limit = ctx.attachments.imageLimits.maxImageBytes;
-        if (!stat.isFile() || stat.size > limit) throw new Error('工具图片不是普通文件或超过大小限制');
-        const bytes = Buffer.alloc(Math.min(stat.size + 1, limit + 1));
-        const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
-        if (bytesRead > stat.size) throw new Error('工具图片在读取期间发生变化');
-        const data = bytes.subarray(0, bytesRead);
-        const mimeType = data[0] === 0x89 ? 'image/png' : data[0] === 0xff ? 'image/jpeg' : data.toString('ascii', 0, 3) === 'GIF' ? 'image/gif' : 'image/webp';
-        return { type: 'image' as const, mimeType, base64Data: data.toString('base64') };
-      } finally { await file.close(); }
+    // An image the host cannot read or show is named in the result: the tool itself ran, so the turn goes on.
+    const missing = (name: string, cause: unknown) => ({ type: 'text' as const, text: `[图片未载入：${name}（${cause instanceof Error ? cause.message : String(cause)}）]` });
+    const parts = await Promise.all(item.output.content.map(async part => {
+      if (part.type === 'text') return part;
+      if (part.type === 'imageFile') return readToolImage(ctx, part.path).catch(cause => missing(part.path, cause));
+      return (TOOL_IMAGE_TYPES as readonly string[]).includes(part.mimeType) ? part : missing(part.mimeType, '不支持的工具图片格式');
     }));
-    const refs = images.length ? await ctx.attachments.admitPromptContent(images.map(part => {
-      if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(part.mimeType)) throw new Error('不支持的工具图片格式');
-      return { type: 'image' as const, mediaType: part.mimeType as 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif', data: part.base64Data };
-    })) : [];
+    const images = parts.flatMap(part => part.type === 'image' ? [{ type: 'image' as const, mediaType: part.mimeType as typeof TOOL_IMAGE_TYPES[number], data: part.base64Data }] : []);
+    const refs = images.length ? await ctx.attachments.admitPromptContent(images) : [];
     let index = 0;
-    return item.output.content.map(part => part.type === 'text' ? { type: 'text' as const, text: part.text } : refs[index++]!);
+    return parts.map(part => part.type === 'text' ? part : refs[index++]!);
   }
   return [{ type: 'text', text: JSON.stringify(item) }];
 }

@@ -1,4 +1,4 @@
-/** Codex ACP 2.0.1: lock every discussion mode and disable inherited execution capabilities. Fail if these seams change. */
+/** Codex ACP 2.1.0: lock every discussion mode and disable inherited execution capabilities. Fail if these seams change. */
 export function discussionSandbox(source) {
  const replacements = [
   ['    this.sandboxPolicy = sandboxPolicy;\n    this.sandboxMode = sandboxMode;',

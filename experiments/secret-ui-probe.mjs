@@ -9,7 +9,7 @@ const compiled = await build({stdin:{resolveDir:process.cwd(),loader:'tsx',conte
 import React from 'react';
 import {createRoot} from 'react-dom/client';
 import {SecretPanel} from './src/client.tsx';
-const pending={id:'question-1',title:'凭据输入',questions:[{id:'password',type:'text',prompt:'密码',secret:true,multiline:false,optional:false}]};
+const pending={id:'question-1',title:'凭据输入',questions:[{id:'password',type:'text',prompt:'密码',secret:true,multiline:false,optional:false},{id:'choice',type:'choice',prompt:'保密选择',options:[{value:'A',label:'A'}],multiple:false,allowOther:true,optional:false,secret:true}]};
 const read=async()=>pending;
 const answer=async(...args)=>{window.received=args;return {accepted:true};};
 createRoot(document.getElementById('root')).render(<SecretPanel sessionId="session" read={read} answer={answer}/>);
@@ -21,9 +21,11 @@ try {
   await page.addScriptTag({content:compiled.outputFiles[0].text});
   const input=page.getByLabel('密码',{exact:true});await input.waitFor();
   assert.equal(await input.getAttribute('type'),'password');
+  const note=page.getByLabel('其他答复',{exact:true});assert.equal(await note.getAttribute('type'),'password');
+  await page.locator('select').selectOption('A');await note.fill('fixture-note');
   await input.fill('fixture-password');await page.getByRole('button',{name:'提交',exact:true}).click();
   await page.waitForFunction(()=>window.received);
-  assert.deepEqual(await page.evaluate(()=>window.received),['session','question-1',{password:['fixture-password']},false]);
+  assert.deepEqual(await page.evaluate(()=>window.received),['session','question-1',{password:['fixture-password'],choice:['A','fixture-note']},false]);
   assert.equal(await page.locator('input').count(),0);
   console.log('PASS: actual password component masks input, sends the scoped answer, and clears/unmounts the form');
 } finally {await browser.close();}

@@ -10,7 +10,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { brandString } from '@deepseek-ai/dsh-brand';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-typert-registry';
-import type { HarnessAdapter, HarnessInspection } from './contracts.js';
+import type { HarnessAdapter, HarnessAuthStatus, HarnessInspection } from './contracts.js';
 import type {} from '@deepseek-ai/dsh-session-projection';
 import type {} from '@deepseek-ai/dsh-settings';
 import type {} from '@deepseek-ai/dsh-credentials';
@@ -63,6 +63,12 @@ export async function apply(ctx: Context, config: ReturnType<typeof Config> = Co
 }
 
 type Ready = Extract<HarnessInspection, { status: 'ready' }>;
+/**
+ * Whether two reports name one login. One login is reported with more or fewer fields depending on the source, so only the
+ * field that identifies each kind counts (claude-agent-acp dist/auth-status.js `sameIdentity`).
+ */
+const sameLogin = (a: HarnessAuthStatus, b: HarnessAuthStatus): boolean => a.kind === b.kind
+  && (a.kind === 'account' ? (a.account?.email ?? '') === (b.account?.email ?? '') : a.kind !== 'api_key' || a.detail === b.detail);
 type DiscussionResult = { peerReview: boolean; participants: Array<{ sessionId: string; harness: Binding['harness'] | 'dsh'; role?: string; task: string; status: string; text: string }> };
 
 const userMessageAt = (events: readonly SessionEvent[], rpcId: string) => events.findIndex(event =>
@@ -152,6 +158,8 @@ export class HarnessService extends TypertRemoteService {
   private readonly pluginCatalogs = new Map<string, { until: number; plugins: Promise<HarnessPlugin[]> }>();
   // ponytail: per-source quota cache; account probes are rate-limited upstream and identical across sessions.
   private readonly quotas = new Map<string, { until: number; work: Promise<Quota> }>();
+  // The login each external Harness last reported; kept in memory only, so it also shows while no process is open.
+  private readonly accountStatuses = new Map<Binding['harness'], HarnessAuthStatus>();
   // External Harness account quota, one per harness: probing spawns a throwaway CLI process, so it goes stale-while-revalidate.
   private readonly harnessQuotas = new Map<Binding['harness'], HarnessQuotaCache>();
   // One user-authorized discussion per source turn; retries share the same work instead of spawning more sessions.
@@ -165,7 +173,14 @@ export class HarnessService extends TypertRemoteService {
     this.bindings = new Bindings(root);
     this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : method === 'discuss' ? this.discuss(source, input)
       : method === 'models' ? this.delegationModels(source) : this.readDelegation(source, input), () => settings().discussionTimeoutMinutes * 60_000);
-    this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation, undefined, () => settings().idleCloseSeconds * 1000, () => settings().branchContextChars);
+    this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation, undefined, () => settings().idleCloseSeconds * 1000, () => settings().branchContextChars, (harness, status) => {
+      const previous = this.accountStatuses.get(harness);
+      this.accountStatuses.set(harness, status);
+      // The first report names the login the caches were read under, unless it says there is none.
+      if (previous ? sameLogin(previous, status) : status.kind !== 'none') return;
+      for (const key of this.catalogs.keys()) if (key.startsWith(`${harness}\0`)) this.catalogs.delete(key);
+      this.harnessQuotas.get(harness)?.reset();
+    });
     ctx.effect(() => ctx.typert.register({ package: contribution.package, face: 'host', schemas: [], invocations: contribution.descriptors, model: { services: [], events: [], objects: [] } }), 'harness: Remote contracts');
     ctx.effect(() => async () => {
       this.stopped = true;
@@ -898,7 +913,8 @@ export class HarnessService extends TypertRemoteService {
     // A delegation target reads its catalog without binding this session to it.
     const binding: Binding | undefined = harness ? { version: 1, sessionId, harness, cwd: cwd!, locked: false } : await this.bindings.read(sessionId);
     if (!binding) return { ...empty, error: null };
-    const inspection = await this.inspection(binding);
+    const pushed = !harness && !!this.pushed(binding);
+    const inspection = await this.inspection(binding, !harness);
     if ('error' in inspection) return { ...empty, error: inspection.error };
     const { catalog } = inspection;
     // A delegation target's default is what a delegation without a pick starts with: the Harness's last pick while the catalog still offers it (as in `bind`).
@@ -916,13 +932,20 @@ export class HarnessService extends TypertRemoteService {
       permissionModes: (inspection.permissionModes?.modes ?? []).map(mode => ({ id: mode.id, label: mode.label, dangerous: mode.dangerous === true })),
       defaultPermissionModeId: inspection.permissionModes?.defaultModeId ?? null,
       configOptions: (catalog.configOptions ?? []).map(option => ({ id: option.id, label: option.label, description: option.description ?? null,
-        currentValue: binding.configs?.[option.id] ?? option.currentValue,
+        currentValue: pushed ? option.currentValue : binding.configs?.[option.id] ?? option.currentValue,
         choices: option.choices?.map(choice => ({ value: choice.value, label: choice.label, description: choice.description ?? null })) ?? null })),
       error: null,
     };
   }
 
-  private inspection(binding: Binding): Promise<Ready | { error: string }> {
+  /** The directory this binding's live session pushed; a live session of another Harness says nothing about it. */
+  private pushed(binding: Binding): Ready | undefined {
+    const session = this.runner.live.get(binding.sessionId)?.session;
+    return session?.harnessId === binding.harness ? session.inspect?.() : undefined;
+  }
+  private inspection(binding: Binding, live = true): Promise<Ready | { error: string }> {
+    const pushed = live ? this.pushed(binding) : undefined;
+    if (pushed) return Promise.resolve(pushed);
     const key = `${binding.harness}\0${binding.cwd}`;
     const cached = this.catalogs.get(key);
     if (cached && cached.until > Date.now()) return cached.work;
@@ -1272,7 +1295,8 @@ export class HarnessService extends TypertRemoteService {
   }
 
   private view(binding?: Binding, nativeLocked = false, events: readonly SessionEvent[] = []) {
-    return { harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? nativeLocked,
+    const authStatus = binding ? this.accountStatuses.get(binding.harness) : undefined;
+    return { ...(authStatus ? { authStatus } : {}), harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? nativeLocked,
       model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null,
       configs: binding?.configs ?? {}, recoveryRequired: !!binding?.pending, editableTurns: binding?.turns?.map(entry => entry.turn) ?? [],
       supersededTurns: supersededTurns(events) };
@@ -1425,6 +1449,7 @@ const settleResets = (quota: Quota, now: number): Quota => quota?.kind !== 'wind
 export class HarnessQuotaCache {
   #entry?: { value: Quota };
   #refreshing?: Promise<Quota>;
+  #generation = 0;
   constructor(private readonly probe: () => Promise<Quota>, private readonly now: () => number = () => Date.now()) {}
 
   /** The cached quota with passed resets applied; with none, waits for one probe that concurrent reads share. */
@@ -1438,9 +1463,13 @@ export class HarnessQuotaCache {
     if (!this.#refreshing) void this.#refresh();
   }
 
+  /** An identity change must not serve the previous account or accept its in-flight probe. */
+  reset(): void { this.#generation++; this.#entry = undefined; this.#refreshing = undefined; }
+
   #refresh(): Promise<Quota> {
-    const refreshing = this.probe().then(value => { this.#entry = { value }; }, () => { this.#entry ??= { value: null }; })
-      .then(() => settleResets(this.#entry!.value, this.now())).finally(() => { if (this.#refreshing === refreshing) this.#refreshing = undefined; });
+    const generation = this.#generation;
+    const refreshing = this.probe().then(value => { if (generation === this.#generation) this.#entry = { value }; }, () => { if (generation === this.#generation) this.#entry ??= { value: null }; })
+      .then(() => generation === this.#generation ? settleResets(this.#entry!.value, this.now()) : null).finally(() => { if (this.#refreshing === refreshing) this.#refreshing = undefined; });
     return this.#refreshing = refreshing;
   }
 }

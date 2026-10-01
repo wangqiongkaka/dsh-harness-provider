@@ -4,7 +4,8 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
-import { AcpAdapter, modelRef } from '../dist/acp-adapter.js';
+import { AcpAdapter, modelRef, formOf, formContent } from '../dist/acp-adapter.js';
+import { validateHostInteractionResponse } from '../dist/contracts.js';
 import { codexPlugins, codexTurnOutcomes } from '../dist/acp-profiles.js';
 import { Context } from '@deepseek-ai/cordis';
 import Agents from '@deepseek-ai/dsh-agent';
@@ -21,7 +22,7 @@ import { DshRunner } from '../dist/dsh-runner.js';
 // session/load can replay it, and every host answer it receives is checked before the turn ends.
 // The peer runs from the session's cwd, so the SDK is addressed by absolute URL.
 const peer = `
-import { agent, ndJsonStream } from '${import.meta.resolve('@agentclientprotocol/sdk')}';
+import { agent, ndJsonStream, RequestError } from '${import.meta.resolve('@agentclientprotocol/sdk')}';
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 const history = process.env.PEER_HISTORY;
@@ -74,6 +75,16 @@ const app = agent({ name: 'peer' })
     // Both bundled adapters report inputTokens without cached tokens (codex-acp toTokenCount, claude-agent-acp sessionUsage);
     // the fixture mirrors that wire shape, so cached input travels only in its own buckets.
     const end = usage => ({ stopReason: 'end_turn', usage: usage ?? { inputTokens: 100 * turn, outputTokens: 10 * turn, cachedReadTokens: 5 * turn, cachedWriteTokens: 2 * turn, totalTokens: 117 * turn } });
+    if (text === 'frame-boundary') {
+      const frame = { jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'tool_call', toolCallId: 'frame', title: 'MCP', status: 'completed', rawInput: {}, content: [{ type: 'content', content: { type: 'text', text: '' } }] } } };
+      frame.params.update.content[0].content.text = 'x'.repeat(32 * 1024 * 1024 - Buffer.byteLength(JSON.stringify(frame)));
+      process.stdout.write(JSON.stringify(frame) + '\\n');
+      await reply('frame accepted'); return end();
+    }
+    if (text === 'oversized') {
+      process.stdout.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'x'.repeat(32 * 1024 * 1024) } } } }) + '\\n');
+      return new Promise(() => {});
+    }
     if (text === 'cancel') { entries.push({ input: raw, userId }); save(entries); while (!cancelled) await new Promise(r => setTimeout(r, 10)); return { stopReason: 'cancelled' }; }
     // A wedged native turn: it ignores the cancel and never answers (Codex after an interrupted cua_repl call).
     if (text === 'stuck') {
@@ -82,9 +93,14 @@ const app = agent({ name: 'peer' })
       return new Promise(() => {});
     }
     if (text === 'wait') { while (!steered) await new Promise(r => setTimeout(r, 10)); await reply('steered:' + steered); return end(); }
-    if (text === 'approve') {
+    if (text === 'auth-required') throw new RequestError(-32000, 'Please sign in');
+    if (text === 'auth') {
+      await ctx.notify('_auth/status_update', { authStatus: { kind: 'none', label: 'Not logged in' } });
+      await reply('auth updated'); return end();
+    }
+    if (text === 'approve' || text === 'approve-air') {
       const answer = await client.request('session/request_permission', { sessionId, toolCall: { toolCallId: 'call-1', title: 'Run npm test', kind: 'execute', status: 'pending', rawInput: { command: 'npm test' } },
-        options: [{ optionId: 'allow-once', name: 'Yes', kind: 'allow_once' }, { optionId: 'allow-session', name: 'Yes, this session', kind: 'allow_always' }, { optionId: 'reject', name: 'No', kind: 'reject_once' }], _meta: { permission: { version: 1, title: 'Run command?', description: 'Reason: tests' } } });
+        options: [{ optionId: 'allow-once', name: 'Yes', kind: 'allow_once' }, { optionId: 'allow-session', name: 'Yes, this session', kind: 'allow_always' }, { optionId: 'reject', name: 'No', kind: 'reject_once' }], _meta: text === 'approve-air' ? { jetbrains: { air: { version: 1, permission: { version: 1, title: 'x'.repeat(500), description: 'AIR reason' } } } } : { permission: { version: 1, title: 'Run command?', description: 'Reason: tests' } } });
       note({ permission: answer });
       await reply('approved:' + answer.outcome.optionId); return end();
     }
@@ -118,6 +134,13 @@ const app = agent({ name: 'peer' })
         title: 'Skill descriptions were shortened to fit the skills context budget. Disable unused skills or plugins to leave more room for the rest.', actions: [],
       } } } } });
       await reply('reply:' + text); return end();
+    }
+    if (text === 'wire' || text === 'notice-only') {
+      const updates = JSON.parse(readFileSync(process.env.PEER_UPDATES, 'utf8'));
+      for (const entry of updates) await update(entry);
+      if (text === 'wire') await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: 'done' } });
+      entries.push({ input: raw, userId, ...(text === 'wire' ? { reply: 'done', replyId } : {}), updates }); save(entries);
+      return end();
     }
     if (text === 'codex-v2') {
       const updates = JSON.parse(readFileSync(process.env.PEER_UPDATES, 'utf8'));
@@ -302,6 +325,27 @@ async function startedItem(iterator, matches) {
     if (next.value.kind === 'event' && next.value.event.type === 'item.started' && matches(next.value.event.item)) return next.value.event.item;
   }
 }
+
+test('AIR custom answers associate arbitrary question ids, preserve selections and protect secret notes', () => {
+  for (const customAnswer of [true, { questionId: 'region', isCustomAnswer: true }]) {
+    const form = formOf({ type: 'object', required: ['region'], properties: {
+      region: { type: 'string', oneOf: [{ const: 'A', title: 'A' }, { const: 'B', title: 'B' }], _meta: { codex: { isOther: true } } },
+      region_note: { type: 'string', _meta: { codex: { questionId: 'region', isSecret: true }, jetbrains: { air: { version: 1, customAnswer } } } },
+    } });
+    assert.equal(form.questions.length, 1);
+    assert.equal(form.questions[0].allowOther, true);
+    assert.equal(form.questions[0].secret, true);
+    const interaction = { type: 'question', interactionId: 'q', turnId: 't', questions: form.questions };
+    assert.equal(validateHostInteractionResponse(interaction, { type: 'question', answers: { region: ['A', '说明'] } }), null);
+    assert.deepEqual(formContent(form, { region: ['A', '说明'] }), { region: 'A', region_note: '说明' });
+    assert.deepEqual(formContent(form, { region: ['自定义'] }), customAnswer === true ? { region: '自定义' } : { region_note: '自定义' });
+    assert.ok(validateHostInteractionResponse(interaction, { type: 'question', answers: { region: ['A', 'B'] } }));
+  }
+  const form = formOf({ type: 'object', properties: {
+    question_0: { type: 'string', enum: ['A'] }, question_0_custom: { type: 'string' },
+  } });
+  assert.deepEqual(formContent(form, { question_0: ['自定义'] }), { question_0_custom: '自定义' });
+});
 
 test('discussion create and resume do not replay pre-open permission states after applying model and thinking hints', { timeout: 20000 }, async () => {
   const f = await fixture(), ctx = new Context();
@@ -576,7 +620,8 @@ test('permissions, forms (secret + custom answers), URL steps, failures and tool
     assert.deepEqual(events(seen, 'session.usage.changed').find(event => event.usage.contextUsedTokens).usage.contextUsedTokens, 4200);
     value(await session.execute({ type: 'turn.start', turnId: 'host-e', input: [{ type: 'text', text: 'fail' }] }));
     seen = await until(output, 'turn.completed');
-    assert.equal(events(seen, 'item.completed')[0].snapshot.item.text, 'Reconnecting... 1/5');
+    assert.equal(events(seen, 'item.completed')[0].snapshot.item.type, 'notice');
+    assert.equal(events(seen, 'item.completed')[0].snapshot.item.title, 'Reconnecting... 1/5');
     assert.deepEqual(events(seen, 'turn.completed')[0].outcome, { status: 'failed', error: { code: 'nativeFailure', message: 'Usage limit reached', retryable: true } });
     await session.close();
   } finally { await adapter.close(); await f.close(); }
@@ -878,5 +923,195 @@ test('tool output is truncated at the profile\'s live limit, both in a live turn
       const replayed = value(await resumed.readSnapshot()).turns[0].items[0].item;
       assert.deepEqual([replayed.output, replayed.outputTruncated], ['ok ', true]);
     } finally { await resumed.close(); }
+  } finally { await adapter.close(); await f.close(); }
+});
+
+
+test('AIR file diffs, web actions and local image links survive live updates and replay', { timeout: 20000 }, async () => {
+  const { AcpToolCallRenderer } = await import('../node_modules/@agentclientprotocol/claude-agent-acp/dist/tool-calls/renderer.js');
+  const f = await fixture(), path = join(f.root, 'updates.json');
+  const adapter = new AcpAdapter({ profile: f.profile, environment: { PEER_UPDATES: path } });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const caps = (await f.notes()).find(note => note.initialize).initialize;
+    const renderer = AcpToolCallRenderer.for(caps);
+    const updates = [];
+    for (const tool of [
+      { id: 'air-edit', name: 'Edit', input: { file_path: '/tmp/a.txt', old_string: 'old', new_string: 'new' } },
+      { id: 'air-write', name: 'Write', input: { file_path: '/tmp/b.txt', content: 'new file' } },
+    ]) {
+      updates.push(renderer.toolCall(tool, { cwd: f.root }), { sessionUpdate: 'tool_call_update', toolCallId: tool.id, status: 'completed' });
+    }
+    updates.push(
+      { sessionUpdate: 'tool_call', toolCallId: 'sparse-patch', title: 'Editing files', kind: 'edit', status: 'pending', content: [{ type: 'diff', path: '/tmp/empty.txt', oldText: '', newText: 'changed' }] },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'sparse-patch', status: 'completed' },
+      { sessionUpdate: 'tool_call', toolCallId: 'alias', name: 'Write', title: 'write', kind: 'edit', status: 'completed', rawInput: { path: '/tmp/c.txt', file_text: '' } },
+      { sessionUpdate: 'tool_call', toolCallId: 'web-air', title: 'Web search: acp', kind: 'search', status: 'completed', rawInput: { query: 'acp', action: { type: 'search', queries: ['acp', 'sdk'] } } },
+      { sessionUpdate: 'tool_call', toolCallId: 'web-open', title: 'Open page', kind: 'search', status: 'completed', rawInput: { action: { type: 'openPage', url: 'https://example.org' } } },
+      { sessionUpdate: 'tool_call', toolCallId: 'image-air', title: 'view_image', kind: 'read', status: 'pending', rawInput: { path: '/tmp/image.png' } },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'image-air', content: [
+        { type: 'content', content: { type: 'resource_link', name: 'image', uri: 'file:///tmp/image.png' } },
+        { type: 'content', content: { type: 'resource_link', name: 'remote', uri: 'https://example.org/image.png' } },
+        { type: 'content', content: { type: 'resource_link', name: 'text', uri: '/tmp/notes.txt' } },
+      ] },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'image-air', status: 'completed' },
+    );
+    await writeFile(path, JSON.stringify(updates));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'air', input: [{ type: 'text', text: 'wire' }] }));
+    const seen = await until(output, 'turn.completed');
+    const items = events(seen, 'item.completed').map(event => event.snapshot.item);
+    const check = items => {
+      const edit = items.find(item => item.itemId === 'air-edit');
+      assert.equal(edit.toolName, 'edit');
+      assert.deepEqual(items.find(item => item.itemId === 'sparse-patch#0').arguments, { file_path: '/tmp/empty.txt', old_string: '', new_string: 'changed' });
+      assert.deepEqual(edit.arguments, { file_path: '/tmp/a.txt', old_string: 'old', new_string: 'new' });
+      assert.equal(items.find(item => item.itemId === 'air-write').arguments.content, 'new file');
+      assert.deepEqual(items.find(item => item.itemId === 'alias').arguments, { file_path: '/tmp/c.txt', content: '' });
+      assert.deepEqual(items.find(item => item.itemId === 'web-air').arguments, { queries: ['acp', 'sdk'] });
+      assert.deepEqual(items.find(item => item.itemId === 'web-open').arguments, { url: 'https://example.org' });
+      assert.deepEqual(items.find(item => item.itemId === 'image-air').output.content, [{ type: 'imageFile', path: '/tmp/image.png' }]);
+      assert.equal(items.filter(item => item.itemId.startsWith('air-edit')).length, 1);
+    };
+    check(items);
+    await session.close();
+    const resumed = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: session.initialState.nativeRef }));
+    check(value(await resumed.readSnapshot()).turns[0].items.map(entry => entry.item));
+  } finally { await adapter.close(); await f.close(); }
+});
+
+
+test('live configuration directories replace removed choices and notices never complete replayed turns', { timeout: 20000 }, async () => {
+  const f = await fixture(), path = join(f.root, 'updates.json');
+  const adapter = new AcpAdapter({ profile: f.profile, environment: { PEER_UPDATES: path } });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    await writeFile(path, JSON.stringify([
+      { sessionUpdate: 'config_option_update', configOptions: [
+        { id: 'new-model', name: 'Model', category: 'model', type: 'select', currentValue: 'new', options: [{ value: 'new', name: 'New' }] },
+        { id: 'new-effort', name: 'Effort', category: 'thought_level', type: 'select', currentValue: 'medium', options: [{ value: 'medium', name: 'Medium' }] },
+        { id: 'new-flag', name: 'Flag', type: 'boolean', currentValue: true },
+      ] },
+      { sessionUpdate: 'notice', severity: 'warning', title: 'Hook blocked', description: 'Check hook' },
+      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Legacy information' }, _meta: { claudeCode: { kind: 'informational', level: 'notice' } } },
+    ]));
+    value(await session.execute({ type: 'turn.start', turnId: 'notice', input: [{ type: 'text', text: 'notice-only' }] }));
+    const seen = await until(output, 'turn.completed');
+    assert.equal(events(seen, 'item.completed').filter(event => event.snapshot.item.type === 'agentMessage').length, 0);
+    assert.deepEqual(events(seen, 'item.completed').filter(event => event.snapshot.item.type === 'notice').map(event => event.snapshot.item.text), ['Check hook', 'Legacy information']);
+    const inspection = session.inspect();
+    assert.equal(inspection.catalog.models[0].label, 'New');
+    assert.deepEqual(session.initialState.availableThinkingOptions, [{ id: 'medium', label: 'Medium' }]);
+    assert.deepEqual(session.initialState.configValues, { 'new-flag': true });
+    assert.equal((await session.execute({ type: 'config.select', configId: 'fast-mode', value: false })).ok, false);
+    assert.equal((await session.execute({ type: 'thinking.select', thinkingOptionId: 'high' })).ok, false);
+    assert.equal((await session.execute({ type: 'model.select', model: modelRef('gpt-5.5') })).ok, false);
+    await session.close();
+    const resumed = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: session.initialState.nativeRef }));
+    const turn = value(await resumed.readSnapshot()).turns[0];
+    assert.equal(turn.outcome.status, 'unknown');
+    assert.equal(turn.items.some(entry => entry.item.type === 'agentMessage'), false);
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('AIR permissions preserve full presentation titles and auth pushes reach the session', { timeout: 20000 }, async () => {
+  const f = await fixture(), adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'permission-air', input: [{ type: 'text', text: 'approve-air' }] }));
+    const pending = await interaction(output);
+    assert.equal(pending.title, 'x'.repeat(500));
+    assert.ok(pending.description.startsWith('AIR reason'));
+    value(await session.execute({ type: 'interaction.respond', interactionId: pending.interactionId, response: { type: 'approval', actionId: 'reject' } }));
+    await until(output, 'turn.completed');
+    value(await session.execute({ type: 'turn.start', turnId: 'auth', input: [{ type: 'text', text: 'auth' }] }));
+    const seen = await until(output, 'turn.completed');
+    assert.deepEqual(events(seen, 'session.auth.changed')[0].authStatus, { kind: 'none', label: 'Not logged in' });
+    assert.equal(session.initialState.authStatus.kind, 'none');
+    value(await session.execute({ type: 'turn.start', turnId: 'auth-required', input: [{ type: 'text', text: 'auth-required' }] }));
+    const failed = await until(output, 'turn.completed');
+    assert.equal(events(failed, 'turn.completed')[0].outcome.error.code, 'authenticationRequired');
+    assert.equal(session.initialState.authStatus.label, '未登录');
+  } finally { await adapter.close(); await f.close(); }
+});
+
+
+test('ACP frames accept the 32 MiB boundary and fail oversize with the actual transport error', { timeout: 20000 }, async () => {
+  const f = await fixture(), adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'frame', input: [{ type: 'text', text: 'frame-boundary' }] }));
+    const boundary = await until(output, 'turn.completed');
+    assert.equal(events(boundary, 'turn.completed')[0].outcome.status, 'succeeded');
+    const item = events(boundary, 'item.completed').find(event => event.snapshot.item.itemId === 'frame').snapshot.item;
+    assert.equal(item.output.content[0].text.length, 64000);
+    assert.equal(item.output.truncated, true);
+    value(await session.execute({ type: 'turn.start', turnId: 'oversized', input: [{ type: 'text', text: 'oversized' }] }));
+    const seen = await until(output, 'turn.completed');
+    const outcome = events(seen, 'turn.completed')[0].outcome;
+    assert.equal(outcome.status, 'failed');
+    assert.match(outcome.error.message, /33554432 byte limit/u);
+    assert.equal(outcome.error.code, 'processExited');
+    const fault = (await output.next()).value.event;
+    assert.equal(fault.type, 'session.faulted');
+    assert.match(fault.error.message, /33554432 byte limit/u);
+    assert.equal(session.hasBackgroundTasks(), false);
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('per-model thinking levels survive a live configuration change', { timeout: 20000 }, async () => {
+  const f = await fixture(), adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const levels = () => session.inspect().catalog.models.map(model => [model.label, model.supportedThinkingOptionIds ?? null]);
+    const before = levels();
+    assert.deepEqual(before.slice(0, 2), [['GPT-5.5', ['low', 'high']], ['Mini', ['low']]]);
+    value(await session.execute({ type: 'config.select', configId: 'fast-mode', value: true }));
+    assert.deepEqual(levels(), before);
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('a final hook diff never rewrites an Edit or Write row, and a status-only completion keeps text beside images', { timeout: 20000 }, async () => {
+  const { AcpToolCallRenderer } = await import('../node_modules/@agentclientprotocol/claude-agent-acp/dist/tool-calls/renderer.js');
+  const f = await fixture(), path = join(f.root, 'updates.json');
+  const adapter = new AcpAdapter({ profile: f.profile, environment: { PEER_UPDATES: path } });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const renderer = AcpToolCallRenderer.for((await f.notes()).find(note => note.initialize).initialize);
+    const done = toolCallId => ({ sessionUpdate: 'tool_call_update', toolCallId, status: 'completed' });
+    const content = 'line1\nline2\nNEW\nline4\n';
+    // The PostToolUse hook replaces the tool call's content with one diff per hunk (claude-agent-acp dist/diff.js).
+    await writeFile(path, JSON.stringify([
+      renderer.toolCall({ id: 'hook-edit', name: 'Edit', input: { file_path: '/tmp/a.txt', old_string: 'x', new_string: 'y', replace_all: true } }, { cwd: f.root }),
+      await renderer.hookResult({ id: 'hook-edit', name: 'Edit' }, { filePath: '/tmp/a.txt', structuredPatch: [
+        { oldStart: 1, newStart: 1, lines: [' ctx1', '-x', '+y'] }, { oldStart: 50, newStart: 50, lines: [' ctx2', '-x', '+y'] }] }, f.root),
+      done('hook-edit'),
+      renderer.toolCall({ id: 'hook-write', name: 'Write', input: { file_path: '/tmp/b.txt', content } }, { cwd: f.root }),
+      await renderer.hookResult({ id: 'hook-write', name: 'Write' }, { type: 'update', filePath: '/tmp/b.txt', content, originalFile: 'line1\nline2\nOLD\nline4\n',
+        structuredPatch: [{ oldStart: 2, newStart: 2, lines: [' line2', '-OLD', '+NEW', ' line4'] }] }, f.root),
+      done('hook-write'),
+      { sessionUpdate: 'tool_call', toolCallId: 'mixed', title: 'mcp.x.y', kind: 'other', status: 'in_progress', rawInput: { a: 1 } },
+      { sessionUpdate: 'tool_call_update', toolCallId: 'mixed', content: [{ type: 'content', content: { type: 'text', text: 'hello' } }, { type: 'content', content: { type: 'image', mimeType: 'image/png', data: 'AAAA' } }] },
+      done('mixed'),
+    ]));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'hook', input: [{ type: 'text', text: 'wire' }] }));
+    const seen = await until(output, 'turn.completed');
+    const check = items => {
+      const rows = items.filter(item => /^(hook-|mixed)/u.test(item.itemId)).map(item => [item.itemId, item.toolName, item.arguments]);
+      assert.deepEqual(rows.slice(0, 2), [
+        ['hook-edit', 'edit', { file_path: '/tmp/a.txt', old_string: 'x', new_string: 'y', replace_all: true }],
+        ['hook-write', 'write', { file_path: '/tmp/b.txt', content }],
+      ]);
+      assert.equal(rows.length, 3);
+      assert.deepEqual(items.find(item => item.itemId === 'mixed').output.content, [{ type: 'text', text: 'hello' }, { type: 'image', mimeType: 'image/png', base64Data: 'AAAA' }]);
+    };
+    check(events(seen, 'item.completed').map(event => event.snapshot.item));
+    await session.close();
+    const resumed = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: session.initialState.nativeRef }));
+    check(value(await resumed.readSnapshot()).turns[0].items.map(entry => entry.item));
   } finally { await adapter.close(); await f.close(); }
 });

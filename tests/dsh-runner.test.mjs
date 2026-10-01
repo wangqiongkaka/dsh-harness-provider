@@ -263,7 +263,7 @@ test('工具运行期间的正文和通知不会拆开调用与结果',async()=>
   output.start(prose);
   output.update(prose.itemId,{type:'text.append',text:'，请稍候'});
   await output.complete({item:{...prose,text:'执行中，请稍候'},outcome:{status:'succeeded'}});
-  await output.complete({item:{type:'contextCompaction',itemId:'notice'},outcome:{status:'succeeded'}});
+  await output.complete({item:{type:'notice',itemId:'notice',severity:'warning',title:'运行提示',text:'工具执行中'},outcome:{status:'succeeded'}});
   if(question){answer.resolve({answers:[]});await question;}
   else if(!cancel) await output.complete({item:{...command,output:'ok'},outcome:{status:'succeeded'}});
   await output.finish();
@@ -274,6 +274,8 @@ test('工具运行期间的正文和通知不会拆开调用与结果',async()=>
   assert.equal(messages[call+1].toolCallId,question?'question:overlap':command.itemId,'工具调用的下一条消息必须是对应结果');
   assert.equal(messages[call+1].isError,cancel);
   assert.equal(messages[call+2].content[0].text,'执行中，请稍候');
+  assert.equal(messages[call+3].source.form,'notice');
+  assert.equal(messages[call+3].content[0].text,'运行提示\n工具执行中');
   const assistants=agent.session.snapshotEvents().filter(e=>e.type==='assistant/message');
   assert.deepEqual(assistants.map(e=>e.data.step),[1,2]);
   validateStoredEvents(agent.session.header,structuredClone(agent.session.snapshotEvents()));
@@ -464,5 +466,64 @@ test('a branch switched from another Harness hands its inherited history to the 
   assert.equal(opened[1].kind,'resume');
   assert.match(opened[1].instructions,/较早的 \d+ 个字符已省略/);assert.doesNotMatch(opened[1].instructions,/next step|after resume/);
   await adapter.close();
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});
+
+test('a tool image that cannot be read becomes a note in the result instead of failing the turn',async()=>{
+ const ctx=new Context();
+ try{
+  for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+  await ctx.plugin(Loop,{agents:[]});
+  const {agent}=await ctx.agents.create({sessionId:SessionId('unreadable-image'),meta:{cwd:tmpdir()}});
+  agent.session.append('turn/start',{turn:1});
+  agent.session.append('step/start',{turn:1,step:1});
+  const output=new DshOutput(ctx,agent,{turn:1,step:1},()=>1,()=>({provider:'fixture',model:'fixture'}));
+  const item={type:'toolExecution',itemId:'view',toolName:'view_image',arguments:{path:'/nonexistent/shot.png'}};
+  output.start(item);
+  await output.complete({item:{...item,output:{content:[{type:'text',text:'viewed'},{type:'imageFile',path:'/nonexistent/shot.png'}]}},outcome:{status:'succeeded'}});
+  await output.finish();
+  const result=agent.session.snapshotEvents().find(e=>e.type==='tool/result').data.message;
+  assert.equal(result.isError,false);
+  assert.equal(result.content[0].text,'viewed');
+  assert.match(result.content[1].text,/\/nonexistent\/shot\.png/);
+  validateStoredEvents(agent.session.header,structuredClone(agent.session.snapshotEvents()));
+ }finally{await ctx.fiber.dispose();}
+});
+
+test('a notice the Harness sends once its turn is over waits for the step instead of splitting a tool call from its result',{timeout:10000},async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-late-notice-')),ctx=new Context();
+ const bindings=new Bindings(join(root,'bindings')),id=SessionId('late-notice');
+ try{
+  for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+  await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+  let agent;
+  const adapter={async open(){
+   const channel=new HarnessOutputChannel(),emit=event=>channel.emit({kind:'event',event});
+   return {ok:true,value:{initialState:{nativeRef:{harnessId:'codex',nativeSessionId:'native-late-notice',formatVersion:1}},initialUsage:null,outputs:channel.outputs,
+    async execute(command){
+     const turnId=command.turnId,item={type:'commandExecution',itemId:'exec-late',command:'pwd'};
+     void (async()=>{
+      emit({type:'turn.started',turnId});emit({type:'item.started',turnId,item});
+      while(!agent.session.snapshotEvents().some(e=>e.type==='tool/call')) await new Promise(resolve=>setTimeout(resolve,5));
+      // The adapter reports this outside its turn, while the host still has the tool result queued.
+      emit({type:'session.notice',notice:{type:'notice',itemId:'late',severity:'warning',title:'连接提醒',text:''}});
+      await new Promise(resolve=>setTimeout(resolve,20));
+      emit({type:'item.completed',turnId,snapshot:{item:{...item,output:'ok',exitCode:0},outcome:{status:'succeeded'}}});
+      emit({type:'turn.completed',turnId,outcome:{status:'succeeded'}});
+     })();
+     return {ok:true,value:{turnId}};
+    },async close(){channel.end();}}};
+  }};
+  const runner=new DshRunner(ctx,bindings,{codex:adapter});
+  ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+  await ctx.plugin(Loop,{agents:[]});
+  await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
+  ({agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}}));
+  agent.followup(createUserMessage({content:[{type:'text',text:'go'}],source:{kind:'user'}}));await agent.whenIdle();
+  const events=agent.session.snapshotEvents(),call=events.findIndex(e=>e.type==='tool/call');
+  assert.equal(events[call+1].type,'tool/result','工具调用的下一条记录必须是对应结果');
+  const notice=events.findIndex(e=>e.type==='user/message'&&e.data.source.summary==='连接提醒');
+  assert.ok(notice>events.findLastIndex(e=>e.type==='step/end'),'通知在该步结束后落盘');
+  validateStoredEvents(agent.session.header,structuredClone(events));
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });

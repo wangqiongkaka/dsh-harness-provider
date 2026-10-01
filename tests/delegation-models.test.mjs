@@ -147,5 +147,38 @@ test('delegation and discussion start sessions on a validated model and thinking
   await h.bindings.writeDefaults({codex:{model:{id:'gone'}}});
   dock=await h.models({sessionId:'source',harness:'codex'});
   assert.equal(dock.defaultModel?.id,'deep','a remembered model the catalog no longer offers falls back to the Harness default');
+
+  // Live menus follow this session's directory; a delegation still uses a fresh target/default directory.
+  await h.bindings.write({version:1,sessionId:'source',harness:'codex',cwd:root,locked:false,configs:{flag:false}});
+  const beforeLive=inspects;
+  const liveCatalog={...catalog,models:[{ref:{id:'live'},label:'Live'}],configOptions:[{id:'flag',label:'Flag',currentValue:true}]};
+  h.runner.live.set('source',{session:{harnessId:'codex',initialState:{},inspect:()=>({status:'ready',catalog:liveCatalog}),async close(){}},queue:[],activeAt:Date.now()});
+  assert.equal((await h.models({sessionId:'source'})).models[0].id,'live');
+  assert.equal((await h.models({sessionId:'source'})).configOptions[0].currentValue,true);
+  assert.equal(inspects,beforeLive);
+  assert.equal((await h.models({sessionId:'source',harness:'codex'})).models[0].id,'fast');
+
+  // A live session of another Harness stands in for neither this binding's directory nor its values.
+  catalog.configOptions=[{id:'flag',label:'Flag',currentValue:true}];h.catalogs.clear();
+  h.runner.live.set('source',{session:{harnessId:'claude-code',initialState:{},inspect:()=>({status:'ready',catalog:liveCatalog}),async close(){}},queue:[],activeAt:Date.now()});
+  const other=await h.models({sessionId:'source'});
+  assert.equal(other.models[0].id,'fast');
+  assert.equal(other.configOptions[0].currentValue,false);
+  h.runner.live.delete('source');
+
+  // One login reported with more or fewer fields keeps the caches and stays visible while idle; another login drops them.
+  const account=(email,extra={})=>({kind:'account',label:'Pro',account:{email,...extra}});
+  const probes=inspects;
+  h.runner.authChanged('codex',account('a@example.com'));
+  h.runner.authChanged('codex',account('a@example.com',{organization:'Org'}));
+  await h.models({sessionId:'source',harness:'codex'});
+  assert.equal(inspects,probes);
+  assert.equal((await h.state({sessionId:'source'})).authStatus.account.organization,'Org');
+  h.runner.authChanged('codex',account('b@example.com'));
+  await h.models({sessionId:'source',harness:'codex'});
+  assert.equal(inspects,probes+1);
+  h.runner.authChanged('codex',{kind:'none',label:'未登录'});
+  await h.models({sessionId:'source',harness:'codex'});
+  assert.equal(inspects,probes+2);
  } finally { await ctx.fiber.dispose();await rm(root,{recursive:true,force:true}); }
 });

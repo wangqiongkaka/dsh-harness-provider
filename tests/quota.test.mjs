@@ -168,3 +168,18 @@ test('外部 Harness 额度缓存：探测失败记为无数据直到下一回�
  assert.equal((await cache.read()).total, '5');
  assert.equal(probes, 3);
 });
+
+
+test('账户切换清空额度并丢弃旧账户正在进行的探测', async () => {
+ const pending = [];
+ const cache = new HarnessQuotaCache(() => new Promise(resolve => pending.push(resolve)));
+ const old = cache.read();
+ cache.reset();
+ const current = cache.read();
+ const quota = total => ({ kind:'balance',source:'codex',currency:'CNY',total,granted:'0',toppedUp:total });
+ pending[1](quota('20'));
+ assert.equal((await current).total,'20');
+ pending[0](quota('10'));
+ await old;
+ assert.equal((await cache.read()).total,'20');
+});

@@ -280,18 +280,21 @@ function Cell({ label, value, onClick }: { label: string; value: string; onClick
   </button>;
 }
 
-/** Polls `load` while mounted: immediately, on every dependency change, and every `everyMs`. */
-function usePolled<V>(load: () => Promise<V>, everyMs: number, deps: unknown[]): V | undefined {
-  const [state, setState] = useState<V>();
+/**
+ * Polls `load` while mounted: immediately, on every dependency change, and every `everyMs`. A reading shows only while
+ * `identity` — whose reading it is, a subset of `deps` — is unchanged; any other dependency just re-reads it.
+ */
+function usePolled<V>(load: () => Promise<V>, everyMs: number, deps: unknown[], identity: unknown[] = deps): V | undefined {
+  const [state, setState] = useState<{ identity: unknown[]; value: V }>();
   useEffect(() => {
     let live = true;
-    const tick = () => { void load().then(next => { if (live) setState(next); }).catch(() => {}); };
+    const tick = () => { void load().then(next => { if (live) setState({ identity, value: next }); }).catch(() => {}); };
     tick();
     const timer = setInterval(tick, everyMs);
     return () => { live = false; clearInterval(timer); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
-  return state;
+  return state && state.identity.length === identity.length && state.identity.every((entry, index) => Object.is(entry, identity[index])) ? state.value : undefined;
 }
 
 /**
@@ -622,7 +625,7 @@ function ContextRing({ usage, t }: { usage: Usage | undefined; t: T }) {
 /** A Harness session's context reading, in the dock slot where DSH native sessions show theirs; DSH sessions read null. */
 export function HarnessContext({ sessionId, useSessions, usage, t }: ContextDockProps) {
   const running = useSessions(s => s.byId[sessionId]?.running);
-  const view = usePolled(() => usage(sessionId), running ? 5_000 : 30_000, [sessionId, running]);
+  const view = usePolled(() => usage(sessionId), running ? 5_000 : 30_000, [sessionId, running], [sessionId]);
   return <ContextRing usage={view ?? undefined} t={t} />;
 }
 
@@ -685,7 +688,7 @@ export function SecretPanel({ sessionId, read, answer }: { sessionId: string; re
         : <><select name={question.id} multiple={question.multiple} required={!question.optional && !question.allowOther} disabled={busy} defaultValue={question.multiple ? [] : ''}>
           {!question.multiple && <option value="">请选择</option>}
           {question.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>{question.allowOther && <input name={`${question.id}:other`} aria-label="其他答复" disabled={busy}/>}</>}
+        </select>{question.allowOther && <input name={`${question.id}:other`} type={question.secret ? 'password' : 'text'} aria-label="其他答复" autoComplete="off" disabled={busy}/>}</>}
     </label>)}
     {error && <p role="alert">提交失败，请检查问题是否已过期，重新填写后再提交。</p>}
     <button type="submit" disabled={busy}>提交</button>
@@ -715,7 +718,10 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
   // Switching the session's model provider changes whose account the quota describes, so the provider joins the
   // dependencies: a switch re-reads at once, while the interval still covers a window moving on its own.
   const provider = useModelProvider(modelProvider, sessionId);
-  const quotaView = usePolled(() => quota(sessionId), 60_000, [sessionId, state?.harness, summary?.running, provider]);
+  const authStatus = usePolled(() => state?.harness && state.harness !== 'dsh' ? read(sessionId).then(next => next.authStatus ?? null) : Promise.resolve(null), 15_000, [sessionId, state?.harness]);
+  // The login itself, as the host compares it: a status still loading or absent is not another account.
+  const account = authStatus ? `${authStatus.kind}\0${authStatus.account?.email ?? authStatus.detail ?? ''}` : '';
+  const quotaView = usePolled(() => quota(sessionId), 60_000, [sessionId, state?.harness, summary?.running, provider, account], [sessionId, state?.harness, provider, account]);
   useViewing(viewing, sessionId, state !== undefined && state.harness !== 'dsh' && (summary?.retainedBy.mainView ?? 0) > 0);
   async function choose(next: State['harness']) {
     const version = generation.current; setBusy(true); setError(undefined); setOpen(false);
@@ -739,6 +745,7 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
         {(['dsh', 'codex', 'claude-code'] as const).map(id => <Option key={id} label={id === 'dsh' ? t('native') : names[id]} selected={current === id} onClick={() => void choose(id)} />)}
       </div>}
     </div>
+    {authStatus && <span className="hp-chip-label" role="status" title={authStatus.detail ?? authStatus.account?.email}>{authStatus.label}</span>}
     <QuotaChip quota={quotaView} t={t} />
     {current !== 'dsh' && state?.recoveryRequired && <SessionRecovery key={`recovery:${sessionId}`} sessionId={sessionId} recover={recover} running={!!summary?.running} onChange={setState} />}
     <SecretPanel key={sessionId} sessionId={sessionId} read={secretStatus} answer={answerSecret} />
@@ -760,6 +767,8 @@ export function HarnessPermission({ sessionId, locked, useSessions, read, models
   const close = useCallback(() => setOpen(false), []);
   useDismiss(open, close, root);
   useEffect(() => subscribe(() => setReload(n => n + 1)), [subscribe]);
+  // Opening re-reads the directory. Closing does not: a pick closes the menu and still has to land its answer.
+  useEffect(() => { if (open) setReload(n => n + 1); }, [open]);
   const summary = useSessions(s => s.byId[sessionId]);
   useEffect(() => {
     const version = ++generation.current;
@@ -816,6 +825,7 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
   const root = useRef<HTMLDivElement>(null);
   const close = useCallback(() => { setOpen(false); setPane('root'); }, []);
   useEffect(() => subscribe(() => setReload(n => n + 1)), [subscribe]);
+  useEffect(() => { if (open) setReload(n => n + 1); }, [open]);
   useDismiss(open, close, root);
   const summary = useSessions(s => s.byId[sessionId]);
   useEffect(() => {

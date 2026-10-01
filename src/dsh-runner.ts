@@ -1,9 +1,9 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent';
 import { SessionId } from '@deepseek-ai/dsh-session';
-import type { UserMessage, TokenUsage } from '@deepseek-ai/dsh-llm';
+import { createUserMessage, type UserMessage, type TokenUsage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
-import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostUsage } from './contracts.js';
+import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostItemOf, HostUsage } from './contracts.js';
 import { hostTurnIdSchema } from './contracts.js';
 import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { SecretQuestions } from './secret-questions.js';
@@ -17,7 +17,7 @@ export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
 }
-type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; modelLabel?: string; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; turnId?: import('./contracts.js').HostTurnId; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
+type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; modelLabel?: string; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; held?: HostItemOf<'notice'>[]; turnId?: import('./contracts.js').HostTurnId; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
 /**
  * How long an external Harness session may sit idle — no turn, and off screen — before its process is closed; the next
  * turn resumes it from its binding. Clients report a shown session every 15 seconds, well inside this window.
@@ -26,11 +26,12 @@ const IDLE_CLOSE_MS = 60_000;
 /** How often the idle reclaimer looks for sessions to close; short idle windows (tests) sweep proportionally faster. */
 const idleSweepMs = (idleCloseMs: number) => Math.min(60_000, Math.max(5, Math.floor(idleCloseMs / 4)));
 /** Drains the native session continuously: usage readings land as they arrive (also between turns), everything else queues for the turn loop. */
-function pump(live: Live): void {
+function pump(live: Live, sessionEvent: (event: Extract<import('./contracts.js').HostEvent, { type: 'session.auth.changed' | 'session.notice' }>) => void): void {
   void (async () => {
     try {
       for await (const value of live.session.outputs) {
         if (value.kind === 'event' && value.event.type === 'session.usage.changed') { live.usage = value.event.usage; continue; }
+        if (value.kind === 'event' && (value.event.type === 'session.auth.changed' || value.event.type === 'session.notice')) { sessionEvent(value.event); continue; }
         live.queue.push(value);
         live.wake();
       }
@@ -52,6 +53,11 @@ export function usageDelta(before: HostUsage | null, after: HostUsage | null): T
   const cacheWriteTokens = step('cacheWriteInputTokens');
   return { inputTokens: Math.max(0, input - cacheReadTokens - cacheWriteTokens), outputTokens, cacheReadTokens, cacheWriteTokens };
 }
+/** A Harness notice outside any turn item, as a notice message of the DSH session. */
+function note(agent: Agent, notice: HostItemOf<'notice'>): void {
+  agent.session.append('user/message', createUserMessage({ source: { kind: 'dsh-harness-provider', form: 'notice', summary: notice.title },
+    content: [{ type: 'text', text: `${notice.title}${notice.text ? `\n${notice.text}` : ''}` }] }), { surfaceOp: 'append' });
+}
 async function take(live: Live): Promise<HarnessOutput | undefined> {
   while (!live.queue.length) {
     if (live.ended) return undefined;
@@ -69,7 +75,7 @@ export class DshRunner {
   private readonly idleCloseMs: () => number;
   constructor(private readonly ctx: Context, private readonly bindings: Bindings,
     private readonly adapters: Record<Binding['harness'], HarnessAdapter>, private readonly delegation?: DelegationBridge, readonly secrets = new SecretQuestions(),
-    idleClose: number | (() => number) = IDLE_CLOSE_MS, private readonly branchContextChars: () => number = () => 60_000) {
+    idleClose: number | (() => number) = IDLE_CLOSE_MS, private readonly branchContextChars: () => number = () => 60_000, private readonly authChanged: (harness: Binding['harness'], status: import('./contracts.js').HarnessAuthStatus) => void = () => {}) {
     this.idleCloseMs = typeof idleClose === 'function' ? idleClose : () => idleClose;
     // A Harness process holds the native conversation, so it lives as long as the session does; idling that long
     // buys nothing and keeps a CLI process (and its memory) resident, so it is closed and resumed on the next turn.
@@ -158,7 +164,13 @@ export class DshRunner {
         : { kind: 'create', cwd: binding.cwd, ...hints }));
       live = { session, revision: 0, usage: session.initialUsage, queue: [], ended: false, wake: () => {}, activeAt: Date.now(),
         ...(session.initialState.resolvedModelLabel ? { modelLabel: session.initialState.resolvedModelLabel } : {}) };
-      pump(live);
+      const opened = live;
+      pump(opened, event => {
+        if (event.type === 'session.auth.changed') this.authChanged(binding.harness, event.authStatus);
+        // The adapter's turn is over, yet this turn's tool results may still be queued here: the notice waits for the step to end.
+        else if (opened.held) opened.held.push(event.notice);
+        else note(agent, event.notice);
+      });
       this.live.set(agent.id, live);
       this.retainedSubagents.delete(agent.id);
       const owned = live;
@@ -203,6 +215,7 @@ export class DshRunner {
     for (const message of messages) agent.session.append('user/message', message, { surfaceOp: 'append' });
     live.activeAt = Date.now();
     try {
+      current.held = [];
       await this.ctx.sessions.flush(agent.session);
       signal.throwIfAborted();
       binding.pending = turnId;
@@ -281,7 +294,11 @@ export class DshRunner {
       turnAbort.abort();
       await Promise.allSettled(questions);
       await cancelWork;
-      try { await output.finish(); } finally { agent.session.append('step/end', { turn, step: output.step }); }
+      try { await output.finish(); } finally {
+        agent.session.append('step/end', { turn, step: output.step });
+        for (const notice of current.held?.splice(0) ?? []) note(agent, notice);
+        current.held = undefined;
+      }
     }
     // The intercepted pre-step returns no Host messages, so its loop skips the usual turn-stopping event.
     await agentEvents(this.ctx, agent).serial('agent/turn-stopping', { turn, signal });
@@ -315,7 +332,7 @@ export class DshRunner {
       unwrap(await session.execute({ type: 'interaction.respond', interactionId: interaction.interactionId, response }));
       return;
     }
-    if (interaction.type === 'question' && interaction.questions.some(q => q.type === 'text' && q.secret)) {
+    if (interaction.type === 'question' && interaction.questions.some(q => q.secret)) {
       const response = await this.secrets.ask(agent.id, interaction, signal);
       if (!response) return;
       signal.throwIfAborted();
