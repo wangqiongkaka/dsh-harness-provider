@@ -10,7 +10,14 @@ test('Codex and Claude receive the same per-step progress contract', () => {
   assert.equal(claudeProfile({ command: process.execPath, environment: {} }).sessionMeta('resume', '\n\n[HOST]').systemPrompt.append, `${claude}\n\n[HOST]`);
   assert.equal(codexInstructions({}, '\n\n[HOST]').developer_instructions, `${claude}\n\n[HOST]`);
   // Codex developer instructions join a CODEX_CONFIG the user already set instead of replacing it.
-  assert.deepEqual(codexInstructions({ CODEX_CONFIG: JSON.stringify({ model: 'm', developer_instructions: 'MINE' }) }), { model: 'm', developer_instructions: `MINE\n\n${claude}` });
+  // Codex offers its waiting question tool only in Plan mode unless this feature is on; without it no question panel can open.
+  const waiting = { default_mode_request_user_input: true };
+  assert.deepEqual(codexInstructions({ CODEX_CONFIG: JSON.stringify({ model: 'm', developer_instructions: 'MINE' }) }), { model: 'm', developer_instructions: `MINE\n\n${claude}`, features: waiting });
+  assert.deepEqual(codexInstructions({}).features, waiting);
+  assert.deepEqual(codexInstructions({ CODEX_CONFIG: JSON.stringify({ features: { goals: false } }) }).features, { ...waiting, goals: false });
+  assert.deepEqual(codexInstructions({ CODEX_CONFIG: JSON.stringify({ features: { default_mode_request_user_input: false } }) }).features, { default_mode_request_user_input: false });
+  // Codex's other question tool does not wait and shows no panel here, so the contract names it as the one to avoid.
+  assert.match(codex, /不要使用 request_user_input_async/);
   assert.match(codex, /每个执行步骤开始前，先用一句话说明该步骤的目标/);
   assert.match(codex, /调用 Bash 时用中文提供简短的 description/); // the activity list reads in Chinese
   assert.doesNotMatch(codex, /简单任务不必重复播报/);

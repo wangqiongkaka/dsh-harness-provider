@@ -13,7 +13,8 @@
     "dev:link": "node scripts/link-references.mjs",
     "check": "npm run typecheck && npm run build && npm test",
     "probe:web": "node experiments/dsh-web-probe.mjs",
-    "probe:acp": "node experiments/acp-native-probe.mjs"
+    "probe:acp": "node experiments/acp-native-probe.mjs",
+    "probe:questions": "node experiments/user-input-probe.mjs"
   },
   "files": [
     "dist/dsh.js",

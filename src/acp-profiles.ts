@@ -133,11 +133,18 @@ function withCuaProxy(config: Record<string, unknown>, environment: NodeJS.Proce
   } catch { /* Keep Codex's native configuration if the plugin cache is unavailable. */ }
   return config;
 }
-/** A CODEX_CONFIG the user already set keeps its settings; its own developer instructions come first. */
+/**
+ * A CODEX_CONFIG the user already set keeps its settings; its own developer instructions come first.
+ *
+ * Codex answers `request_user_input` with "unavailable in Default mode" unless this feature is on, and DSH's question panel
+ * opens only for that waiting tool. A value the user set wins.
+ * ponytail: the flag is "under development" in Codex 0.159; drop it once Codex offers the tool in Default mode by itself.
+ */
 function withDeveloperInstructions(raw: string | undefined, instructions: string, environment: NodeJS.ProcessEnv): string {
   const config = raw ? JSON.parse(raw) as Record<string, unknown> : {};
   const own = typeof config.developer_instructions === 'string' && config.developer_instructions ? `${config.developer_instructions}\n\n` : '';
-  return JSON.stringify(withCuaProxy({ ...config, developer_instructions: own + instructions }, environment));
+  const features = { default_mode_request_user_input: true, ...(isRecord(config.features) ? config.features : {}) };
+  return JSON.stringify(withCuaProxy({ ...config, developer_instructions: own + instructions, features }, environment));
 }
 /** The live settings both profiles share: timeouts, the tool output limit and stderr debugging. */
 const limitsOf = (settings: SettingsSource) => (): Partial<AcpLimits> => {

@@ -2,6 +2,15 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## Codex 默认模式下的提问面板（2026-10-01）
+
+- 现象：Codex 会话有时说“已发出选项”却没有弹出选项面板。原生记录显示模型调用的是 `request_user_input_async`，立即得到 `{"accepted":true}` 后继续并结束该轮。
+- 原因一：Codex 的等待式工具 `request_user_input` 在默认协作模式下返回 `request_user_input is unavailable in Default mode`，只有打开 `features.default_mode_request_user_input` 才可用（Codex CLI 0.159.2，标记为 under development）。插件此前没有设置它，而提示文字要求模型使用这个工具。
+- 原因二：带 `request_user_input_async` 的模型（模型目录的 `model_messages` 引导使用它）改用这个不等待的工具。Codex 把问题作为一条已完成的助手消息（`delivery: "async"`）发出，没有增量；codex-acp 2.1.0 的 `createItemEvent` 对已完成的 `agentMessage` 只记录阶段并返回 `null`（`node_modules/@agentclientprotocol/codex-acp/dist/index.js`），所以问题正文也不显示。
+- 修正：`CODEX_CONFIG` 合并 `features.default_mode_request_user_input = true`（用户自己设置的值优先）；交互说明明确 Codex 不要使用 `request_user_input_async`；构建时给 codex-acp 加一处补丁，把 `delivery: "async"` 的已完成消息作为助手消息转发，模型仍用异步工具时问题和选项至少以文字显示。
+- 未做：把异步提问变成可点击的面板。它不等待回答，选择只能作为下一条用户消息发出，与等待式提问的语义不同。
+- 验证：`node experiments/user-input-probe.mjs`（真实 Codex CLI 与打包的 codex-acp，本地模型夹具）。修正前失败于 `request_user_input is unavailable in Default mode`；修正后两项均通过。异步一项需要含该工具的模型目录，默认读取 `~/.codex/models_cache.json`。
+
 ## ACP 2.1.0 同步兼容（2026-10-01）
 
 - Codex ACP 更新至 `2.1.0`；Claude ACP `0.84.0`、ACP SDK `1.5.1`、Claude Agent SDK `0.3.284` 保持当前版本。本次按 npm 发布包的 ACP v1 接口实现，未切换尚未发布的 v2 路由。

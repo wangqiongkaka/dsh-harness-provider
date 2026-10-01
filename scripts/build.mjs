@@ -12,9 +12,14 @@ await copyFile('src/delegate-cli.mjs', 'dist/delegate-cli.mjs');
 const quietBypassNotice = {
   name: 'quiet-bypass-notice',
   setup(pluginBuild) {
-    pluginBuild.onLoad({ filter: /codex-acp[\\/]dist[\\/]index\.js$/ }, async ({ path }) => ({
-      contents: discussionSandbox(await readFile(path, 'utf8')), loader: 'js',
-    }));
+    pluginBuild.onLoad({ filter: /codex-acp[\\/]dist[\\/]index\.js$/ }, async ({ path }) => {
+      // Codex posts the questions of request_user_input_async as a finished agent message (`delivery: "async"`) with no
+      // deltas, and codex-acp forwards agent text only from deltas, so the questions would never show.
+      const source = discussionSandbox(await readFile(path, 'utf8'));
+      const seam = '      case "agentMessage":\n        this.rememberAgentMessagePhase(event.item);\n        return null;\n      case "plan":\n        return await this.createCompletedPlanEvent(event.item);';
+      if (source.split(seam).length !== 2) throw new Error('codex-acp completed agent message seam changed');
+      return { contents: source.replace(seam, seam.replace('return null;', 'return event.item.delivery === "async" && event.item.text\n          ? createAgentTextMessageChunk(event.item.text, event.item.id, createMessagePhaseMeta(event.item.phase ?? null, this.sessionState.clientCapabilities.airClient)) : null;')), loader: 'js' };
+    });
     // Claude replays marker-only /rename as a user turn although the CLI handled it locally.
     pluginBuild.onLoad({ filter: /claude-agent-acp[\\/]dist[\\/]acp-agent\.js$/ }, async ({ path }) => {
       const source = await readFile(path, 'utf8'), seam = 'const REPLAY_HIDDEN_COMMANDS = new Set([\n';
