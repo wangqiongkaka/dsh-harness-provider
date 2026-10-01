@@ -42,3 +42,36 @@ root.render(<App />);`, resolveDir: resolve('src'), loader: 'tsx' }, bundle: tru
     assert.equal(await statuses.count(), 0);
   } finally { await browser.close(); }
 });
+
+// A subscription login reports its plan as the status label ("ChatGPT Plus"); the composer row keeps
+// that out, and still says when the Harness is not logged in.
+test('Harness selector hides the subscription plan label and keeps other account statuses', async () => {
+  const require = createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+  const bundle = await build({ stdin: { contents: await readFile('src/client.tsx', 'utf8') + `
+import { createRoot } from 'react-dom/client';
+const states = {
+  plan: { harness: 'codex', locked: true, authStatus: { kind: 'chatgpt', label: 'ChatGPT Plus', account: { email: 'a@b.c', plan: 'plus' } } },
+  none: { harness: 'codex', locked: true, authStatus: { kind: 'none', label: '未登录' } },
+};
+const idle = async () => null;
+const noop = () => {};
+const useSessions = pick => pick({ byId: { plan: { running: false, blank: false, retainedBy: { mainView: 0 } }, none: { running: false, blank: false, retainedBy: { mainView: 0 } } } });
+function Row({ id }) {
+  const read = async () => states[id];
+  return <div id={id}><HarnessSelect sessionId={id} useSessions={useSessions} read={read} select={read} quota={idle}
+    viewing={idle} modelProvider={() => null} changed={noop} secretStatus={idle} answerSecret={idle}
+    recover={read} t={key => ({ harness: '选择 Harness' }[key] ?? key)} /></div>;
+}
+createRoot(document.querySelector('#root')).render(<><Row id="plan" /><Row id="none" /></>);`, resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false,
+    platform: 'browser', format: 'iife', jsx: 'automatic',
+    alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom/client': require.resolve('react-dom/client') } });
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<div id="root"></div>');
+    await page.addScriptTag({ content: bundle.outputFiles[0].text });
+    await page.locator('#none [role=status]', { hasText: '未登录' }).waitFor();
+    assert.equal(await page.locator('#plan [role=status]').count(), 0);
+    assert.equal(await page.getByText('ChatGPT Plus').count(), 0);
+  } finally { await browser.close(); }
+});
