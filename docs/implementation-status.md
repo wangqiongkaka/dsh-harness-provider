@@ -2,6 +2,16 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## 开发时免重启重载（2026-10-02）
+
+- 做法：不在插件内实现重载，使用 DSH 自带的热重载。Profile 以 `link:` 安装 `.cache/live`，并在 `cordis.patch.yml` 的 `hmr` 条目里把 `base` 指向该目录、`root` 设为 `dist`；`npm run dev:reload` 构建后把发布文件复制进去，入口 `dist/dsh.js` 最后写入。设置步骤见 README。
+- 为什么必须链接安装：宿主 `dsh-hmr` 在收集依赖和判定重载时跳过路径含 `/node_modules/` 的模块（`deepseek-harness/packages/boot/hmr/src/index.ts` 的 `loadDependencies` 与 `analyzeChanges`），以 tgz 安装的实体包永远不会被重载。
+- 为什么不直接监听 `dist/`：`npm run check` 会重建 `dist/`，而重载会执行 `harness: adapters` 的释放逻辑，取消所有运行中的轮次；在 DSH 里用本插件开发本插件时，检查会打断正在跑检查的会话。
+- 验证：隔离的 `DSH_HOME`（Web Profile，DSH 0.2.0-rc.2）中，发布后宿主在不重启进程的情况下重新求值 `dist/dsh.js` 并重新执行 `apply`；仅运行 `npm run build` 不触发；触碰 live 中的 `dist/client.js` 后，`/plugins/events` 推送了本插件的 `rebuilt` 帧。进程带或不带 `--expose-internals` 都会重载（不带时宿主经 `node-addon-require-builtin` 取得模块加载器，`deepseek-harness/vendor/loader/src/internal.ts` 的 `requireInternal`）。新增 `tests/dev-reload.test.mjs`，在脚本缺失和入口先写两种情况下均失败；`npm run check` 全部 135 项通过。
+- 清单修正：`dist/dsh.js` 运行时导入 `@deepseek-ai/dsh-brand`，此前未声明为 peer。宿主对链接安装的插件只把声明为 peer 的包路由到自带副本（`deepseek-harness/packages/boot/app-boot/src/profile-resolution/resolver.ts` 的 `routeLinked`），其余按 Node 默认规则向上查找；未声明时只能经由本仓库 `node_modules` 的开发链接解析，上层没有 `node_modules` 的链接目录会报 `failed to import`。现已补入 `peerDependencies`，并加测试要求入口导入的每个 `@deepseek-ai/*` 包都已声明（修正前失败）。
+- 多插件监听：`base` 设为共同父目录、`root` 列出三个目录（本插件的 `.cache/live/dist`、`dsh-git-sidebar/lib`、`dsh-remote-control/lib`）时，三个插件的主机侧入口各自改动后都被重新求值，进程不重启。使用三个插件的副本在隔离环境中验证，未改动另外两个仓库。
+- 未验证：桌面版上的实际表现（界面不刷新即更新、桌面壳转发事件流）、重载后已有 Harness 会话继续对话。
+
 ## Codex 默认模式下的提问面板（2026-10-01）
 
 - 现象：Codex 会话有时说“已发出选项”却没有弹出选项面板。原生记录显示模型调用的是 `request_user_input_async`，立即得到 `{"accepted":true}` 后继续并结束该轮。

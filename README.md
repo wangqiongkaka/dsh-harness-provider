@@ -194,6 +194,30 @@ npm run check
 
 在 DSH `0.1.7-rc.2` 参考构建上运行 `npm run check`；DSH `0.2.0-rc.1` 桌面版发行包还验证了类型检查、构建和发行版测试，覆盖工具结果、通知来源、实时额度配置、并行调用日志、取消与会话冷恢复。DSH `0.2.0-rc.2` 桌面版已验证安装、冷启动和插件加载。
 
+### 免重启重载
+
+开发时可以让运行中的 DSH 直接换上新构建，不必重新打包、安装和重启。重载由 DSH 自带的热重载完成，本插件只负责把构建发布到被监听的目录。
+
+一次性设置：
+
+1. 运行一次 `npm run dev:reload`，生成 `.cache/live`。
+2. 在目标 Profile 中把本插件改为链接安装：先移除已安装的包，再添加 `link:<本仓库绝对路径>/.cache/live`。桌面版的 Profile 只能在应用内的插件管理器中操作（`dsh plugin --profile desktop` 会被拒绝），其他 Profile 使用 `dsh plugin --profile <名称> remove|add`。DSH 的热重载不处理安装在 `node_modules` 内的实体包，只有链接安装才会被重载。
+3. 在该 Profile 的 `cordis.patch.yml` 中打开模块监听，然后重启一次 DSH：
+
+   ```yaml
+   - id: hmr
+     name: "@deepseek-ai/dsh-hmr"
+     config:
+       base: <本仓库绝对路径>/.cache/live
+       root: [dist]
+   ```
+
+   `hmr` 条目只有一个 `base`。同一个 Profile 还要监听其他链接安装的插件时，把 `base` 设为它们的共同父目录，在 `root` 中逐个列出各插件的产物目录（本插件为 `dsh-harness-provider/.cache/live/dist`）。
+
+之后每次运行 `npm run dev:reload`，DSH 会重新加载插件的主机侧和界面。`npm run build` 与 `npm run check` 只写 `dist/`，不会触发重载。
+
+重载走的是与退出 DSH 相同的释放路径：取消所有正在运行的 Harness 轮次并关闭原生进程，子代理面板快照等仅存于内存的状态会丢失。
+
 其他验证命令：
 
 | 命令 | 用途 |
