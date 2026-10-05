@@ -56,6 +56,8 @@ function fakeAdapter(log,native) {
       active=undefined;return {ok:true,value:{turnId:command.turnId}};
      }
      if(text==='broken'){emit({type:'item.completed',turnId:active,snapshot:{item:{type:'agentMessage',itemId:'answer',text:'reply:broken'},outcome:{status:'succeeded'}}});emit({type:'item.updated',turnId:active,itemId:'unknown-item',update:{type:'text.append',text:'invalid'}});return {ok:true,value:{turnId:active}};}
+     // Account windows pushed mid-turn are session data, not a turn item.
+     if(text==='one') emit({type:'session.account.changed',account:{credits:{usedPercent:7,periodType:'five_hour'}}});
      emit({type:'item.started',turnId:active,item:{type:'reasoning',itemId:'reasoning',text:''}});
      emit({type:'item.updated',turnId:active,itemId:'reasoning',update:{type:'text.append',text:'Checking the workspace'}});
      emit({type:'item.completed',turnId:active,snapshot:{item:{type:'reasoning',itemId:'reasoning',text:'Checking the workspace'},outcome:{status:'succeeded'}}});
@@ -87,7 +89,7 @@ function fakeAdapter(log,native) {
 
 test('real DSH loop persists streams/tools, handles cancellation, and cold-resumes external identity', {timeout:10000}, async()=>{
  const root=await mkdtemp(join(tmpdir(),'dsh-harness-runner-'));
- const contexts=[],logs=[],native={turns:0},stopping=[];
+ const contexts=[],logs=[],native={turns:0},stopping=[],accounts=[];
  const bindings=new Bindings(join(root,'bindings'));
  const id=SessionId('integration-session');
  const frames=[];
@@ -96,7 +98,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
   await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
   const adapter=fakeAdapter(logs,native);
-  const runner=new DshRunner(ctx,bindings,{codex:adapter});
+  const runner=new DshRunner(ctx,bindings,{codex:adapter},undefined,undefined,undefined,undefined,undefined,(harness,account)=>accounts.push([harness,account]));
   ctx.on('agent/turn-stopping',({agent,turn})=>stopping.push({turn,lastEvent:agent.session.snapshotEvents().at(-1)?.type}));
   ctx.on('agent/assistant-stream',({frame})=>frames.push(frame));
   ctx.on('agent/inbox/inserted',({agent})=>runner.drainSteering(agent));
@@ -109,6 +111,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   const first=await mount();
   const {agent}=await first.ctx.agents.create({sessionId:id,meta:{cwd:root}});
   await prompt(agent,'one');await prompt(agent,'two');
+  assert.deepEqual(accounts,[['codex',{credits:{usedPercent:7,periodType:'five_hour'}}]]);
   assert.deepEqual(stopping.slice(0,2),[{turn:1,lastEvent:'step/end'},{turn:2,lastEvent:'step/end'}],
     'Harness turns must reach turn-stopping before turn/end so workspace changes can be announced in the current turn');
   const ends=agent.session.snapshotEvents().filter(e=>e.type==='turn/end');

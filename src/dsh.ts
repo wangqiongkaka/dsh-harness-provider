@@ -160,7 +160,8 @@ export class HarnessService extends TypertRemoteService {
   private readonly quotas = new Map<string, { until: number; work: Promise<Quota> }>();
   // The login each external Harness last reported; kept in memory only, so it also shows while no process is open.
   private readonly accountStatuses = new Map<Binding['harness'], HarnessAuthStatus>();
-  // External Harness account quota, one per harness: probing spawns a throwaway CLI process, so it goes stale-while-revalidate.
+  // External Harness account quota, one per harness: probing spawns a throwaway CLI process, so it goes stale-while-revalidate
+  // and stops once a running session pushes the windows itself.
   private readonly harnessQuotas = new Map<Binding['harness'], HarnessQuotaCache>();
   // One user-authorized discussion per source turn; retries share the same work instead of spawning more sessions.
   private readonly discussions = new Map<string, { requestId: string; content: ContentBlock[]; harnesses?: Binding['harness'][]; inputHash?: string; work?: Promise<DiscussionResult> }>();
@@ -180,7 +181,7 @@ export class HarnessService extends TypertRemoteService {
       if (previous ? sameLogin(previous, status) : status.kind !== 'none') return;
       for (const key of this.catalogs.keys()) if (key.startsWith(`${harness}\0`)) this.catalogs.delete(key);
       this.harnessQuotas.get(harness)?.reset();
-    });
+    }, (harness, account) => this.harnessQuota(harness)?.supply(accountQuota(account, harness)));
     ctx.effect(() => ctx.typert.register({ package: contribution.package, face: 'host', schemas: [], invocations: contribution.descriptors, model: { services: [], events: [], objects: [] } }), 'harness: Remote contracts');
     ctx.effect(() => async () => {
       this.stopped = true;
@@ -564,7 +565,6 @@ export class HarnessService extends TypertRemoteService {
     });
   }
 
-  async delegateFromUser(raw: unknown) {
   /** The registered project a delegation targets instead of the source session's own. */
   private workspace(id: string) {
     const workspace = this.ctx.get('workspaceRegistry')?.list().find(workspace => workspace.id === id);
@@ -580,11 +580,12 @@ export class HarnessService extends TypertRemoteService {
       current: workspace.sessionIds.some(id => id === sessionId) }));
   }
 
+  async delegateFromUser(raw: unknown) {
     const request = delegateFromUserRequest.parse(raw);
     // Checked before a leading skill runs or any target exists, so a bad pick never leaves a partial multi-target delegation.
     const picked = request.harnesses.flatMap(harness => harness !== 'dsh' && request.picks[harness] ? [[harness, request.picks[harness]] as const] : []);
-    if (picked.length) {
     const target = request.workspaceId ? this.workspace(request.workspaceId) : undefined;
+    if (picked.length) {
       const cwd = target?.path ?? (await this.agent(request.sessionId)).session.header.cwd;
       if (!cwd) throw new Error('请先连接工作目录');
       await Promise.all(picked.map(([harness, pick]) => this.startingModel(harness, cwd, pick)));
@@ -1258,7 +1259,7 @@ export class HarnessService extends TypertRemoteService {
     const binding = await this.bindings.read(sessionId);
     if (binding) {
       // An external Harness probe spawns a throwaway CLI process, so reads answer the cached snapshot and only a
-      // missing or reset snapshot, or a finished turn (in the background), starts a probe.
+      // missing or reset snapshot, or a finished turn of a Harness that pushes nothing (in the background), starts a probe.
       return this.harnessQuota(binding.harness)?.read() ?? null;
     }
     const route = await this.nativeRoute(agent);
@@ -1266,7 +1267,7 @@ export class HarnessService extends TypertRemoteService {
     return this.cachedQuota(`native\0${route.source}\0${route.baseURL}`, () => fetchNativeQuota(route));
   }
 
-  /** A finished turn is the moment an external Harness's account usage actually changed; refresh its cached quota. */
+  /** A finished turn is the moment an external Harness's account usage actually changed; refresh its cached quota unless sessions push it. */
   private async refreshHarnessQuota(sessionId: string): Promise<void> {
     const harness = (await this.bindings.read(sessionId))?.harness;
     if (harness) this.harnessQuota(harness)?.invalidate();
@@ -1463,11 +1464,15 @@ const settleResets = (quota: Quota, now: number): Quota => quota?.kind !== 'wind
  * background — when usage actually changed. A window whose reset time has passed reads as unused instead of probing.
  * Switching sessions and the client's polling interval otherwise only read the cache. A failed probe keeps the
  * previous value, or is remembered as "no data" until the next turn.
+ *
+ * A Harness whose sessions push the windows as they change (Claude Code) needs no probe after a turn: the pushed
+ * windows replace the cached ones, and since a push comes only on a change, one push stops the turn-end probe for good.
  */
 export class HarnessQuotaCache {
   #entry?: { value: Quota };
   #refreshing?: Promise<Quota>;
   #generation = 0;
+  #supplied = false;
   constructor(private readonly probe: () => Promise<Quota>, private readonly now: () => number = () => Date.now()) {}
 
   /** The cached quota with passed resets applied; with none, waits for one probe that concurrent reads share. */
@@ -1478,11 +1483,26 @@ export class HarnessQuotaCache {
 
   /** A finished turn changed the account; re-probe in the background while reads keep answering the old value. */
   invalidate(): void {
-    if (!this.#refreshing) void this.#refresh();
+    if (!this.#supplied && !this.#refreshing) void this.#refresh();
+  }
+
+  /**
+   * Windows a running session pushed replace their probed counterparts. Without probed windows there is nothing to
+   * merge into, and the push alone lacks the plan and the model-scoped windows, so the probe still has to come first.
+   * A pushed window the probe never reported means the two disagree on the account's shape: turns keep probing.
+   */
+  // ponytail: the plan and windows a push never carries stay as first probed until the login changes; re-probe on an
+  // interval in invalidate() if they must follow along.
+  supply(quota: Quota): void {
+    const cached = this.#entry?.value;
+    if (quota?.kind !== 'windows' || cached?.kind !== 'windows') return;
+    const pushed = new Map(quota.windows.map(window => [window.id, window]));
+    this.#entry = { value: { ...cached, windows: cached.windows.map(window => pushed.get(window.id) ?? window) } };
+    this.#supplied ||= quota.windows.every(window => cached.windows.some(known => known.id === window.id));
   }
 
   /** An identity change must not serve the previous account or accept its in-flight probe. */
-  reset(): void { this.#generation++; this.#entry = undefined; this.#refreshing = undefined; }
+  reset(): void { this.#generation++; this.#entry = undefined; this.#refreshing = undefined; this.#supplied = false; }
 
   #refresh(): Promise<Quota> {
     const generation = this.#generation;

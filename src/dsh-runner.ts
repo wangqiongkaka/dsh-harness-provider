@@ -3,7 +3,7 @@ import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { createUserMessage, type UserMessage, type TokenUsage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
-import type { HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostItemOf, HostUsage } from './contracts.js';
+import type { HarnessAccountSnapshot, HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostItemOf, HostUsage } from './contracts.js';
 import { hostTurnIdSchema } from './contracts.js';
 import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { SecretQuestions } from './secret-questions.js';
@@ -26,12 +26,12 @@ const IDLE_CLOSE_MS = 60_000;
 /** How often the idle reclaimer looks for sessions to close; short idle windows (tests) sweep proportionally faster. */
 const idleSweepMs = (idleCloseMs: number) => Math.min(60_000, Math.max(5, Math.floor(idleCloseMs / 4)));
 /** Drains the native session continuously: usage readings land as they arrive (also between turns), everything else queues for the turn loop. */
-function pump(live: Live, sessionEvent: (event: Extract<import('./contracts.js').HostEvent, { type: 'session.auth.changed' | 'session.notice' }>) => void): void {
+function pump(live: Live, sessionEvent: (event: Extract<import('./contracts.js').HostEvent, { type: 'session.auth.changed' | 'session.account.changed' | 'session.notice' }>) => void): void {
   void (async () => {
     try {
       for await (const value of live.session.outputs) {
         if (value.kind === 'event' && value.event.type === 'session.usage.changed') { live.usage = value.event.usage; continue; }
-        if (value.kind === 'event' && (value.event.type === 'session.auth.changed' || value.event.type === 'session.notice')) { sessionEvent(value.event); continue; }
+        if (value.kind === 'event' && (value.event.type === 'session.auth.changed' || value.event.type === 'session.account.changed' || value.event.type === 'session.notice')) { sessionEvent(value.event); continue; }
         live.queue.push(value);
         live.wake();
       }
@@ -75,7 +75,8 @@ export class DshRunner {
   private readonly idleCloseMs: () => number;
   constructor(private readonly ctx: Context, private readonly bindings: Bindings,
     private readonly adapters: Record<Binding['harness'], HarnessAdapter>, private readonly delegation?: DelegationBridge, readonly secrets = new SecretQuestions(),
-    idleClose: number | (() => number) = IDLE_CLOSE_MS, private readonly branchContextChars: () => number = () => 60_000, private readonly authChanged: (harness: Binding['harness'], status: import('./contracts.js').HarnessAuthStatus) => void = () => {}) {
+    idleClose: number | (() => number) = IDLE_CLOSE_MS, private readonly branchContextChars: () => number = () => 60_000, private readonly authChanged: (harness: Binding['harness'], status: import('./contracts.js').HarnessAuthStatus) => void = () => {},
+    private readonly accountChanged: (harness: Binding['harness'], account: HarnessAccountSnapshot) => void = () => {}) {
     this.idleCloseMs = typeof idleClose === 'function' ? idleClose : () => idleClose;
     // A Harness process holds the native conversation, so it lives as long as the session does; idling that long
     // buys nothing and keeps a CLI process (and its memory) resident, so it is closed and resumed on the next turn.
@@ -167,6 +168,7 @@ export class DshRunner {
       const opened = live;
       pump(opened, event => {
         if (event.type === 'session.auth.changed') this.authChanged(binding.harness, event.authStatus);
+        else if (event.type === 'session.account.changed') this.accountChanged(binding.harness, event.account);
         // The adapter's turn is over, yet this turn's tool results may still be queued here: the notice waits for the step to end.
         else if (opened.held) opened.held.push(event.notice);
         else note(agent, event.notice);

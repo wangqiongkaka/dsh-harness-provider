@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parseZaiQuota, parseDeepSeekBalance, fetchNativeQuota, nativeQuotaRoute } from '../dist/native-quota.js';
-import { codexAccountSnapshot as accountSnapshot } from '../dist/acp-profiles.js';
+import { codexAccountSnapshot as accountSnapshot, claudeRateLimitSnapshot } from '../dist/acp-profiles.js';
 import { accountQuota, HarnessQuotaCache } from '../dist/dsh.js';
 
 test('智谱 Coding Plan limits[] 映射为 5 小时与周窗口，忽略 MCP TIME_LIMIT', () => {
@@ -182,4 +182,60 @@ test('账户切换清空额度并丢弃旧账户正在进行的探测', async ()
  pending[0](quota('10'));
  await old;
  assert.equal((await cache.read()).total,'20');
+});
+
+test('Claude 会话内推送的限额：unifiedWindows 的小数用量与秒级重置时间映射成与探测一致的窗口', () => {
+ // 实测事件（Claude Code 2.1.289，2026-10-05）：顶层只有当前约束窗口的状态，两个窗口的用量都在 unifiedWindows 里。
+ const snapshot = claudeRateLimitSnapshot({ status: 'allowed', resetsAt: 1791178800, rateLimitType: 'five_hour', overageStatus: 'rejected', overageDisabledReason: 'org_level_disabled', isUsingOverage: false,
+  unifiedWindows: { five_hour: { utilization: 0.07, resetsAt: 1791178800 }, seven_day: { utilization: 0.14, resetsAt: 1791255600 } } });
+ assert.deepEqual(accountQuota(snapshot, 'claude-code').windows, [
+  { id: 'five_hour', label: 'five_hour', usedPercent: 7, resetsAt: '2026-10-05T05:40:00.000Z' },
+  { id: 'product:7-day window', label: '7-day window', usedPercent: 14, resetsAt: '2026-10-06T03:00:00.000Z' },
+ ]);
+ // 超出限额的窗口按用完显示，而不是被丢掉。
+ assert.equal(claudeRateLimitSnapshot({ unifiedWindows: { five_hour: { utilization: 1.02, resetsAt: 1791178800 } } }).credits.usedPercent, 100);
+ // 不带 unifiedWindows 的事件没有可用的用量。
+ assert.equal(claudeRateLimitSnapshot({ status: 'allowed', resetsAt: 1791178800, rateLimitType: 'five_hour' }), null);
+ assert.equal(claudeRateLimitSnapshot(undefined), null);
+});
+
+test('外部 Harness 额度缓存：会话内推送更新对应窗口，此后回合结束不再探测，账户切换后恢复', async () => {
+ let probes = 0;
+ const window = (id, usedPercent, resetsAt) => ({ id, label: id.replace('product:', ''), usedPercent, resetsAt });
+ const probed = { kind: 'windows', source: 'claude-code', plan: 'max', windows: [
+  window('five_hour', 8, '2026-10-05T05:40:00.000Z'), window('product:7-day window', 15, '2026-10-06T03:00:00.000Z'), window('product:Fable · 7-day', 0, '2026-10-06T03:00:00.000Z')] };
+ const pushed = five => ({ kind: 'windows', source: 'claude-code', plan: null, windows: [
+  window('five_hour', five, '2026-10-05T05:40:00.000Z'), window('product:7-day window', 16, '2026-10-06T03:00:00.000Z')] });
+ const cache = new HarnessQuotaCache(() => { probes++; return Promise.resolve(probed); }, () => Date.parse('2026-10-05T01:00:00.000Z'));
+ const drain = () => new Promise(resolve => setImmediate(() => setImmediate(resolve)));
+ // 还没有探测结果时，推送不能充当缓存：它没有套餐名和分模型窗口，首次读取仍要探测。
+ cache.supply(pushed(9));
+ assert.deepEqual((await cache.read()).windows.map(w => w.usedPercent), [8, 15, 0]);
+ assert.equal(probes, 1);
+ cache.invalidate();
+ await drain();
+ assert.equal(probes, 2);
+ // 推送里有探测结果没有的窗口：两边对账户的描述不一致，只更新对得上的，回合结束继续探测。
+ cache.supply({ ...pushed(10), windows: [...pushed(10).windows, window('product:Opus · 7-day', 3, null)] });
+ assert.deepEqual((await cache.read()).windows.map(w => w.usedPercent), [10, 16, 0]);
+ cache.invalidate();
+ await drain();
+ assert.equal(probes, 3);
+ // 推送按窗口覆盖：套餐名和推送里没有的窗口保留探测值。
+ cache.supply(pushed(12));
+ const merged = await cache.read();
+ assert.equal(merged.plan, 'max');
+ assert.deepEqual(merged.windows.map(w => [w.id, w.usedPercent]), [['five_hour', 12], ['product:7-day window', 16], ['product:Fable · 7-day', 0]]);
+ // 推送只在用量变化时到达，所以没有新推送的回合结束同样不探测。
+ cache.invalidate(); cache.invalidate();
+ await drain();
+ assert.equal(probes, 3);
+ assert.equal((await cache.read()).windows[0].usedPercent, 12);
+ // 换了账户：旧推送作废，重新探测，回合结束也恢复探测，直到新账户的会话再次推送。
+ cache.reset();
+ assert.equal((await cache.read()).windows[0].usedPercent, 8);
+ assert.equal(probes, 4);
+ cache.invalidate();
+ await drain();
+ assert.equal(probes, 5);
 });

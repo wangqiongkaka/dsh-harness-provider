@@ -170,7 +170,7 @@ const app = agent({ name: 'peer' })
       await update({ sessionUpdate: 'plan', entries: [{ content: 'step one', priority: 'high', status: 'in_progress' }] });
       await update({ sessionUpdate: 'compaction_update', compactionId: 'c1', status: 'in_progress' });
       await update({ sessionUpdate: 'compaction_update', compactionId: 'c1', status: 'completed' });
-      await update({ sessionUpdate: 'usage_update', used: 4200, size: 200000 });
+      await update({ sessionUpdate: 'usage_update', used: 4200, size: 200000, _meta: { account: { credits: { usedPercent: 7, periodType: 'five_hour' } } } });
       await reply('tools done'); return end();
     }
     if (text === 'claude-subagent') {
@@ -240,6 +240,7 @@ async function fixture() {
     legacyThinkingOptions: { auto: 'high' },
     skillName: command => command.name.startsWith('$') ? command.name.slice(1) : command.name,
     inspectAccount: async () => ({ plan: 'pro', credits: { usedPercent: 40, periodType: 'five_hour' } }),
+    accountUpdate: meta => meta.account ?? null,
   };
   const notes = async () => (await readFile(env.PEER_LOG, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
   return { root, profile, notes, close: () => rm(root, { recursive: true, force: true }) };
@@ -618,6 +619,8 @@ test('permissions, forms (secret + custom answers), URL steps, failures and tool
       ['todo_write', { todos: [{ content: 'step one', priority: 'high', status: 'in_progress' }] }],
     ]);
     assert.deepEqual(events(seen, 'session.usage.changed').find(event => event.usage.contextUsedTokens).usage.contextUsedTokens, 4200);
+    // Account windows riding the same update's `_meta` reach the Host as their own event, not as context usage.
+    assert.deepEqual(events(seen, 'session.account.changed').map(event => event.account), [{ credits: { usedPercent: 7, periodType: 'five_hour' } }]);
     value(await session.execute({ type: 'turn.start', turnId: 'host-e', input: [{ type: 'text', text: 'fail' }] }));
     seen = await until(output, 'turn.completed');
     assert.equal(events(seen, 'item.completed')[0].snapshot.item.type, 'notice');

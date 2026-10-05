@@ -181,6 +181,7 @@ export type HostEvent =
   | { type: 'session.usage.changed'; usage: HostUsage | null; observedForTurnId?: HostTurnId }
   | { type: 'session.faulted'; error: HarnessError }
   | { type: 'session.auth.changed'; authStatus: HarnessAuthStatus }
+  | { type: 'session.account.changed'; account: HarnessAccountSnapshot }
   | { type: 'session.notice'; notice: HostItemOf<'notice'> }
   | { type: 'turn.started'; turnId: HostTurnId; nativeTurnRef?: NativeTurnRef }
   | { type: 'turn.completed'; turnId: HostTurnId; nativeTurnRef?: NativeTurnRef; outcome: TurnOutcome }

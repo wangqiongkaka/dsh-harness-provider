@@ -171,7 +171,7 @@ Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工
 
 - 两个 Harness 改为通过 Agent Client Protocol v1 连接官方适配器：`@agentclientprotocol/codex-acp` 1.12.0 与 `@agentclientprotocol/claude-agent-acp` 0.78.0，SDK 锁定 `@agentclientprotocol/sdk` 1.4.0（DSH 自带的 `dsh-acp` 也用这个版本）。两个适配器脚本随插件打包，运行用户安装的 `codex` / `claude`。
 - 统一契约 `HarnessAdapter/HarnessSession` 不变；`src/acp-adapter.ts` 是唯一实现，`src/acp-profiles.ts` 提供两个配置档。删除 `codex-adapter`、`codex-items`、`claude-adapter`、`claude-native`、`claude-history*`。
-- 只保留两处原生补充：账户额度窗口（Codex `account/rateLimits/read`；Claude Agent SDK 账户快照）和 Claude 可执行文件发现。
+- 只保留两处原生补充：账户额度窗口（Codex `account/rateLimits/read`；Claude Agent SDK 账户快照，2026-10-05 起会话内改读 ACP 推送，见“Claude Code 会话内读取限额”）和 Claude 可执行文件发现。
 - 客户端不向 Agent 声明文件系统与终端能力，工具继续由各 CLI 在自己的沙箱和权限策略下执行。声明表单/URL 征询、计划、压缩、布尔配置项，以及 `steering`、`sessionFailure`、`recommendedValue` 扩展。
 - 轮次键改为“提示文本哈希.出现序号”，由 ACP 回放重建；分支边界使用该轮最后一条 Agent 消息 ID（AIR fork 扩展），分支在独立短进程执行（Codex 会持有分支线程的写者）。
 - 新会话用首行提示 `/rename` 原生会话，避免两个适配器各自多发一次标题生成的模型请求。
@@ -364,3 +364,24 @@ Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工
 
 - 先改测试确认红灯：现实现得 `inputTokens: 1100 / totalTokens: 1210`，期望 `1107 / 1217`（夹具补上 `cachedWriteTokens` 以覆盖写桶）。
 - `npm run check` 通过（60 项测试，含类型检查与构建）。
+
+## Claude Code 会话内读取限额（2026-10-05）
+
+### 问题
+
+- Claude Code 每个回合结束都另起一个 `claude` 进程查账户额度（`ClaudeInspector.account()`），而限额其实已经随会话的 ACP 消息流送到插件，只是没有读取。
+
+### 决定
+
+- claude-agent-acp 把 SDK 的 `rate_limit_event` 原样放进 `usage_update._meta["_claude/rateLimit"]`（0.84.0 的 `dist/acp-agent.js`，`case "rate_limit_event"`；`attachUsageModel` 展开原有 `_meta`，该键保留）。配置档的 `accountUpdate` 读取它，适配器发出 `session.account.changed`，运行器转给服务层，写入按 Harness 共用的额度缓存。
+- 用量在 `unifiedWindows` 里，SDK 的 `SDKRateLimitInfo` 类型声明没有这个字段。实测 Claude Code 2.1.289：`{ five_hour: { utilization: 0.07, resetsAt: 1791178800 }, seven_day: {…} }`，两个窗口一次给全，用量是 0–1 的小数，重置时间是秒；探测进程的 `usage()` 是 0–100 和 ISO 字符串。两条来源都经 `claudeAccountSnapshot` → `accountQuota`，窗口 id 一致，按 id 合并。没有 `unifiedWindows` 的事件不含可用的用量，忽略。
+- 事件只在限额信息变化时推送：同一进程连续三个回合只有第一个回合收到。所以缓存收到过一次推送后，回合结束不再探测；切换登录（`reset()`）后恢复。
+- 探测进程保留给两种情况：还没有任何探测结果时的首次读取（推送不含套餐名和分模型窗口，不能单独充当缓存），以及推送里出现探测结果没有的窗口（两边对账户的描述不一致，回合结束继续探测）。
+- 已知上限（用户选定）：推送不含的内容——套餐名、分模型周限额（如 `Fable · 7-day`）——在收到推送后保持首次探测的值，直到切换登录或插件重启。需要它们跟随时，在 `HarnessQuotaCache.invalidate()` 里按间隔补一次探测。
+- 适配器只在本回合已有助手消息的用量记录后才转发（`lastAssistantTotalUsage !== null`），实测事件在助手消息之后、回合结果之前到达。请求直接被限额拒绝、没有助手消息的回合不会转发。
+- Codex 不变，仍在每回合结束后探测。
+
+### 验证
+
+- 新增测试在改动前的构建产物上失败：映射函数不存在、缓存没有 `supply`、适配器不发 `session.account.changed`、运行器没有 `accountChanged`。
+- 真实链路：用构建产物的 `AcpAdapter` + `claudeProfile` 开一个真实会话跑一轮，冷启动探测 1 次，收到推送并合并，回合结束后探测次数仍为 1，套餐名与 `Fable · 7-day` 保留。

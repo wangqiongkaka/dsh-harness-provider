@@ -226,6 +226,13 @@ test('a finished turn re-probes the harness account in the background while quot
   assert.equal((await h.quota({sessionId:'bound'})).windows[0].usedPercent,55);
   await h.quota({sessionId:'bound'});
   assert.equal(accounts,2);
+  // Windows a running session pushed replace the cached ones, and from then on a finished turn spawns no probe.
+  h.runner.accountChanged('codex',{credits:{usedPercent:61,periodType:'five_hour'}});
+  ctx.emit('session/event',{id:'bound'},{type:'turn/end',data:{reason:{kind:'completed'}}});
+  await new Promise(resolve=>setTimeout(resolve,25));
+  assert.equal(accounts,2);
+  const pushed=await h.quota({sessionId:'bound'});
+  assert.deepEqual([pushed.plan,pushed.windows[0].usedPercent],['pro',61]);
   // A DSH-native turn never touches the harness cache.
   await h.select({sessionId:'bound',harness:'dsh'});
   ctx.emit('session/event',{id:'bound'},{type:'turn/end',data:{reason:{kind:'completed'}}});

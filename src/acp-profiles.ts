@@ -1,6 +1,7 @@
 /**
  * The two ACP agents this plugin ships: codex-acp over the user's Codex CLI and claude-agent-acp over the user's Claude
- * Code CLI. Account quota windows are not on the ACP wire, so each profile keeps a native probe for them.
+ * Code CLI. ACP has no account quota, so each profile keeps a native probe for it; Claude Code also pushes its plan
+ * windows through `_meta` while a session runs.
  */
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -218,6 +219,22 @@ export function claudeAccountSnapshot(usage: { rate_limits_available?: boolean; 
   };
 }
 
+/**
+ * The plan windows Claude Code pushes while a session runs. claude-agent-acp forwards the SDK's `rate_limit_event` whole
+ * as `usage_update._meta["_claude/rateLimit"]` (acp-agent.js, `case "rate_limit_event"`); the CLI emits it only when the
+ * info changed. `unifiedWindows` is missing from the SDK's `SDKRateLimitInfo` declaration; Claude Code 2.1.289 sends
+ * `{ five_hour: { utilization: 0.07, resetsAt: 1791178800 }, seven_day: {…} }` — a fraction and epoch seconds, where the
+ * probe's `usage()` reports percent and ISO strings. Model-scoped windows and the plan are never pushed.
+ */
+export function claudeRateLimitSnapshot(rateLimit: unknown): HarnessAccountSnapshot | null {
+  const windows = isRecord(rateLimit) ? rateLimit.unifiedWindows : undefined;
+  if (!isRecord(windows)) return null;
+  return claudeAccountSnapshot({ rate_limits_available: true, rate_limits: Object.fromEntries(Object.entries(windows).map(([name, window]) => [name,
+    isRecord(window) && typeof window.utilization === 'number'
+      ? { utilization: Math.min(100, Math.round(window.utilization * 100)), resets_at: typeof window.resetsAt === 'number' ? resetIso(window.resetsAt).resetsAt : undefined }
+      : window])) });
+}
+
 export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command?: string; settings?: SettingsSource }): AcpProfile {
   const environment = withUserShellEnvironment({ ...options.environment });
   const settings = options.settings ?? defaultSettings;
@@ -254,6 +271,7 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
         return account && claudeAccountSnapshot(account.usage, account.email);
       } finally { await inspector.close().catch(() => {}); }
     },
+    accountUpdate: meta => claudeRateLimitSnapshot(meta['_claude/rateLimit']),
     limits: limitsOf(settings),
   };
 }

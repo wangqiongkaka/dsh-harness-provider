@@ -55,8 +55,10 @@ export interface AcpProfile {
   titleCommand?(title: string): string;
   /** Turn end states the agent program records natively, keyed by the user message id its history replays; ACP carries none. */
   turnOutcomes?(nativeSessionId: string): Promise<Map<string, HostTurnSnapshot['outcome']>>;
-  /** Native quota probe; ACP carries no account windows. */
+  /** Native quota probe: the whole account, for when no session has pushed its windows. */
   inspectAccount?(): Promise<HarnessAccountSnapshot | null>;
+  /** Account windows the agent pushes in a `usage_update`'s `_meta` while a session runs; null when it carries none. */
+  accountUpdate?(meta: Record<string, unknown>): HarnessAccountSnapshot | null;
   /** Plugins the agent program can be pointed at from the prompt; ACP carries no plugin catalog. */
   listPlugins?(cwd: string): Promise<HarnessPlugin[]>;
   /** Live timeouts, output limit and stderr debugging; read on every use. Missing fields keep {@link DEFAULT_LIMITS}. */
@@ -1000,6 +1002,8 @@ class AcpSession implements HarnessSession {
     if (update.sessionUpdate === 'current_mode_update') { this.#modeChanged(update.currentModeId); return; }
     if (update.sessionUpdate === 'usage_update') {
       if (update.size > 0) this.#publishUsage({ contextUsedTokens: update.used, contextWindowTokens: update.size }, this.#active?.hostId);
+      const account = this.#profile.accountUpdate?.(record(update._meta));
+      if (account) this.#emit({ type: 'session.account.changed', account });
       return;
     }
     const active = this.#active;
