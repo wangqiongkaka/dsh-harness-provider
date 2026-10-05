@@ -17,8 +17,8 @@ export const stateSchema = z.object({
 });
 export const selectRequest = address.extend({ harness: selection });
 export const modelRequest = address.extend({ model: z.string().min(1) });
-/** Without `harness`, the session's own Harness; with it, that Harness in the session's workspace (delegation picks). */
-export const modelsRequest = address.extend({ harness: z.enum(['codex', 'claude-code']).optional() });
+/** Without `harness`, the session's own Harness; with it, that Harness in the session's workspace, or in `workspaceId` (delegation picks). */
+export const modelsRequest = address.extend({ harness: z.enum(['codex', 'claude-code']).optional(), workspaceId: z.string().min(1).optional() });
 export const thinkingRequest = address.extend({ thinking: z.string().min(1) });
 export const permissionRequest = address.extend({ permission: z.string().min(1) });
 export const configRequest = address.extend({ configId: z.string().min(1), value: z.union([z.string(), z.boolean()]) });
@@ -62,6 +62,8 @@ export const delegateFromUserRequest = address.extend({
   prompt: z.string().max(64_000), title: z.string().trim().min(1).max(80).optional(),
   reportBack: z.boolean().default(false), worktree: z.boolean().default(false), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
   picks: z.partialRecord(z.enum(['codex', 'claude-code']), modelPick).default({}),
+  /** The project the delegated sessions run in; omitted keeps the source session's project. */
+  workspaceId: z.string().min(1).optional(),
 }).refine(request => request.harnesses || request.harness, { message: '至少选择一个 Harness' })
   .refine(request => !request.harnesses || !request.harness, { message: '不能同时指定 harness 和 harnesses' })
   .transform(({ harness, harnesses, ...request }) => ({ ...request, harnesses: harnesses ?? [harness!] }))
@@ -76,6 +78,8 @@ export const startDiscussionFromUserRequest = address.extend({
 export const delegationAcceptedSchema = z.object({ sessionId: z.string().optional(), harness: selection, accepted: z.literal(true),
   sessions: z.array(z.object({ sessionId: z.string(), harness: selection })).optional() });
 export const discussionAcceptedSchema = z.object({ accepted: z.literal(true) });
+/** The Host's registered projects a delegation can target; `current` marks the one holding the session. */
+export const workspacesSchema = z.array(z.object({ id: z.string(), title: z.string(), path: z.string(), current: z.boolean() }));
 /** Harness-internal subagents of the native session, oldest first: live, else as last seen before its idle process was reclaimed. */
 export const subagentsSchema = z.array(z.object({
   id: z.string(), parentId: z.string().nullable(), name: z.string(), task: z.string().nullable(), status: z.enum(['running', 'completed', 'failed', 'cancelled']),
@@ -114,7 +118,7 @@ export const descriptors: InvocationDescriptor[] = [
   ['selectThinking', thinkingRequest, stateSchema], ['selectPermission', permissionRequest, stateSchema], ['selectConfig', configRequest, stateSchema],
   ['usage', address, usageSchema], ['harnesses', harnessesRequest, harnessesSchema], ['quota', address, quotaSchema],
   ['delegateFromUser', delegateFromUserRequest, delegationAcceptedSchema],
-  ['startDiscussionFromUser', startDiscussionFromUserRequest, discussionAcceptedSchema],
+  ['startDiscussionFromUser', startDiscussionFromUserRequest, discussionAcceptedSchema], ['workspaces', address, workspacesSchema],
   ['subagents', address, subagentsSchema], ['plugins', address, pluginsSchema], ['viewing', address, z.null()],
   ['readSettings', z.object({}).strict(), settingsViewSchema], ['updateSettings', updateSettingsRequest, settingsViewSchema],
 ].map(([method, request, result]) => ({

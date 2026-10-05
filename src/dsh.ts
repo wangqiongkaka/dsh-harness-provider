@@ -465,13 +465,14 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /** Creates an ordinary DSH session, with a stable identity for admission retries. */
-  async delegate(source: string, raw: unknown, admitted?: { content: ContentBlock[]; requestHash: string; worktree?: boolean; discussion?: true }) {
+  async delegate(source: string, raw: unknown, admitted?: { content: ContentBlock[]; requestHash: string; worktree?: boolean; discussion?: true; workspaceId?: string }) {
     const request = delegationRequest.parse(raw);
     if ((await this.bindings.readDelegated(source))?.delegation.discussion) throw new Error('讨论会话不能创建子会话');
     if (admitted?.discussion && request.harness === 'dsh') throw new Error('DSH 原生暂不支持强制只读讨论');
     if (request.harness === 'dsh' && (request.model || request.thinking)) throw new Error('DSH 原生委派使用宿主当前模型，不能单独指定模型或推理强度');
     const parent = await this.agent(source);
-    const cwd = parent.session.header.cwd;
+    const target = admitted?.workspaceId ? this.workspace(admitted.workspaceId) : undefined;
+    const cwd = target?.path ?? parent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
     const hash = (value: string) => createHash('sha256').update(value).digest('hex');
     const sessionId = SessionId(`session-${hash(JSON.stringify([source, request.requestId]))}`);
@@ -522,9 +523,9 @@ export class HarnessService extends TypertRemoteService {
             const starting = await this.startingModel(request.harness, cwd, request);
             external = { inspection, ...(permission ? { permission } : {}), ...(starting ? { starting } : {}) };
           }
-          // Made before the session so a non-git directory leaves nothing behind; the DSH session stays in the source workspace.
+          // Made before the session so a non-git directory leaves nothing behind; the DSH session stays in the workspace the worktree was taken from.
           const worktree = admitted?.worktree ? await createWorktree(cwd, resolve(this.worktrees, sessionId)) : undefined;
-          const workspace = this.ctx.get('workspaceRegistry')?.list().find(workspace => workspace.sessionIds.includes(parent.id));
+          const workspace = target ?? this.ctx.get('workspaceRegistry')?.list().find(workspace => workspace.sessionIds.includes(parent.id));
           // Hold the same lock as state/select/prompt so the UI cannot auto-bind the new session to its remembered Harness.
           await this.bindings.serial(sessionId, async () => {
             await this.ctx.sessionController.create({ sessionId, ...(workspace ? { workspaceId: workspace.id } : { cwd }) });
@@ -564,11 +565,27 @@ export class HarnessService extends TypertRemoteService {
   }
 
   async delegateFromUser(raw: unknown) {
+  /** The registered project a delegation targets instead of the source session's own. */
+  private workspace(id: string) {
+    const workspace = this.ctx.get('workspaceRegistry')?.list().find(workspace => workspace.id === id);
+    if (!workspace) throw new Error('目标项目不存在，请重新选择');
+    return workspace;
+  }
+
+  /** The projects a delegation from this session can target. */
+  async workspaces(raw: unknown) {
+    const { sessionId } = address.parse(raw);
+    await this.agent(sessionId);
+    return (this.ctx.get('workspaceRegistry')?.list() ?? []).map(workspace => ({ id: workspace.id as string, title: workspace.title, path: workspace.path,
+      current: workspace.sessionIds.some(id => id === sessionId) }));
+  }
+
     const request = delegateFromUserRequest.parse(raw);
     // Checked before a leading skill runs or any target exists, so a bad pick never leaves a partial multi-target delegation.
     const picked = request.harnesses.flatMap(harness => harness !== 'dsh' && request.picks[harness] ? [[harness, request.picks[harness]] as const] : []);
     if (picked.length) {
-      const cwd = (await this.agent(request.sessionId)).session.header.cwd;
+    const target = request.workspaceId ? this.workspace(request.workspaceId) : undefined;
+      const cwd = target?.path ?? (await this.agent(request.sessionId)).session.header.cwd;
       if (!cwd) throw new Error('请先连接工作目录');
       await Promise.all(picked.map(([harness, pick]) => this.startingModel(harness, cwd, pick)));
     }
@@ -590,7 +607,7 @@ export class HarnessService extends TypertRemoteService {
         : `multi-${createHash('sha256').update(JSON.stringify([request.requestId, harness])).digest('hex')}`;
       const result = await this.delegate(request.sessionId, {
         requestId, harness, reportBack: request.reportBack, prompt, ...(request.title ? { title: request.title } : {}), ...(harness === 'dsh' ? {} : request.picks[harness]),
-      }, { content, requestHash, worktree: request.worktree });
+      }, { content, requestHash, worktree: request.worktree, ...(request.workspaceId ? { workspaceId: request.workspaceId } : {}) });
       sessions.push({ sessionId: result.sessionId, harness: result.harness });
     }
     return { ...sessions[0]!, sessions, accepted: true as const };
@@ -906,8 +923,9 @@ export class HarnessService extends TypertRemoteService {
   }
 
   async models(raw: unknown) {
-    const { sessionId, harness } = modelsRequest.parse(raw);
-    const cwd = (await this.agent(sessionId)).session.header.cwd;
+    const { sessionId, harness, workspaceId } = modelsRequest.parse(raw);
+    const own = (await this.agent(sessionId)).session.header.cwd;
+    const cwd = harness && workspaceId ? this.workspace(workspaceId).path : own;
     const empty = { models: [], defaultModel: null, thinkingOptions: [], defaultThinkingOptionId: null, permissionModes: [], defaultPermissionModeId: null, configOptions: [] };
     if (harness && !cwd) return { ...empty, error: '请先连接工作目录' };
     // A delegation target reads its catalog without binding this session to it.

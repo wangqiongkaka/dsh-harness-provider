@@ -168,6 +168,14 @@ test('a worktree delegation runs the Harness in the checkout and asks in the chi
     assert.ok(!existsSync(join(repo, '2.txt')));
     assert.equal(questions.length, 3);
 
+    // Aimed at another project, the worktree is a snapshot of that project's repository, not of the source session's directory.
+    const { sessionId: crossed } = await h.delegateFromUser({ sessionId: 'plain', requestId: 'cross-project', harness: 'codex', worktree: true, workspaceId: workspace.id, prompt: 'x', attachments: [] });
+    await ctx.agents.get(crossed).whenIdle();
+    await h.bindings.serial(`worktree:${crossed}`, async () => {});
+    assert.equal(opens.at(-1).cwd, join(root, 'bindings', 'worktrees', crossed));
+    assert.equal(await realpath((await h.bindings.read(crossed)).delegation.worktree.repo), await realpath(repo));
+    assert.equal(ctx.agents.get(crossed).session.header.cwd, repo, 'the DSH session is in the target project');
+
     const before = created.length;
     await assert.rejects(h.delegateFromUser({ sessionId: 'plain', requestId: 'not-git', harness: 'codex', worktree: true, prompt: 'x', attachments: [] }), /不是 git 仓库/);
     await assert.rejects(h.delegateFromUser({ sessionId: 'parent', requestId: 'native', harness: 'dsh', worktree: true, prompt: 'x', attachments: [] }), /仅支持 Codex/);

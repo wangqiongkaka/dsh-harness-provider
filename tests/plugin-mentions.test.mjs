@@ -217,13 +217,15 @@ test('the delegation dock offers a model and effort pick per selected Codex / Cl
  assert.match(html,/aria-label="Codex 的模型与推理强度"/);assert.match(html,/Codex · 默认/);
  assert.doesNotMatch(html,/Claude Code · /,'only selected targets get a pick');
  assert.equal(read.length,0,'the catalog is read on first open, not on entering delegation mode');
+ assert.match(html,/project · projectCurrent/,'a delegation stays in the session\'s own project until another is picked');
  const options=module.exports.delegationOptions;
- options.set('draft',{harnesses:['dsh','claude-code'],reportBack:false,worktree:false,picks:{codex:{model:'fast'},'claude-code':{model:'deep',thinking:'high'}}});
+ options.set('draft',{harnesses:['dsh','claude-code'],reportBack:false,worktree:false,workspaceId:'project',picks:{codex:{model:'fast'},'claude-code':{model:'deep',thinking:'high'}}});
  html=render();
  assert.match(html,/Claude Code · deep/);assert.match(html,/· effort\.high/);assert.doesNotMatch(html,/Codex · /);assert.doesNotMatch(html,/DSH 原生 · /);
  await claim.submit('Plan the migration',{},[]);
  assert.deepEqual(JSON.parse(JSON.stringify(sent[0].picks)),{'claude-code':{model:'deep',thinking:'high'}},'a deselected target keeps its pick in the dock but does not send it');
  assert.deepEqual(sent[0].harnesses,['dsh','claude-code']);
+ assert.equal(sent[0].workspaceId,'project','the picked project travels with the delegation');
 });
 
 test('sidebar marks active turns as breathing, completed sessions as static, and closed sessions as gray', async () => {

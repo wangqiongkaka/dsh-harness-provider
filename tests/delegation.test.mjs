@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { Context, Service } from '@deepseek-ai/cordis';
@@ -26,17 +26,20 @@ test('session CLI creates a visible independent harness session, reads its resul
  const ctx = new Context();
  const opens = [], turns = [], created = [], renamed = [], nativePrompts = [], presetSets = [];
  let raceState = false, renameUnavailable = false, unavailable = false, reply = 'Review complete: no findings';
- const workspace = {id:'workspace',path:root,sessionIds:['parent','other']};
+ const workspace = {id:'workspace',title:'Root',path:root,sessionIds:['parent','other']};
+ const project = {id:'project',title:'Project',path:join(root,'project'),sessionIds:[]};
+ let target = workspace;
+ const inspected = [];
  class Commands extends Service {
   constructor(ctx) { super(ctx, 'sessionController'); }
   async resolveAgent(id) { const agent=ctx.agents.get(id); return agent ? {agent} : {error:new Error('missing session')}; }
   async create(request) {
-   created.push(request);assert.equal(request.workspaceId,workspace.id);
+   created.push(request);assert.equal(request.workspaceId,target.id);
    let agent=ctx.agents.get(request.sessionId);
-   if (!agent) ({agent}=await ctx.agents.create({sessionId:request.sessionId,meta:{cwd:root}}));
+   if (!agent) ({agent}=await ctx.agents.create({sessionId:request.sessionId,meta:{cwd:target.path}}));
    // A UI state read that passes its fresh-session checks before the native delegation record is written.
    if (raceState) { raceState=false;const state=ctx.harness.state({sessionId:agent.id});await new Promise(resolve=>setTimeout(resolve,20));created.race=state; }
-   workspace.sessionIds.push(agent.id);return {sessionId:agent.id};
+   target.sessionIds.push(agent.id);return {sessionId:agent.id};
   }
   async prompt(request) {
    if (await ctx.harness.bindings.read(request.sessionId)) throw new Error('Must route through selected Harness');
@@ -48,7 +51,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   async fork() {} async selectModel() {} updateQueue() {}
  }
  const adapter = harness => ({
-  async inspect() { return unavailable ? {status:'unavailable',error:{message:'fixture unavailable'}} : {status:'ready',catalog:{models:[],thinkingOptions:[]},
+  async inspect(input) { inspected.push(input?.cwd); return unavailable ? {status:'unavailable',error:{message:'fixture unavailable'}} : {status:'ready',catalog:{models:[],thinkingOptions:[]},
    permissionModes:{modes:[{id:'read-only',label:'Read only'},{id:'plan',label:'Plan'},{id:'agent',label:'Agent'},{id:'default',label:'Default'},{id:'acceptEdits',label:'Accept edits'},{id:'auto',label:'Auto'}],defaultModeId:'read-only'}}; },
   async open(input) {
    opens.push({harness,input});
@@ -71,7 +74,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   for (const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents,Typert]) await ctx.plugin(plugin);
   await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
   await ctx.plugin(Commands);
-  ctx.provide('userQuestions',{});ctx.provide('workspaceRegistry',{list:()=>[workspace]});
+  ctx.provide('userQuestions',{});ctx.provide('workspaceRegistry',{list:()=>[workspace,project]});
   const stagedFile=await ctx.attachments.saveFile({data:Buffer.from('attachment text'),name:'note.txt'});
   let receiptCommitted=false;
   ctx.provide('fileUploads',{
@@ -294,6 +297,30 @@ test('session CLI creates a visible independent harness session, reads its resul
   await assert.rejects(h.delegateFromUser({...multiRequest,requestId:'empty-multi',harnesses:[]}),/至少|1/);
   await assert.rejects(h.delegateFromUser({...multiRequest,requestId:'duplicate-multi',harnesses:['codex','codex']}),/重复/);
   await assert.rejects(h.delegateFromUser({...multiRequest,requestId:'native-worktree-multi',harnesses:['dsh','codex'],worktree:true}),/仅支持 Codex/);
+  // A delegation aimed at another project runs in that project's directory and is listed under it; the source session still reads it.
+  await mkdir(project.path);
+  assert.deepEqual(await h.workspaces({sessionId:'other'}),[{id:'workspace',title:'Root',path:root,current:true},{id:'project',title:'Project',path:project.path,current:false}]);
+  h.catalogs.clear();inspected.length=0;
+  await h.models({sessionId:'other',harness:'codex',workspaceId:'project'});
+  assert.deepEqual(inspected,[project.path],'the pick menu reads the target project\'s catalog');
+  target=project;
+  const crossRequest={sessionId:'other',requestId:'cross-project',harness:'codex',workspaceId:'project',prompt:'Implement it there',attachments:[],reportBack:false};
+  const cross=await h.delegateFromUser(crossRequest);
+  await ctx.agents.get(cross.sessionId).whenIdle();
+  assert.deepEqual(created.at(-1),{sessionId:cross.sessionId,workspaceId:'project'});
+  assert.equal(ctx.agents.get(cross.sessionId).session.header.cwd,project.path);
+  assert.equal((await h.bindings.read(cross.sessionId)).cwd,project.path);
+  assert.equal(opens.at(-1).input.cwd,project.path,'the Harness is opened in the target project');
+  assert.ok(project.sessionIds.includes(cross.sessionId));assert.ok(!workspace.sessionIds.includes(cross.sessionId));
+  assert.equal((await h.readDelegation('other',{sessionId:cross.sessionId})).status,'completed');
+  const crossNative=await h.delegateFromUser({...crossRequest,requestId:'cross-project-native',harness:'dsh'});
+  await ctx.agents.get(crossNative.sessionId).whenIdle();
+  assert.equal((await h.bindings.readDelegated(crossNative.sessionId)).cwd,project.path);
+  assert.equal(ctx.agents.get(crossNative.sessionId).session.header.cwd,project.path);
+  target=workspace;
+  const beforeMissing=created.length;
+  await assert.rejects(h.delegateFromUser({...crossRequest,requestId:'missing-project',workspaceId:'gone'}),/目标项目不存在/);
+  assert.equal(created.length,beforeMissing);
   const claudeDiscussion=await h.discuss('other',{assignments:[{harness:'claude-code',task:'Analyze'}]});
   assert.equal((await h.bindings.read(claudeDiscussion.participants[0].sessionId)).permission,'plan');
   assert.equal(opens.at(-1).input.discussion,true);
@@ -353,5 +380,12 @@ test('session CLI creates a visible independent harness session, reads its resul
   }
   await h.delegateFromUser(multiSkillRequest);
   assert.equal(created.length,beforeMultiSkill+2);
+  // A hand-off aimed at another project keeps that project through the skill turn.
+  target=project;
+  await h.delegateFromUser({...handoffRequest,requestId:'handoff-project',workspaceId:'project',prompt:'/handoff 跨项目'});
+  for(let i=0;i<200&&created.length<beforeMultiSkill+3;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(created.length,beforeMultiSkill+3);
+  await ctx.agents.get(created.at(-1).sessionId).whenIdle();
+  assert.equal((await h.bindings.read(created.at(-1).sessionId)).cwd,project.path);
  } finally { await ctx.fiber.dispose();await rm(root,{recursive:true,force:true}); }
 });

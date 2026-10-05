@@ -16,7 +16,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-commands/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client';
 import type { Settings } from './settings.js';
-import { contribution, SETTINGS_ENTRY, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema, type settingsViewSchema, type updateSettingsRequest } from './remote.js';
+import { contribution, SETTINGS_ENTRY, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema, type settingsViewSchema, type updateSettingsRequest, type workspacesSchema } from './remote.js';
 import type { z } from 'zod';
 
 type State = z.infer<typeof stateSchema>;
@@ -27,13 +27,15 @@ type SecretStatus = z.infer<typeof secretStatusSchema>;
 type Subagents = z.infer<typeof subagentsSchema>;
 type Plugin = z.infer<typeof pluginsSchema>[number];
 type SettingsView = z.infer<typeof settingsViewSchema>;
+type Workspaces = z.infer<typeof workspacesSchema>;
 type Api = {
   recover(request: {sessionId: string; action: 'check' | 'unlock'}): Promise<RemoteResult<State & {detail: string}>>;
   secretStatus(request: {sessionId: string}): Promise<RemoteResult<SecretStatus>>;
   answerSecret(request: {sessionId: string; id: string; answers: Record<string,string[]>; cancelled?: boolean}): Promise<RemoteResult<{accepted: boolean}>>;
   state(request: {sessionId: string}): Promise<RemoteResult<State>>;
   select(request: {sessionId: string; harness: State['harness']}): Promise<RemoteResult<State>>;
-  models(request: {sessionId: string; harness?: Exclude<State['harness'], 'dsh'>}): Promise<RemoteResult<Models>>;
+  models(request: {sessionId: string; harness?: Exclude<State['harness'], 'dsh'>; workspaceId?: string}): Promise<RemoteResult<Models>>;
+  workspaces(request: {sessionId: string}): Promise<RemoteResult<Workspaces>>;
   selectModel(request: {sessionId: string; model: string}): Promise<RemoteResult<State>>;
   selectThinking(request: {sessionId: string; thinking: string}): Promise<RemoteResult<State>>;
   selectPermission(request: {sessionId: string; permission: string}): Promise<RemoteResult<State>>;
@@ -47,7 +49,7 @@ type Api = {
   readSettings(request: Record<string, never>): Promise<RemoteResult<SettingsView>>;
   updateSettings(request: z.input<typeof updateSettingsRequest>): Promise<RemoteResult<SettingsView>>;
   edit(request: {sessionId: string; seq: number; text: string; requestId: string}): Promise<RemoteResult<State>>;
-  delegateFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; reportBack: boolean; worktree: boolean; picks: Picks; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId?: string; harness: State['harness']; accepted: true}>>;
+  delegateFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; reportBack: boolean; worktree: boolean; picks: Picks; workspaceId?: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId?: string; harness: State['harness']; accepted: true}>>;
   startDiscussionFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
 };
 const zh = {
@@ -78,6 +80,7 @@ const zh = {
   clear: '清理', clearDescription: '清理上下文',
   delegate: '委派', delegateMode: '委派模式', delegateDescription: '创建独立会话执行任务', delegateTask: '当前处于委派模式：描述任务，将交给所选 Harness 在新的独立会话中执行；输入 / 可先用当前会话的 skill（如交接）', delegateCreated: '已创建委派会话', delegatePrepared: '正在当前会话执行 skill，完成后自动创建委派会话', commands: '指令',
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
+  project: '项目', projectCurrent: '当前项目', pickProject: '选择委派的目标项目',
   worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code',
   pickModel: '{harness} 的模型与推理强度', pickDefault: '默认',
   settingsNav: 'Harness', settingsIntro: '接入 Codex / Claude Code 的默认行为。修改立即保存到当前 Profile 的配置文件；进展反馈说明、讨论等待上限和调试输出在原生进程下次启动时生效。',
@@ -134,6 +137,7 @@ const en: Record<keyof typeof zh,string> = {
   clear:'Clear', clearDescription:'Clear context',
   delegate:'Delegate', delegateMode:'Delegation mode', delegateDescription:'Create an independent session for this task', delegateTask:'Delegation mode: describe the task for the selected Harness to run in a new session; type / to run one of this session\'s skills (such as a hand-off) first', delegateCreated:'Delegation session created', delegatePrepared:'Running the skill in this session; the delegation starts when it finishes', commands:'Commands',
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
+  project:'Project', projectCurrent:'Current project', pickProject:'Choose the project to delegate to',
   worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex and Claude Code only',
   pickModel:'{harness} model and effort', pickDefault:'Default',
   settingsNav:'Harness', settingsIntro:'Defaults for Codex and Claude Code. Changes save to this profile\'s configuration at once; the progress feedback contract, the discussion wait and debug output apply when a native process next starts.',
@@ -327,7 +331,8 @@ function useModelProvider(modelProvider: Injected['modelProvider'], sessionId: s
 type Target = Exclude<State['harness'], 'dsh'>;
 /** Model / thinking picked per delegated Harness; a missing field keeps that Harness's last pick. */
 type Picks = Partial<Record<Target, { model?: string; thinking?: string }>>;
-type DelegationOptions = { harnesses: State['harness'][]; reportBack: boolean; worktree: boolean; picks: Picks };
+/** `workspaceId` is the project the delegation runs in; absent keeps the session's own. */
+type DelegationOptions = { harnesses: State['harness'][]; reportBack: boolean; worktree: boolean; picks: Picks; workspaceId?: string };
 const delegationOptions = new Map<string, DelegationOptions>();
 /** The plugin's live configuration, once the Settings form has a value; delegation and discussion defaults come from it. */
 let settingsForm: ConfigForm<Settings> | undefined;
@@ -370,8 +375,8 @@ const freshOptions = (): DelegationOptions => {
 };
 const freshDiscussion = (): State['harness'][] => { const harnesses = pluginSettings()?.discussHarnesses; return harnesses?.length ? [...harnesses] : ['codex', 'claude-code']; };
 const optionsFor = (sessionId: string): DelegationOptions => delegationOptions.get(sessionId) ?? freshOptions();
-/** Catalog reader per session in delegation mode; the dock slot itself has no Remote. */
-const delegationCatalogs = new Map<string, (harness: Target) => Promise<Models>>();
+/** Catalog and project readers per session in delegation mode; the dock slot itself has no Remote. */
+const delegationReaders = new Map<string, { models(harness: Target, workspaceId?: string): Promise<Models>; workspaces(): Promise<Workspaces> }>();
 const discussionHarnesses = new Map<string, State['harness'][]>();
 const discussionFor = (sessionId: string): State['harness'][] => discussionHarnesses.get(sessionId) ?? freshDiscussion();
 let delegationRequestSequence = 0;
@@ -379,7 +384,10 @@ const delegationRequestId = () => globalThis.crypto?.randomUUID?.() ?? `delegate
 const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
   const requestId = delegationRequestId();
   delegationOptions.set(session.sessionId, freshOptions());
-  delegationCatalogs.set(session.sessionId, harness => value(remote.models({ sessionId: session.sessionId, harness })));
+  delegationReaders.set(session.sessionId, {
+    models: (harness, workspaceId) => value(remote.models({ sessionId: session.sessionId, harness, ...(workspaceId ? { workspaceId } : {}) })),
+    workspaces: () => value(remote.workspaces({ sessionId: session.sessionId })),
+  });
   return {
     name: 'delegate', token: '/delegate ', hint: t('delegateTask'), attachments: true,
     async submit(prompt, _actx, attachments) {
@@ -387,7 +395,7 @@ const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): Comm
       // Only the selected Harnesses' picks travel; a deselected one's pick stays for the dock but is not sent.
       const picks = Object.fromEntries(Object.entries(options.picks).filter(([harness]) => options.harnesses.includes(harness as Target)));
       const result = await value(remote.delegateFromUser({ sessionId: session.sessionId, requestId, prompt, attachments, ...options, picks }));
-      delegationOptions.delete(session.sessionId); delegationCatalogs.delete(session.sessionId);
+      delegationOptions.delete(session.sessionId); delegationReaders.delete(session.sessionId);
       return { kind: 'success', text: t(result.sessionId ? 'delegateCreated' : 'delegatePrepared') };
     },
   };
@@ -484,15 +492,53 @@ function DelegatePick({ harness, pick, load, disabled, onChange, t }: { harness:
     </div>}
   </div>;
 }
+/** The project a delegation runs in; nothing picked keeps the source session's own project. */
+function DelegateProject({ workspaceId, load, disabled, onChange, t }: { workspaceId?: string; load?: () => Promise<Workspaces>; disabled: boolean; onChange: (workspaceId?: string) => void; t: T }) {
+  const [open, setOpen] = useState(false);
+  const [list, setList] = useState<Workspaces | { error: string }>();
+  const root = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpen(false), []);
+  useDismiss(open, close, root);
+  // Read on first open; a project picked before the dock remounted is read at once, so the chip can name it.
+  useEffect(() => {
+    if ((!open && !workspaceId) || list || !load) return;
+    let live = true;
+    void load().then(next => { if (live) setList(next); }, error => { if (live) setList({ error: error instanceof Error ? error.message : String(error) }); });
+    return () => { live = false; };
+  }, [open, workspaceId, list, load]);
+  const workspaces = list && !('error' in list) ? list : [];
+  const title = workspaceId ? workspaces.find(workspace => workspace.id === workspaceId)?.title ?? t('loading') : t('projectCurrent');
+  const choose = (next?: string) => { if (next !== workspaceId) onChange(next); close(); };
+  return <div ref={root} className="hp-anchor">
+    <button type="button" className="hp-chip" aria-label={t('pickProject')} aria-haspopup="menu" aria-expanded={open}
+      title={`${t('project')} · ${title}`} disabled={disabled} onClick={() => setOpen(!open)}>
+      <span className="hp-chip-label">{t('project')} · {title}</span>
+      <Chevron open={open} />
+    </button>
+    {open && <div className="hp-menu hp-menu-left" role="menu" aria-label={t('pickProject')} aria-busy={!list}>
+      {!list && <div className="hp-empty">{t('loading')}</div>}
+      {list && 'error' in list && <div className="hp-error"><span>{list.error}</span><button type="button" className="hp-retry" onClick={() => setList(undefined)}>{t('retry')}</button></div>}
+      {list && !('error' in list) && <>
+        <Option label={t('projectCurrent')} hint={workspaces.find(workspace => workspace.current)?.title} selected={!workspaceId} onClick={() => choose()} />
+        {workspaces.filter(workspace => !workspace.current).map(workspace => <Option key={workspace.id} label={workspace.title} hint={workspace.path}
+          selected={workspace.id === workspaceId} onClick={() => choose(workspace.id)} />)}
+      </>}
+    </div>}
+  </div>;
+}
 function DelegationDockActive({ sessionId, t }: DelegationDockProps) {
   const [options, setOptions] = useState(() => optionsFor(sessionId));
   const busy = taskModes.get(sessionId)?.busy === true;
   const update = (next: DelegationOptions) => { delegationOptions.set(sessionId, next); setOptions(next); };
+  const readers = delegationReaders.get(sessionId);
+  const loadModels = useCallback((harness: Target) => readers!.models(harness, options.workspaceId), [readers, options.workspaceId]);
   return <div className="hp-delegate" data-hp-mode="delegate" aria-label={t('delegateMode')}>
     <strong>{t('delegateMode')}</strong>
     <TaskHarnessSelector disabled={busy} selected={options.harnesses} onChange={harnesses => update({ ...options, harnesses, worktree: !harnesses.includes('dsh') && options.worktree })} t={t} />
-    {options.harnesses.filter((harness): harness is Target => harness !== 'dsh').map(harness => <DelegatePick key={harness} harness={harness} pick={options.picks[harness] ?? {}}
-      load={delegationCatalogs.get(sessionId)} disabled={busy} onChange={pick => update({ ...options, picks: { ...options.picks, [harness]: pick } })} t={t} />)}
+    {/* Another project has its own catalog, so picks made for the previous one are dropped and the catalog is read again. */}
+    <DelegateProject workspaceId={options.workspaceId} load={readers?.workspaces} disabled={busy} onChange={workspaceId => update({ ...options, workspaceId, picks: {} })} t={t} />
+    {options.harnesses.filter((harness): harness is Target => harness !== 'dsh').map(harness => <DelegatePick key={`${harness}:${options.workspaceId ?? ''}`} harness={harness} pick={options.picks[harness] ?? {}}
+      load={readers && loadModels} disabled={busy} onChange={pick => update({ ...options, picks: { ...options.picks, [harness]: pick } })} t={t} />)}
     <label className="hp-delegate-report" title={options.harnesses.includes('dsh') ? t('worktreeNative') : t('worktreeHint')}>
       <input type="checkbox" checked={options.worktree} disabled={busy || options.harnesses.includes('dsh')} onChange={event => update({ ...options, worktree: event.target.checked })} />
       <span>{t('worktree')}</span>
@@ -502,7 +548,7 @@ function DelegationDockActive({ sessionId, t }: DelegationDockProps) {
       <span>{t('reportBack')}</span>
     </label>
     <button type="button" className="hp-delegate-exit" disabled={busy} aria-label={t('delegateExit')} title={t('delegateExit')}
-      onClick={() => { delegationOptions.delete(sessionId); delegationCatalogs.delete(sessionId); setTaskMode(sessionId); }}>×</button>
+      onClick={() => { delegationOptions.delete(sessionId); delegationReaders.delete(sessionId); setTaskMode(sessionId); }}>×</button>
   </div>;
 }
 function DiscussionDockActive({ sessionId, t }: DelegationDockProps) {
@@ -1178,7 +1224,7 @@ const styles = `
 .hp-option:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
 .hp-option-copy{display:flex;flex:1;flex-direction:column;min-width:0}
 .hp-option-name{overflow:hidden;font-size:14px;line-height:20px;font-weight:500;text-overflow:ellipsis;white-space:nowrap}
-.hp-option-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
+.hp-option-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);overflow-wrap:anywhere}
 .hp-check{display:grid;place-items:center;flex:0 0 18px;color:var(--dsw-alias-label-primary)}
 .hp-status,.hp-empty{padding:10px;color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:20px}
 .hp-error{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:4px;padding:7px 8px;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover-danger);color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
