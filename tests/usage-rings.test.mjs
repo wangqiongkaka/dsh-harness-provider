@@ -86,7 +86,7 @@ test('settings harness choices match row typography without changing composer ch
  } finally {await browser.close();}
 });
 
-test('输入提示条与输入框在宽屏和窄屏下左右对齐', async () => {
+test('输入提示条在宽屏和窄屏下与输入框顶边直线段等长', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
@@ -97,9 +97,9 @@ test('输入提示条与输入框在宽屏和窄屏下左右对齐', async () =>
   const page=await browser.newPage();
   for(const width of [375,1440]){
    await page.setViewportSize({width,height:600});
-   await page.setContent(`<style>:root{--dsh-composer-side-clearance:16px;--dsh-composer-card-max-width:780px}${hostCss}${module.exports.styles}</style><div data-composer-seat><div class="root"><div class="notice" role="status">已创建委派会话</div><div class="card" data-composer-card>输入框</div></div></div>`);
+   await page.setContent(`<style>:root{--dsh-composer-side-clearance:16px;--dsh-composer-card-max-width:780px;--dsw-radius-panel:28px}${hostCss}${module.exports.styles}</style><div data-composer-seat><div class="root"><div class="notice" role="status">已创建委派会话</div><div class="card" data-composer-card>输入框</div></div></div>`);
    const bounds=await page.locator('[role=status],[data-composer-card]').evaluateAll(nodes=>nodes.map(node=>{const {left,right}=node.getBoundingClientRect();return {left,right};}));
-   assert.deepEqual(bounds[0],bounds[1],`${width}px 下提示条与输入框边缘一致`);
+   assert.deepEqual(bounds[0],{left:bounds[1].left+28,right:bounds[1].right-28},`${width}px 下提示条与输入框顶边直线段等长`);
   }
  } finally {await browser.close();}
 });
