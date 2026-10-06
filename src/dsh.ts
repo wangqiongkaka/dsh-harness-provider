@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { readdir, stat } from 'node:fs/promises';
 import { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService, RemoteError } from '@deepseek-ai/dsh-typert-protocol';
 import { SessionId } from '@deepseek-ai/dsh-session';
@@ -34,9 +35,9 @@ import { z } from 'zod';
 import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT } from './acp-adapter.js';
 import { claudeProfile, codexProfile } from './acp-profiles.js';
-import { DshRunner, unwrap } from './dsh-runner.js';
+import { DshRunner, linkedDirectories, linkedWorkspaces, unwrap } from './dsh-runner.js';
 import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
-import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest, SETTINGS_ENTRY, updateSettingsRequest } from './remote.js';
+import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, linkRequest, directoriesRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest, SETTINGS_ENTRY, updateSettingsRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest } from './delegation.js';
 import { createWorktree, mergeWorktree, removeWorktree, worktreeChanged } from './worktree.js';
 import { Config, defaultSettings, settingsOf, type SettingsSource } from './settings.js';
@@ -288,8 +289,9 @@ export class HarnessService extends TypertRemoteService {
     const live = this.runner.live.get(binding.sessionId);
     if (live) return work(live.session);
     if (!binding.nativeRef) throw new Error('尚未保存原生会话身份，无法读取或分支');
+    const linked = linkedDirectories(this.ctx, binding).map(directory => directory.path);
     const session = unwrap(await this.adapters[binding.harness].open({ kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef,
-      ...(binding.delegation?.discussion ? { discussion: true as const } : {}),
+      ...(binding.delegation?.discussion ? { discussion: true as const } : linked.length ? { additionalDirectories: linked } : {}),
       ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
       ...(binding.delegation?.discussion ? { permissionModeId: harnessPermissionModeIdSchema.parse(DISCUSSION_PERMISSION[binding.harness]) }
         : { ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(binding.configs ? { configValues: binding.configs } : {}) }) }));
@@ -878,7 +880,7 @@ export class HarnessService extends TypertRemoteService {
       const inherited = agent.session.inheritedEventCount ?? 0;
       let binding: Binding | undefined = current?.harness === request.harness ? current : undefined;
       if (request.harness === 'dsh') await this.bindings.remove(request.sessionId);
-      else binding ??= await this.bind(agent, request.sessionId, request.harness, inherited ? { carry: { throughSeq: inherited } } : {});
+      else binding ??= await this.bind(agent, request.sessionId, request.harness, { ...(inherited ? { carry: { throughSeq: inherited } } : {}), ...(current?.linked ? { linked: current.linked } : {}), ...(current?.linkedPaths ? { linkedPaths: current.linkedPaths } : {}) });
       // ponytail: DSH 0.1.6 only exposes preset-event invalidation; use a skill-specific event when available.
       // Re-announce the unchanged preset; no preset selection or durable event is written.
       const preset = this.ctx.get('sessionProjections')?.stateOf(agent.session, 'agentPreset') ?? agent.session.header.agentPreset;
@@ -899,7 +901,7 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /** Bind a fresh session to a Harness, seeding permission from the native sandbox and model / thinking from the last pick. */
-  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation' | 'cwd' | 'model' | 'thinking' | 'carry'>> = {}): Promise<Binding> {
+  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation' | 'cwd' | 'model' | 'thinking' | 'carry' | 'linked' | 'linkedPaths'>> = {}): Promise<Binding> {
     const cwd = agent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
     const binding: Binding = { version: 1, sessionId, harness, cwd, locked: false };
@@ -1090,6 +1092,61 @@ export class HarnessService extends TypertRemoteService {
       await this.bindings.write(binding);
       return this.view(binding);
     });
+  }
+
+  /**
+   * Replaces the other projects the session's Harness may work in. Neither agent can change them on an open session, so
+   * a live process is closed and the next turn resumes with the new set.
+   */
+  async linkProjects(raw: unknown) {
+    const request = linkRequest.parse(raw);
+    return this.bindings.serial(request.sessionId, async () => {
+      const agent = await this.agent(request.sessionId);
+      const binding = await this.bindings.read(request.sessionId);
+      if (!binding) throw new Error('关联项目仅支持 Codex / Claude Code 会话');
+      if (binding.delegation?.discussion) throw new Error('讨论会话不能关联项目');
+      if (agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length || binding.pending) throw new Error('请等待当前请求结束');
+      // A worktree delegation works in a checkout of its source repository; linking that repository would bypass the merge.
+      const own = [binding.cwd, binding.delegation?.worktree?.repo];
+      for (const id of request.workspaceIds) if (own.includes(this.workspace(id).path)) throw new Error('不能关联会话自己的项目');
+      // The paths come off the wire, whatever the panel offered: each must be an existing absolute directory.
+      const workspaceIds = [...request.workspaceIds], paths: string[] = [];
+      for (const given of request.paths) {
+        if (!isAbsolute(given)) throw new Error('目录必须是绝对路径');
+        const path = resolve(given);
+        if (!(await stat(path).catch(() => undefined))?.isDirectory()) throw new Error(`目录不存在或无法读取：${path}`);
+        if (own.includes(path)) throw new Error('不能关联会话自己的项目');
+        // A registered project is linked as one: it keeps its name and follows the project list.
+        const registered = this.ctx.get('workspaceRegistry')?.list().find(workspace => workspace.path === path);
+        if (!registered) { if (!paths.includes(path)) paths.push(path); }
+        else if (!workspaceIds.includes(registered.id)) workspaceIds.push(registered.id);
+      }
+      const live = this.runner.live.get(request.sessionId);
+      if (live?.session.hasBackgroundTasks?.()) throw new Error('后台任务仍在运行，结束后再调整关联项目');
+      if (live) {
+        const subagents = live.session.subagents?.();
+        if (subagents?.length) this.runner.retainedSubagents.set(request.sessionId, subagents);
+        await live.session.close(); this.runner.live.delete(request.sessionId);
+      }
+      binding.linked = workspaceIds.length ? workspaceIds : undefined;
+      binding.linkedPaths = paths.length ? paths : undefined;
+      await this.bindings.write(binding);
+      return this.view(binding);
+    });
+  }
+
+  /** One level of the Host's folders for picking a directory to link: plain subdirectories, hidden ones left out. */
+  async directories(raw: unknown) {
+    const { sessionId, path } = directoriesRequest.parse(raw);
+    await this.agent(sessionId);
+    if (!await this.bindings.read(sessionId)) throw new Error('关联项目仅支持 Codex / Claude Code 会话');
+    if (path !== undefined && !isAbsolute(path)) throw new Error('目录必须是绝对路径');
+    const directory = path === undefined ? homedir() : resolve(path);
+    const names = (await readdir(directory, { withFileTypes: true }).catch(() => { throw new Error(`无法读取目录：${directory}`); }))
+      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.')).map(entry => entry.name).sort((a, b) => a.localeCompare(b));
+    const parent = dirname(directory);
+    // ponytail: the first 500 folders of a level; add paging or a filter if a directory that large has to be browsed.
+    return { path: directory, parent: parent === directory ? null : parent, entries: names.slice(0, 500).map(name => ({ name, path: join(directory, name) })), truncated: names.length > 500 };
   }
 
   async selectConfig(raw: unknown) {
@@ -1317,7 +1374,7 @@ export class HarnessService extends TypertRemoteService {
     const authStatus = binding ? this.accountStatuses.get(binding.harness) : undefined;
     return { ...(authStatus ? { authStatus } : {}), harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? nativeLocked,
       model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null,
-      configs: binding?.configs ?? {}, recoveryRequired: !!binding?.pending, editableTurns: binding?.turns?.map(entry => entry.turn) ?? [],
+      configs: binding?.configs ?? {}, linked: binding ? linkedWorkspaces(this.ctx, binding).map(workspace => workspace.id as string) : [], linkedPaths: binding?.linkedPaths ?? [], recoveryRequired: !!binding?.pending, editableTurns: binding?.turns?.map(entry => entry.turn) ?? [],
       supersededTurns: supersededTurns(events) };
   }
   /** Whether the session runs on an external Harness, after its remembered Harness selection has been applied. */

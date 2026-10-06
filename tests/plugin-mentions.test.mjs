@@ -47,12 +47,15 @@ test('the @ plugin source lists Harness plugins after files and inserts the nati
 
 test('the DSH / command source keeps file, goal, plan, compact and localized clear beside delegate and discuss in Harness sessions', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim,linkPanels,linkable};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
- runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}}}});
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}},addEventListener(){},removeEventListener(){}}});
  const rows=['file','model','goal','plan','compact','clear','export'];
  let commandInjectKeys=[];
+ let linkCommand;
  class CommandUi {
+  // The Host lists a contributed command after its own rows, which puts it at the end of Commands.
+  register(contribution){linkCommand=contribution;rows.push(contribution.name);return ()=>{};}
   async candidates(session,{query=''}){return rows.filter(name=>!query||name.includes(query)).map(name=>({name,session:session.sessionId,section:['file','goal','plan'].includes(name)?'添加':'指令'}));}
   dispatch(pick){return 'handled:'+pick.candidate.name;} matchSpace(_session,token){return 'handled:'+token;} async matchEnter(_session,line){
    if(!commandInjectKeys.includes('remote.commands'))throw new Error('cannot get property "remote.commands" without inject');
@@ -68,13 +71,15 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
   async startDiscussionFromUser(request){discussions.push(request);return {ok:true,value:{accepted:true}};},
  }};
  const ctx={
-  remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>({clear:'清理',clearDescription:'清理上下文',delegate:'委派',delegateDescription:'创建独立会话执行任务',delegateTask:'任务',delegateCreated:'已创建委派会话',discuss:'讨论',discussDescription:'由主 Agent 分配多个会话并汇总',discussTask:'讨论任务',discussStarted:'已开始讨论',commands:'指令'})[key]??key},effect(fn){fn();},
+  remote:{...remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>({clear:'清理',clearDescription:'清理上下文',delegate:'委派',delegateDescription:'创建独立会话执行任务',delegateTask:'任务',delegateCreated:'已创建委派会话',discuss:'讨论',discussDescription:'由主 Agent 分配多个会话并汇总',discussTask:'讨论任务',discussStarted:'已开始讨论',commands:'指令',linked:'关联项目',linkedHint:'可直接读写'})[key]??key},effect(fn){fn();},
   inject(keys,apply){if(keys.includes('commandUi')){commandInjectKeys=keys;apply({commandUi,remote,effect(fn){disposers.push(fn());}});}},
  };
  await module.exports.apply(ctx);
  const names=async id=>Array.from(await commandUi.candidates({sessionId:id},{query:''}),row=>row.name);
- assert.deepEqual(await names('codex'),['file','goal','plan','compact','delegate','discuss','clear']);
+ assert.deepEqual(await names('codex'),['file','link','goal','plan','compact','delegate','discuss','clear']);
  const merged=await commandUi.candidates({sessionId:'codex'},{query:''});
+ // Linked projects sit under Add, right below the file row.
+ assert.equal(merged.find(row=>row.name==='link').section,'添加');
  assert.deepEqual(Array.from(merged.filter(row=>['compact','delegate','discuss','clear'].includes(row.name)),row=>row.section),['指令','指令','指令','指令']);
  const clear=merged.find(row=>row.name==='clear');
  assert.deepEqual(JSON.parse(JSON.stringify(clear)),{name:'clear',session:'codex',section:'指令',label:'清理',description:'清理上下文'});
@@ -107,6 +112,20 @@ test('the DSH / command source keeps file, goal, plan, compact and localized cle
  assert.deepEqual(await names('flaky'),['file','model','goal','plan','compact','delegate','discuss','clear','export'],'an unreadable session keeps the DSH menu');
  await commandUi.candidates({sessionId:'flaky'},{query:''});
  assert.deepEqual(reads,['codex','native','flaky','flaky'],'one read per session; a failed read is retried');
+ // The row is an action: it opens the plugin's own panel for that session. The Host's select popup is not used, since it
+ // always focuses its search field and would raise the on-screen keyboard.
+ assert.equal(linkCommand.name,'link');assert.equal(linkCommand.label(),'关联项目');assert.equal(linkCommand.description(),'可直接读写');
+ assert.equal(linkCommand.ui.kind,'action');
+ assert.equal(module.exports.linkPanels.has('codex'),false);
+ linkCommand.ui.run({sessionId:'codex'});
+ assert.equal(module.exports.linkPanels.has('codex'),true);
+ // Every registered project but the session's own, marked when linked; a link to a project the Host no longer has is not listed.
+ assert.deepEqual(JSON.parse(JSON.stringify(module.exports.linkable(['web','removed'],[{id:'here',title:'work',path:'/code/work',current:true},{id:'api',title:'api',path:'/code/api',current:false},{id:'web',title:'web',path:'/code/web',current:false}]))),
+  [{id:'api',title:'api',path:'/code/api',current:false,linked:false},{id:'web',title:'web',path:'/code/web',current:false,linked:true}]);
+ assert.deepEqual(Array.from(module.exports.linkable(undefined,[{id:'api',title:'api',path:'/code/api',current:false}]),project=>project.linked),[false]);
+ // Directories linked to the session alone follow the projects, named after their last folder; one that is a listed project is not repeated.
+ assert.deepEqual(JSON.parse(JSON.stringify(module.exports.linkable([],[{id:'api',title:'api',path:'/code/api',current:false}],['/data/sets/images/','/code/api']))),
+  [{id:'api',title:'api',path:'/code/api',current:false,linked:false},{id:'path:/data/sets/images/',title:'images',path:'/data/sets/images/',current:false,linked:true,custom:true}]);
  for(const dispose of disposers)dispose?.();
  for(const key of ['candidates','dispatch','matchSpace','matchEnter'])assert.equal(Object.hasOwn(commandUi,key),false);
 });
@@ -115,8 +134,9 @@ test('after /delegate the / menu lists only this session\'s skills and the hand-
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
  const module={exports:{}};
- runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}}}});
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}},addEventListener(){},removeEventListener(){}}});
  class CommandUi {
+  register(){return ()=>{};}
   async candidates(){return [{name:'compact'}];}
   dispatch(){return 'handled';} matchSpace(_session,token){return 'handled:'+token;} async matchEnter(){return 'handled';}
  }

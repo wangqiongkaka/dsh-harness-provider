@@ -1,8 +1,11 @@
+import { existsSync } from 'node:fs';
+import { basename } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import { createUserMessage, type UserMessage, type TokenUsage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
+import type {} from '@deepseek-ai/dsh-workspace';
 import type { HarnessAccountSnapshot, HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostItemOf, HostUsage } from './contracts.js';
 import { hostTurnIdSchema } from './contracts.js';
 import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
@@ -16,6 +19,17 @@ import { branchTranscript } from './branch-context.js';
 export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
   return result.value;
+}
+/** The other projects a session links, as registered now: one the Host no longer lists drops out, as does the session's own directory. */
+export function linkedWorkspaces(ctx: Context, binding: Pick<Binding, 'cwd' | 'linked'>) {
+  return binding.linked?.length ? (ctx.get('workspaceRegistry')?.list() ?? []).filter(workspace => binding.linked!.includes(workspace.id) && workspace.path !== binding.cwd) : [];
+}
+/** Every directory beside `cwd` a session may work in, named for the model: its linked projects, then the directories picked for it alone. */
+export function linkedDirectories(ctx: Context, binding: Pick<Binding, 'cwd' | 'linked' | 'linkedPaths'>): Array<{ title: string; path: string }> {
+  const projects = linkedWorkspaces(ctx, binding).map(({ title, path }) => ({ title, path }));
+  const taken = new Set([binding.cwd, ...projects.map(project => project.path)]);
+  // A directory deleted since it was picked is left out: the agent would be handed a workspace root that does not exist.
+  return [...projects, ...(binding.linkedPaths ?? []).filter(path => !taken.has(path) && existsSync(path)).map(path => ({ title: basename(path), path }))];
 }
 type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; modelLabel?: string; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; held?: HostItemOf<'notice'>[]; turnId?: import('./contracts.js').HostTurnId; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
 /**
@@ -154,9 +168,13 @@ export class DshRunner {
       // The adapter places the instructions: the agent's system prompt, or Codex's developer instructions at launch. A branch
       // switched from another Harness gets its inherited history there on every open, since its native session lacks it.
       const carried = binding.carry ? branchTranscript(agent.session.snapshotEvents(), binding.carry.throughSeq, this.branchContextChars()) : '';
+      // Named for the model as well: the directories alone do not say which project each one is.
+      const linked = discussion ? [] : linkedDirectories(this.ctx, binding);
+      const linkedNote = linked.length ? `\n\n[DSH 关联项目]\n本会话除工作目录外还关联了以下项目，可按当前权限直接访问其目录：\n${linked.map(workspace => `- ${workspace.title}：${workspace.path}`).join('\n')}\n[/DSH 关联项目]` : '';
       const hints = { ...(discussion ? { discussion, instructions: '当前是只读讨论会话。只分析和提出建议；不能修改文件、执行有副作用的操作、创建子会话或请求用户授权。' }
-        : delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) }, instructions: delegationInstructions() + carried }
-        : carried ? { instructions: carried } : {}),
+        : delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) }, instructions: delegationInstructions() + carried + linkedNote }
+        : carried || linkedNote ? { instructions: carried + linkedNote } : {}),
+        ...(linked.length ? { additionalDirectories: linked.map(workspace => workspace.path) } : {}),
         ...(binding.model ? { model: binding.model } : {}), ...(binding.thinking ? { thinkingOptionId: binding.thinking } : {}),
         ...(binding.permission ? { permissionModeId: binding.permission } : {}), ...(!discussion && binding.configs ? { configValues: binding.configs } : {}),
         ...(binding.usage ? { usage: binding.usage } : {}) };

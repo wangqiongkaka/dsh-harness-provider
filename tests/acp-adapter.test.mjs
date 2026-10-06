@@ -48,6 +48,7 @@ const app = agent({ name: 'peer' })
   .onRequest('session/load', async ({ params, client }) => {
     ctx = client;
     if (params.sessionId !== sessionId) process.exit(22);
+    note({ load: { additionalDirectories: params.additionalDirectories ?? null } });
     for (const entry of load()) {
       await update({ sessionUpdate: 'user_message_chunk', messageId: entry.userId, content: { type: 'text', text: entry.input } });
       for (const replayed of entry.updates ?? []) await update(replayed);
@@ -56,7 +57,7 @@ const app = agent({ name: 'peer' })
     setTimeout(commands, 10);
     return opened();
   })
-  .onRequest('session/fork', async ({ params }) => { note({ fork: params._meta ?? null }); return { sessionId: 'forked-' + (params._meta?.jetbrains?.air?.fork?.messageId ?? 'all') }; })
+  .onRequest('session/fork', async ({ params }) => { note({ fork: params._meta ?? null, forkDirectories: params.additionalDirectories ?? null }); return { sessionId: 'forked-' + (params._meta?.jetbrains?.air?.fork?.messageId ?? 'all') }; })
   .onRequest('session/close', async () => ({}))
   .onRequest('session/set_config_option', async ({ params }) => { if (params.configId === 'model') current.model = params.value; else if (params.configId === 'reasoning_effort') current.effort = params.value; else if (params.configId === 'mode') current.mode = params.value; else if (params.configId === 'collaboration_mode') current.collaboration = params.value; else if (params.configId === 'fast-mode') current.fast = params.value; else process.exit(23); return { configOptions: options() }; })
   .onRequest('session/set_mode', async ({ params }) => { current.mode = params.modeId; await update({ sessionUpdate: 'current_mode_update', currentModeId: params.modeId }); return {}; })
@@ -731,6 +732,35 @@ test('a new process resumes through session/load, rebuilds the same turn keys, a
     assert.equal(events(seen, 'item.completed')[0].snapshot.item.text, 'reply:third');
     assert.equal(value(await session.readSnapshot()).turns.length, 4);
     await session.close();
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('linked project directories reach the agent on session/new, session/load and session/fork, and stay out of requests without them', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  const linked = [join(f.root, 'other-a'), join(f.root, 'other-b')];
+  let adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  let ref;
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root, additionalDirectories: linked }));
+    ref = session.initialState.nativeRef;
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-0', input: [{ type: 'text', text: 'first' }] }));
+    await until(output, 'turn.completed');
+    assert.deepEqual((await f.notes()).find(note => note.new).new.additionalDirectories, linked);
+    await session.close();
+  } finally { await adapter.close(); }
+  adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref, additionalDirectories: linked }));
+    value(await session.fork());
+    await session.close();
+    // Unlinked again: the next open says nothing about directories, as before this feature.
+    const plain = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref }));
+    value(await plain.fork());
+    await plain.close();
+    const notes = await f.notes();
+    assert.deepEqual(notes.filter(note => note.load).map(note => note.load.additionalDirectories), [linked, null]);
+    assert.deepEqual(notes.filter(note => 'forkDirectories' in note).map(note => note.forkDirectories), [linked, null]);
   } finally { await adapter.close(); await f.close(); }
 });
 

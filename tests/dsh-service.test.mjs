@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdir,mkdtemp,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {Context,Service} from '@deepseek-ai/cordis';
@@ -36,6 +36,89 @@ test('new Codex and Claude sessions default to automatic approval without wideni
   assert.equal((await h.select({sessionId:'readonly',harness:'codex'})).permission,'read-only');
   assert.equal((await h.selectPermission({sessionId:'claude',permission:'default'})).permission,'default');
   assert.equal((await h.state({sessionId:'claude'})).permission,'default');
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});
+
+test('linking projects validates against the registered ones, persists, survives a Harness switch and closes the live process',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-link-'));
+ const ctx=new Context();
+ const agents=Object.fromEntries(['bound','native','busy','tree'].map(id=>[id,{
+  id,status:id==='busy'?'running':'idle',inbox:{nextTurn:[],nextStep:[]},session:{header:{cwd:root},snapshotEvents:()=>[]}
+ }]));
+ class NativeCommands extends Service {
+  constructor(ctx){super(ctx,'sessionController');}
+  async resolveAgent(id){return {agent:agents[id]};}
+  async prompt(){} async fork(){} async selectModel(){} updateQueue(){}
+ }
+ const adapter={inspect:async()=>({status:'ready',capabilities:{},catalog:{models:[],thinkingOptions:[]},permissionModes:{modes:[],defaultModeId:null}}),async close(){}};
+ const registered=[{id:'own',title:'Own',path:root,sessionIds:['bound']},{id:'api',title:'API',path:'/projects/api',sessionIds:[]},{id:'web',title:'Web',path:'/projects/web',sessionIds:[]}];
+ try{
+  await ctx.plugin(Typert);await ctx.plugin(NativeCommands);
+  ctx.provide('agents',{get:id=>agents[id]});ctx.provide('sessions',{});ctx.provide('userQuestions',{});
+  ctx.provide('sessionProjections',{stateOf:()=>undefined});ctx.provide('attachments',{});ctx.provide('fileUploads',{});
+  ctx.provide('workspaceRegistry',{list:()=>registered});
+  await ctx.plugin({inject,apply(scope){new HarnessService(scope,root,{codex:adapter,'claude-code':adapter});}});
+  const h=ctx.harness;
+  assert.deepEqual((await h.select({sessionId:'bound',harness:'codex'})).linked,[]);
+  await assert.rejects(h.linkProjects({sessionId:'native',workspaceIds:['api']}),/仅支持 Codex \/ Claude Code/);
+  await assert.rejects(h.linkProjects({sessionId:'bound',workspaceIds:['missing']}),/目标项目不存在/);
+  await assert.rejects(h.linkProjects({sessionId:'bound',workspaceIds:['own']}),/不能关联会话自己的项目/);
+  await assert.rejects(h.linkProjects({sessionId:'bound',workspaceIds:['api','api']}),/不能重复关联项目/);
+  await h.bindings.write({version:1,sessionId:'busy',harness:'codex',cwd:root,locked:true});
+  await assert.rejects(h.linkProjects({sessionId:'busy',workspaceIds:['api']}),/请等待当前请求结束/);
+  assert.deepEqual((await h.bindings.read('bound')).linked,undefined);
+  // A worktree delegation works in a checkout of `api`; linking `api` itself would write past the merge step.
+  await h.bindings.write({version:1,sessionId:'tree',harness:'codex',cwd:join(root,'checkout'),locked:true,delegation:{parentSessionId:'bound',requestHash:'hash',worktree:{repo:'/projects/api',path:join(root,'checkout'),base:'base'}}});
+  await assert.rejects(h.linkProjects({sessionId:'tree',workspaceIds:['api']}),/不能关联会话自己的项目/);
+  assert.deepEqual((await h.linkProjects({sessionId:'tree',workspaceIds:['web']})).linked,['web']);
+
+  // A live process cannot take new directories: it is closed (its subagents kept for the card) and the next turn reopens it.
+  let closed=0,background=true;
+  const live={session:{hasBackgroundTasks:()=>background,subagents:()=>[{id:'sub'}],close:async()=>{closed++;}}};
+  h.runner.live.set('bound',live);
+  await assert.rejects(h.linkProjects({sessionId:'bound',workspaceIds:['api']}),/后台任务仍在运行/);
+  assert.equal(closed,0);background=false;
+  assert.deepEqual((await h.linkProjects({sessionId:'bound',workspaceIds:['api','web']})).linked,['api','web']);
+  assert.equal(closed,1);assert.equal(h.runner.live.has('bound'),false);
+  assert.deepEqual(h.runner.retainedSubagents.get('bound'),[{id:'sub'}]);
+  assert.deepEqual((await h.bindings.read('bound')).linked,['api','web']);
+
+  // A directory outside the registered projects is linked to this session alone. The path comes off the wire, so it is
+  // checked here whatever the panel offered: absolute, an existing directory, and not the session's own.
+  await mkdir(join(root,'picked','inner'),{recursive:true});await mkdir(join(root,'.hidden'));await mkdir(join(root,'docs'));await writeFile(join(root,'notes.txt'),'');
+  registered.push({id:'docs',title:'Docs',path:join(root,'docs'),sessionIds:[]});
+  const paths=value=>h.linkProjects({sessionId:'bound',workspaceIds:['api','web'],paths:value});
+  await assert.rejects(paths(['picked']),/目录必须是绝对路径/);
+  await assert.rejects(paths([join(root,'missing')]),/目录不存在或无法读取/);
+  await assert.rejects(paths([join(root,'notes.txt')]),/目录不存在或无法读取/);
+  await assert.rejects(paths([root]),/不能关联会话自己的项目/);
+  assert.deepEqual((await h.bindings.read('bound')).linkedPaths,undefined);
+  // A trailing slash and a repeat are one directory; a folder that is a registered project is linked as that project.
+  const picked=await paths([join(root,'picked')+'/',join(root,'picked'),join(root,'docs')]);
+  assert.deepEqual(picked.linkedPaths,[join(root,'picked')]);assert.deepEqual(picked.linked,['api','web','docs']);
+  assert.deepEqual((await h.bindings.read('bound')).linkedPaths,[join(root,'picked')]);
+  assert.deepEqual((await h.state({sessionId:'bound'})).linkedPaths,[join(root,'picked')]);
+  // The folder browser: one level, plain subdirectories only, hidden ones left out.
+  await assert.rejects(h.directories({sessionId:'native'}),/仅支持 Codex \/ Claude Code/);
+  await assert.rejects(h.directories({sessionId:'bound',path:'picked'}),/目录必须是绝对路径/);
+  await assert.rejects(h.directories({sessionId:'bound',path:join(root,'missing')}),/无法读取目录/);
+  const level=await h.directories({sessionId:'bound',path:root+'/'});
+  assert.equal(level.path,root);assert.equal(level.parent,join(root,'..'));assert.equal(level.truncated,false);
+  assert.deepEqual(level.entries,[{name:'docs',path:join(root,'docs')},{name:'picked',path:join(root,'picked')}]);
+  assert.deepEqual((await h.directories({sessionId:'bound',path:join(root,'picked')})).entries,[{name:'inner',path:join(root,'picked','inner')}]);
+  assert.equal((await h.directories({sessionId:'bound',path:'/'})).parent,null);
+  assert.equal(typeof (await h.directories({sessionId:'bound'})).path,'string','no path lists the home directory');
+  registered.pop();await h.linkProjects({sessionId:'bound',workspaceIds:['api','web'],paths:[join(root,'picked')]});
+
+  // Still unstarted, so the Harness can change; the links go along.
+  const switched=await h.select({sessionId:'bound',harness:'claude-code'});
+  assert.deepEqual(switched.linked,['api','web']);assert.deepEqual(switched.linkedPaths,[join(root,'picked')]);
+  // A project the Host no longer lists drops out of the view without an edit.
+  registered.pop();
+  assert.deepEqual((await h.state({sessionId:'bound'})).linked,['api']);
+  const cleared=await h.linkProjects({sessionId:'bound',workspaceIds:[]});
+  assert.deepEqual(cleared.linked,[]);assert.deepEqual(cleared.linkedPaths,[]);
+  assert.equal((await h.bindings.read('bound')).linked,undefined);assert.equal((await h.bindings.read('bound')).linkedPaths,undefined);
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });
 

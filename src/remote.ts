@@ -9,6 +9,10 @@ export const stateSchema = z.object({
   harness: selection, locked: z.boolean(), model: z.string().nullable(), thinking: z.string().nullable(), permission: z.string().nullable(),
   authStatus: z.object({ kind: z.string(), label: z.string(), detail: z.string().optional(), account: z.object({ email: z.string().optional(), plan: z.string().optional(), organization: z.string().optional() }).optional() }).optional(),
   configs: z.record(z.string(), z.union([z.string(), z.boolean()])),
+  /** Ids of the other registered projects this session's Harness may also work in. */
+  linked: z.array(z.string()),
+  /** Directories outside the registered projects, linked to this session alone. */
+  linkedPaths: z.array(z.string()),
   recoveryRequired: z.boolean(),
   /** DSH turns whose native boundary is known, so their prompt can be edited and rerun in place. */
   editableTurns: z.array(z.number().int()),
@@ -22,6 +26,14 @@ export const modelsRequest = address.extend({ harness: z.enum(['codex', 'claude-
 export const thinkingRequest = address.extend({ thinking: z.string().min(1) });
 export const permissionRequest = address.extend({ permission: z.string().min(1) });
 export const configRequest = address.extend({ configId: z.string().min(1), value: z.union([z.string(), z.boolean()]) });
+/** The full set of linked projects, and of directories picked for this session alone; empty lists unlink all. */
+export const linkRequest = address.extend({
+  workspaceIds: z.array(z.string().min(1)).max(16).refine(values => new Set(values).size === values.length, '不能重复关联项目'),
+  paths: z.array(z.string().min(1).max(4096)).max(16).default([]),
+});
+/** One level of the Host's folders, for picking a directory to link; without `path`, the home directory. */
+export const directoriesRequest = address.extend({ path: z.string().min(1).max(4096).optional() });
+export const directoriesSchema = z.object({ path: z.string(), parent: z.string().nullable(), entries: z.array(z.object({ name: z.string(), path: z.string() })), truncated: z.boolean() });
 export const modelsSchema = z.object({
   models: z.array(z.object({ id: z.string(), label: z.string(), resolved: z.string().nullable(), thinkingOptionIds: z.array(z.string()).nullable() })),
   /** What the Harness runs when no model is picked here: its own CLI configuration. */
@@ -115,7 +127,7 @@ export const descriptors: InvocationDescriptor[] = [
   ['secretStatus', address, secretStatusSchema], ['answerSecret', secretAnswerRequest, z.object({ accepted: z.boolean() })],
   ['state', address, stateSchema], ['select', selectRequest, stateSchema],
   ['models', modelsRequest, modelsSchema], ['selectModel', modelRequest, stateSchema],
-  ['selectThinking', thinkingRequest, stateSchema], ['selectPermission', permissionRequest, stateSchema], ['selectConfig', configRequest, stateSchema],
+  ['selectThinking', thinkingRequest, stateSchema], ['selectPermission', permissionRequest, stateSchema], ['selectConfig', configRequest, stateSchema], ['linkProjects', linkRequest, stateSchema], ['directories', directoriesRequest, directoriesSchema],
   ['usage', address, usageSchema], ['harnesses', harnessesRequest, harnessesSchema], ['quota', address, quotaSchema],
   ['delegateFromUser', delegateFromUserRequest, delegationAcceptedSchema],
   ['startDiscussionFromUser', startDiscussionFromUserRequest, discussionAcceptedSchema], ['workspaces', address, workspacesSchema],

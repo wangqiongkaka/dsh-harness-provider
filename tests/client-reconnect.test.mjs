@@ -11,11 +11,12 @@ test('the Add menu survives Remote replacement without calling the disposed clie
   let client;
   runInNewContext(await readFile('dist/client.js', 'utf8'), {
     window: { __ModuleLoader__: { load: ({ factory }) => { client = factory(require); } } },
-    document: { createElement: () => ({ setAttribute() {}, remove() {} }), head: { append() {} } },
+    document: { createElement: () => ({ setAttribute() {}, remove() {} }), head: { append() {} }, addEventListener() {}, removeEventListener() {} },
   });
   const ctx = new Context();
   class Commands extends Service {
     constructor(ctx) { super(ctx, 'commandUi'); this.matchSpace = () => 'existing-override'; }
+    register() { return () => {}; }
     async candidates() { return [{ name: 'file' }, { name: 'compact' }]; }
     dispatch() { return 'handled'; }
     matchSpace() { return 'handled'; }

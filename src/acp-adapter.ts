@@ -639,6 +639,7 @@ class AcpSession implements HarnessSession {
   readonly #process: AcpProcess;
   readonly #sessionId: string;
   readonly #cwd: string;
+  readonly #roots: string[];
   readonly #profile: AcpProfile;
   readonly #environment: NodeJS.ProcessEnv;
   #catalogs: Catalogs;
@@ -658,7 +659,7 @@ class AcpSession implements HarnessSession {
   #closing: Promise<void> | null = null;
 
   private constructor(options: SessionOptions, process_: AcpProcess, sessionId: string, opened: Opened, catalogs: Catalogs, commands: HarnessSkill[]) {
-    this.#profile = options.profile; this.#environment = options.environment; this.#process = process_; this.#sessionId = sessionId; this.#cwd = options.input.cwd; this.#onClosed = options.onClosed;
+    this.#profile = options.profile; this.#environment = options.environment; this.#process = process_; this.#sessionId = sessionId; this.#cwd = options.input.cwd; this.#roots = options.input.additionalDirectories ?? []; this.#onClosed = options.onClosed;
     this.#transcript = new Transcript(() => limitsOf(options.profile).toolOutputChars);
     this.harnessId = harnessIdSchema.parse(options.profile.harnessId);
     this.#catalogs = catalogs; this.#modes = opened.modes; this.#models = record(opened as unknown).models;
@@ -699,13 +700,15 @@ class AcpSession implements HarnessSession {
     }, input.instructions);
     try {
       const meta = profile.sessionMeta?.(input.kind, input.instructions, input.discussion);
+      // Both agents take the standard field on new, load and fork; omitted when empty so the request stays as before.
+      const roots = input.additionalDirectories?.length ? { additionalDirectories: input.additionalDirectories } : {};
       let opened: Opened;
       if (input.kind === 'create') {
-        const created = await request<acp.NewSessionResponse>(process_, 'session/new', { cwd: input.cwd, mcpServers: [], ...(meta ? { _meta: meta } : {}) });
+        const created = await request<acp.NewSessionResponse>(process_, 'session/new', { cwd: input.cwd, mcpServers: [], ...roots, ...(meta ? { _meta: meta } : {}) });
         sessionId = created.sessionId; opened = created;
       } else {
         sessionId = input.nativeRef.nativeSessionId;
-        opened = await request<acp.LoadSessionResponse>(process_, 'session/load', { sessionId, cwd: input.cwd, mcpServers: [], ...(meta ? { _meta: meta } : {}) }, limitsOf(profile).loadTimeoutMs);
+        opened = await request<acp.LoadSessionResponse>(process_, 'session/load', { sessionId, cwd: input.cwd, mcpServers: [], ...roots, ...(meta ? { _meta: meta } : {}) }, limitsOf(profile).loadTimeoutMs);
       }
       const catalogs = catalogsOf(opened);
       const skills = (await waitFor(() => commands, 3_000)) ?? [];
@@ -768,7 +771,7 @@ class AcpSession implements HarnessSession {
     try {
       const process_ = await AcpProcess.connect(this.#profile, this.#environment, this.#cwd, IDLE_HANDLERS);
       try {
-        const forked = await request<acp.ForkSessionResponse>(process_, 'session/fork', { sessionId: this.#sessionId, cwd: this.#cwd, ...(meta ? { _meta: meta } : {}) }, limitsOf(this.#profile).loadTimeoutMs);
+        const forked = await request<acp.ForkSessionResponse>(process_, 'session/fork', { sessionId: this.#sessionId, cwd: this.#cwd, ...(this.#roots.length ? { additionalDirectories: this.#roots } : {}), ...(meta ? { _meta: meta } : {}) }, limitsOf(this.#profile).loadTimeoutMs);
         if (!forked.sessionId || forked.sessionId === this.#sessionId) throw new Error('Harness 返回了错误的分支身份');
         return { ok: true, value: nativeSessionRefSchema.parse({ harnessId: this.harnessId, nativeSessionId: forked.sessionId, formatVersion: 1 }) };
       } finally { await process_.close(); }

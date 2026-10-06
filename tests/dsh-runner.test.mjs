@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -305,6 +305,30 @@ test('delegation instructions go to the adapter, not the user input, so a leadin
   assert.deepEqual(input,[{type:'text',text:'/review now'}]); // the user's words reach the adapter untouched
   // The adapter places the instructions (system prompt or developer instructions); a leading blank line keeps them apart from the feedback contract.
   assert.match(opened[0].instructions,/^\n\n\[DSH 会话能力，由宿主提供\]/);
+  await adapter.close();
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});
+
+test('a session\'s linked projects reach the adapter as extra directories and are named in its instructions, never in the user input',{timeout:10000},async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-harness-linked-')),ctx=new Context(),native={turns:0};
+ const bindings=new Bindings(join(root,'bindings')),id=SessionId('linked');
+ try{
+  for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+  await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+  // `gone` was linked and has since been removed from the Host; `own` is the session's own project.
+  ctx.provide('workspaceRegistry',{list:()=>[{id:'own',title:'Own',path:root},{id:'api',title:'API',path:'/projects/api'},{id:'web',title:'Web',path:'/projects/web'},{id:'idle',title:'Idle',path:'/projects/idle'}]});
+  const opened=[],adapter=fakeAdapter(opened,native);
+  const runner=new DshRunner(ctx,bindings,{codex:adapter});
+  ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+  await ctx.plugin(Loop,{agents:[]});
+  // Directories picked for this session alone follow the projects; one deleted since is left out.
+  await mkdir(join(root,'picked'));
+  await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true,linked:['api','gone','web','own'],linkedPaths:[join(root,'picked'),join(root,'deleted'),'/projects/api']});
+  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  agent.followup(createUserMessage({content:[{type:'text',text:'compare them'}],source:{kind:'user'}}));await agent.whenIdle();
+  assert.deepEqual(opened[0].additionalDirectories,['/projects/api','/projects/web',join(root,'picked')]);
+  assert.equal(opened[0].instructions,`\n\n[DSH 关联项目]\n本会话除工作目录外还关联了以下项目，可按当前权限直接访问其目录：\n- API：/projects/api\n- Web：/projects/web\n- picked：${join(root,'picked')}\n[/DSH 关联项目]`);
+  assert.deepEqual(native.inputs[0],[{type:'text',text:'compare them'}]);
   await adapter.close();
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });

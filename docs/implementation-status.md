@@ -2,6 +2,25 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## 会话关联项目（2026-10-06）
+
+- 行为：Codex / Claude Code 会话在加号菜单“添加”分组的“关联项目”（`/link`）中勾选宿主已注册的其他项目；Harness 在本会话中直接访问这些目录。按会话保存在绑定的 `linked`（工作区 id），每次打开会话时按宿主当前的项目列表解析为路径，已移除的项目与会话自身目录自动排除。
+- 做法：两个适配器都支持 ACP 标准字段 `additionalDirectories`，插件只负责在 `session/new`、`session/load`、`session/fork` 传入，不自建访问机制。依据：claude-agent-acp 0.84.0 `dist/acp-agent.js` 的能力声明（`sessionCapabilities.additionalDirectories`）与 `createSession`（合并进 SDK `options.additionalDirectories`），`computeSessionFingerprint` 把它计入会话指纹；codex-acp 2.1.0 `dist/index.js` 的 `readAdditionalDirectories`（要求绝对路径）、`createSessionConfig`（各根目录标为 `trust_level: "trusted"`，并经 `mergeSandboxWorkspaceWriteRoots` 并入 `sandbox_workspace_write.writable_roots`）与 `addAdditionalDirectoriesToSandboxPolicy`（仅 `workspaceWrite` 策略扩大可写根）。
+- 修改关联：两个适配器都没有在已打开会话上更换目录的请求，所以保存时关闭该会话的原生进程（保留其子代理记录），下一轮按 `session/load` 带新目录恢复。运行中、有待确认结果或仍有后台任务时拒绝修改。
+- 模型如何得知：项目名称与路径写进会话说明（`OpenSessionInput.instructions`，Claude Code 的系统提示、Codex 的 developer instructions），不进入用户输入，不影响原生标题与轮次标识。
+- 范围：分支复制绑定时沿用关联；首条消息前切换 Harness 时保留。委派出的会话不继承，讨论会话与 DSH 原生会话不支持。读写范围由各 Harness 的权限模式决定，插件不另设只读关联。
+- 未做：Codex 的 `@` 插件列表（`plugin/installed` 的 `cwds`）仍只按会话目录读取。
+- 入口：用宿主指令菜单的公开注册接口 `commandUi.register` 注册动作类指令 `link`（`deepseek-harness/packages/client/ui-commands/src/client/contract.ts` 的 `ActionSpec`），选中后打开插件自己的项目面板，渲染在宿主弹出列表所在的 `conversation.input.overlay` 插槽。宿主把贡献的指令排在“指令”分组末尾（`presentation.ts` 的 `sectionRows`），插件在已有的菜单改写里把它挪到“文件”下面并沿用其分组标题；DSH 原生会话不显示该项。最初放在输入栏左侧的独立入口已移除：那一行在手机宽度下本就放不下。
+- 为什么不用宿主的弹出选择（`PopupSelectSpec`）：它打开后一定聚焦自己的搜索框（`PopupSelectView.tsx` 的 “Focus the search input after it mounts”），手机上会唤起输入法，且没有关闭搜索框的选项；选中一项后还会关闭，无法连续勾选。插件面板没有输入框、不取焦点，勾选后保持打开。
+- 面板展示：打开时已关联的项目排在最前，勾选后不重排；每项下方显示所在位置而非完整路径（主目录写作 `~`，与项目同名的末级目录省略）。修正了一处布局缺陷：菜单是带最大高度的纵向弹性容器，选项行原先可被压缩，条目多到需要滚动时每行被压到最小高度，换行的路径压在下一项的名称上；现在选项行不收缩（`.hp-option{flex:none}`），该样式由插件所有菜单共用，模型等列表在条目很多时同样受益。
+- 列表两端的缓冲动画（用户要求）：滚轮或手指拖到列表尽头再继续时，行按 iOS 式阻尼让位（累计拉力越大越硬，上限约 33px），松开后带回一点过冲地弹回（`useRubberBand`，340ms `cubic-bezier(.3,.9,.35,1.05)`）；外壳（背景、圆角、阴影）不动，行包在一层 `hp-menu-body` 里整体位移，避免浮层脱离输入栏。内容不超过最大高度（无可滚动）的列表不触发；`prefers-reduced-motion: reduce` 时整体关闭。反向输入先把拉力解到 0 再恢复原生滚动，回弹中途再次接手会从当前视觉位置续拉。滚轮与触摸（CDP 派发触摸事件）两条路径均有测试，测试先在未实现的代码上确认失败。
+- 自定义目录（仅本会话，用户决定）：面板的“选择其他目录…”逐级浏览主机文件夹并关联当前目录，存入绑定的 `linkedPaths`（绝对路径），打开会话时排在已关联项目之后一并作为 `additionalDirectories` 传入，说明文字里以末级目录名称呼。路径来自远程调用，服务端逐个校验：必须是绝对路径、存在且是目录、不是会话自己的目录（或 worktree 的来源仓库）；与已注册项目同路径的转为关联该项目。已删除的目录在打开会话时跳过，避免把不存在的工作区根交给 Harness。
+- 目录列表接口 `directories`：只对已绑定 Harness 的会话开放（与其他接口相同，先经宿主的会话归属校验），每次返回一级的普通子目录，跳过隐藏目录，上限 500 个；缺省列主目录。没有复用宿主的目录浏览接口：其后端在启动时二选一（`deepseek-harness/packages/host/directory-picker-auto/src/resolve.ts`），绑定回环地址的 macOS / Windows 用系统对话框，此时浏览接口直接拒绝（`api/workspace-controller/src/directory-picker.ts` 的 `requireCapability`），对话框又开在电脑屏幕上，手机无法使用。
+- 未做：新建文件夹、显示隐藏文件夹、手动输入路径、把目录注册成 DSH 项目（最后一项是用户选择不做）。
+- 点 **+** 带起的键盘：宿主在打开加号菜单前会聚焦草稿编辑器（`ui-conversation/src/client/skeleton/InputBar.tsx` 的 `onToggleCommandMenu`），触屏上因此弹出键盘。插件记录当前文本框的焦点是否来自用户自己（点在该文本框内，或来自键盘），打开面板时只在“触屏、且焦点是点别的控件带来的”情况下让它失焦（`trackTyping`）；鼠标与键盘操作不受影响。键盘在点 **+** 到选中条目之间仍会出现，这一段由宿主决定。
+- 手机端：手机经浏览器打开的是同一套 DSH Web，加号菜单是宿主界面。同一行里从入口左缘展开的两个浮层（额度浮层、恢复会话浮层）共用 `useOnScreen`：打开后若超出屏幕右缘则向左拉回；额度浮层此前在 390px 下横跨 252–516。
+- 未验证：真实 Codex / Claude Code CLI 在关联目录中的实际读写与审批表现；真实 DSH（桌面版与手机经 dsh-remote-control）里加号菜单条目、项目面板的实际位置与外观，以及真机上键盘是否如预期收回；目前验证的是传给宿主的条目、面板自身的行为和焦点判断逻辑。
+
 ## 开发时免重启重载（2026-10-02）
 
 - 做法：不在插件内实现重载，使用 DSH 自带的热重载。Profile 以 `link:` 安装 `.cache/live`，并在 `cordis.patch.yml` 的 `hmr` 条目里把 `base` 指向该目录、`root` 设为 `dist`；`npm run dev:reload` 构建后把发布文件复制进去，入口 `dist/dsh.js` 最后写入。设置步骤见 README。

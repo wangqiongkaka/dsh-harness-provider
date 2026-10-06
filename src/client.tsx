@@ -16,7 +16,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-commands/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client';
 import type { Settings } from './settings.js';
-import { contribution, SETTINGS_ENTRY, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema, type settingsViewSchema, type updateSettingsRequest, type workspacesSchema } from './remote.js';
+import { contribution, SETTINGS_ENTRY, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema, type settingsViewSchema, type updateSettingsRequest, type workspacesSchema, type directoriesSchema } from './remote.js';
 import type { z } from 'zod';
 
 type State = z.infer<typeof stateSchema>;
@@ -28,6 +28,9 @@ type Subagents = z.infer<typeof subagentsSchema>;
 type Plugin = z.infer<typeof pluginsSchema>[number];
 type SettingsView = z.infer<typeof settingsViewSchema>;
 type Workspaces = z.infer<typeof workspacesSchema>;
+type Directories = z.infer<typeof directoriesSchema>;
+/** A row of the linked-projects panel: a registered project, or (`custom`) a directory picked for this session alone. */
+type Project = Workspaces[number] & { linked: boolean; custom?: true };
 type Api = {
   recover(request: {sessionId: string; action: 'check' | 'unlock'}): Promise<RemoteResult<State & {detail: string}>>;
   secretStatus(request: {sessionId: string}): Promise<RemoteResult<SecretStatus>>;
@@ -40,6 +43,8 @@ type Api = {
   selectThinking(request: {sessionId: string; thinking: string}): Promise<RemoteResult<State>>;
   selectPermission(request: {sessionId: string; permission: string}): Promise<RemoteResult<State>>;
   selectConfig(request: {sessionId: string; configId: string; value: string | boolean}): Promise<RemoteResult<State>>;
+  linkProjects(request: {sessionId: string; workspaceIds: string[]; paths?: string[]}): Promise<RemoteResult<State>>;
+  directories(request: {sessionId: string; path?: string}): Promise<RemoteResult<Directories>>;
   usage(request: {sessionId: string}): Promise<RemoteResult<Usage>>;
   harnesses(request: {sessionIds: string[]}): Promise<RemoteResult<Record<string, {harness: State['harness']; delegated: boolean; running: boolean}>>>;
   quota(request: {sessionId: string}): Promise<RemoteResult<Quota>>;
@@ -81,6 +86,8 @@ const zh = {
   delegate: '委派', delegateMode: '委派模式', delegateDescription: '创建独立会话执行任务', delegateTask: '当前处于委派模式：描述任务，将交给所选 Harness 在新的独立会话中执行；输入 / 可先用当前会话的 skill（如交接）', delegateCreated: '已创建委派会话', delegatePrepared: '正在当前会话执行 skill，完成后自动创建委派会话', commands: '指令',
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
   project: '项目', projectCurrent: '当前项目', pickProject: '选择委派的目标项目',
+  linkBrowse: '选择其他目录…', linkHere: '关联此目录', linkUp: '上一级', linkNoFolders: '没有子文件夹', linkTruncated: '文件夹过多，仅显示前 500 个',
+  linked: '关联项目', pickLinked: '选择本会话关联的项目', linkedNone: '没有其他已添加的项目', linkedHint: 'Harness 可按当前权限直接读写关联项目的目录，下一轮生效',
   worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code',
   pickModel: '{harness} 的模型与推理强度', pickDefault: '默认',
   settingsNav: 'Harness', settingsIntro: '接入 Codex / Claude Code 的默认行为。修改立即保存到当前 Profile 的配置文件；进展反馈说明、讨论等待上限和调试输出在原生进程下次启动时生效。',
@@ -138,6 +145,8 @@ const en: Record<keyof typeof zh,string> = {
   delegate:'Delegate', delegateMode:'Delegation mode', delegateDescription:'Create an independent session for this task', delegateTask:'Delegation mode: describe the task for the selected Harness to run in a new session; type / to run one of this session\'s skills (such as a hand-off) first', delegateCreated:'Delegation session created', delegatePrepared:'Running the skill in this session; the delegation starts when it finishes', commands:'Commands',
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
   project:'Project', projectCurrent:'Current project', pickProject:'Choose the project to delegate to',
+  linkBrowse:'Choose another folder…', linkHere:'Link this folder', linkUp:'Parent folder', linkNoFolders:'No subfolders', linkTruncated:'Too many folders; showing the first 500',
+  linked:'Linked projects', pickLinked:'Choose the projects linked to this session', linkedNone:'No other projects added', linkedHint:'The Harness can read and write linked project directories under the current permission mode, from the next turn',
   worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex and Claude Code only',
   pickModel:'{harness} model and effort', pickDefault:'Default',
   settingsNav:'Harness', settingsIntro:'Defaults for Codex and Claude Code. Changes save to this profile\'s configuration at once; the progress feedback contract, the discussion wait and debug output apply when a native process next starts.',
@@ -190,6 +199,11 @@ interface Injected {
   selectThinking(id: string, thinking: string): Promise<State>;
   selectPermission(id: string, permission: string): Promise<State>;
   selectConfig(id: string, configId: string, value: string | boolean): Promise<State>;
+  /** The other registered projects, each marked when this session links it, then the directories linked to it alone. */
+  projects(id: string): Promise<Project[]>;
+  linkProjects(id: string, workspaceIds: string[], paths: string[]): Promise<State>;
+  /** One level of the Host's folders; the home directory without `path`. */
+  directories(id: string, path?: string): Promise<Directories>;
   usage(id: string): Promise<Usage>;
   quota(id: string): Promise<Quota>;
   /** Reports the session on screen, so the host keeps its Harness process open. */
@@ -211,6 +225,7 @@ type LeftProps = PropsRuntime<'conversation.input.left'> & PropsLocale<'harness'
 type ModelProps = PropsRuntime<'conversation.input.model'> & PropsLocale<'harness'> & InjectFace<Injected>;
 type PermissionProps = PropsRuntime<'conversation.input.permission'> & PropsLocale<'harness'> & InjectFace<Injected>;
 type DelegationDockProps = PropsRuntime<'conversation.input.dock'> & PropsLocale<'harness'>;
+type LinkPanelProps = PropsRuntime<'conversation.input.overlay'> & PropsLocale<'harness'> & InjectFace<Pick<Injected, 'projects' | 'linkProjects' | 'directories'>>;
 type ContextDockProps = PropsRuntime<'conversation.composer.dock'> & PropsLocale<'harness'> & InjectFace<Injected>;
 
 // ---- shared chrome (copies the host's ModelSelect / PermissionSelect / ContextMeter geometry) ----
@@ -218,6 +233,8 @@ const Chevron = ({ open }: { open?: boolean }) => <svg className={`hp-chevron${o
 const ChevronRight = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const Back = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M10 4L6 8l4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const PluginIcon = ({ size = 16 }: { size?: number }) => <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden><path d="M6 2.5h4v2a1.5 1.5 0 003 0V6h.5v4H13v-.5a1.5 1.5 0 00-3 0v4H6v-2a1.5 1.5 0 00-3 0V12h-.5V6H3v.5a1.5 1.5 0 003 0v-4z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/></svg>;
+const LinkIcon = ({ size = 16 }: { size?: number }) => <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden><path d="M6.8 9.2a2.6 2.6 0 003.7 0l2-2a2.6 2.6 0 00-3.7-3.7l-.7.7M9.2 6.8a2.6 2.6 0 00-3.7 0l-2 2a2.6 2.6 0 003.7 3.7l.7-.7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>;
+const FolderIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M2 4.6c0-.7.5-1.2 1.2-1.2h2.9l1.4 1.5h5.3c.7 0 1.2.5 1.2 1.2v5.3c0 .7-.5 1.2-1.2 1.2H3.2c-.7 0-1.2-.5-1.2-1.2V4.6z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/></svg>;
 const ClearIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M3.2 8.8 8.4 3.6a1.4 1.4 0 012 0L12.4 5.6a1.4 1.4 0 010 2L8 12H5.2a1.4 1.4 0 01-1-.4l-1-1a1.4 1.4 0 010-2zM6.1 6l3.9 3.9M8 12h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const Check = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const icons: Record<string, ReactNode> = {
@@ -271,8 +288,110 @@ function useDismiss(open: boolean, close: () => void, ref: React.RefObject<HTMLE
     return () => { document.removeEventListener('pointerdown', onPointerDown); document.removeEventListener('keydown', onKeyDown); };
   }, [open, close, ref]);
 }
-function Option({ icon, label, hint, selected, disabled, onClick }: { icon?: ReactNode; label: string; hint?: string; selected: boolean; disabled?: boolean; onClick: () => void }) {
-  return <button type="button" role="menuitemradio" aria-checked={selected} className="hp-option" disabled={disabled} onClick={onClick}>
+/**
+ * For a popover that opens from its trigger's left edge: where that runs past the right edge of the screen (the composer
+ * row on a phone), it is pulled back inside. `deps` are whatever changes its presence or width.
+ */
+function useOnScreen<E extends HTMLElement>(deps: unknown[]) {
+  const ref = useRef<E>(null);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    node.style.left = '0px';
+    const over = node.getBoundingClientRect().right - (document.documentElement.clientWidth - 16);
+    if (over > 0) node.style.left = `${-over}px`;
+  }, deps);
+  return ref;
+}
+/**
+ * The give a touch list has at its ends, for the `+` panel's rows: wheeling or dragging past the top or bottom of a
+ * scrolled menu draws the rows aside with damping — the shell (background, radius, shadow) stays where it is — and
+ * springs them back on release. A list that fits never scrolls and gets no give, and `prefers-reduced-motion` skips
+ * the effect altogether. `deps` are whatever swaps the rows or closes the panel.
+ */
+function useRubberBand(deps: unknown[]) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const shell = ref.current;
+    if (!shell || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    const give = 44, reach = 132; // px of travel at an endless pull, and the raw pull that nears it
+    let pull = 0, wheel = 0, back = 0, from = Number.NaN;
+    const rows = () => shell.firstElementChild instanceof HTMLElement ? shell.firstElementChild : null;
+    const scrolled = () => shell.scrollHeight > shell.clientHeight + 1;
+    // The pull gathers raw pixels and is shown damped, stiffening the further it goes; which side of rest it is on is
+    // set by the direction that started it, and unwinding stops at rest instead of crossing to the other side.
+    const wind = (delta: number) => {
+      const side = pull > 0 ? 1 : pull < 0 ? -1 : delta < 0 ? 1 : -1;
+      pull = side > 0 ? Math.min(Math.max(pull - delta, 0), reach) : Math.max(Math.min(pull - delta, 0), -reach);
+    };
+    const draw = () => {
+      const node = rows();
+      if (!node) return;
+      const drawn = pull && scrolled() ? Math.sign(pull) * give * (1 - 1 / (1 + Math.abs(pull) / give)) : 0;
+      node.style.transform = drawn ? `translateY(${drawn.toFixed(2)}px)` : '';
+    };
+    // A held pull is released on its own: the rows spring home, overshooting a little before they settle.
+    const release = () => {
+      window.clearTimeout(wheel);
+      const node = rows();
+      pull = 0;
+      if (!node || !node.style.transform) return;
+      node.classList.add('hp-menu-back');
+      node.style.transform = '';
+      node.addEventListener('transitionend', event => { if (event.target === node) node.classList.remove('hp-menu-back'); }, { once: true });
+      window.clearTimeout(back);
+      back = window.setTimeout(() => node.classList.remove('hp-menu-back'), 400);
+    };
+    // Taking hold again while the spring still runs starts from where the rows are, not from rest.
+    const hold = () => {
+      window.clearTimeout(wheel); window.clearTimeout(back);
+      const node = rows();
+      if (!node) return;
+      const drawn = node.classList.contains('hp-menu-back') ? new DOMMatrixReadOnly(getComputedStyle(node).transform).m42 : 0;
+      node.classList.remove('hp-menu-back');
+      if (drawn) pull = drawn > 0 ? Math.min(give * drawn / (give - drawn), reach) : Math.max(give * drawn / (give + drawn), -reach);
+    };
+    const onWheel = (event: WheelEvent) => {
+      if (!scrolled()) return;
+      const top = shell.scrollTop <= 0, end = shell.scrollTop + shell.clientHeight >= shell.scrollHeight - 1;
+      const outward = event.deltaY < 0 ? top : event.deltaY > 0 ? end : null;
+      if (!pull && !outward) return; // plain scrolling: the list itself moves until an end stops it
+      event.preventDefault(); // past an end, or unwinding a pull: the rows give instead
+      hold(); wind(event.deltaY); draw();
+      wheel = window.setTimeout(release, 150);
+    };
+    const onTouchStart = (event: TouchEvent) => { from = event.touches[0]?.clientY ?? Number.NaN; };
+    const onTouchMove = (event: TouchEvent) => {
+      const y = event.touches[0]?.clientY;
+      // A gesture already in flight when the listeners were re-attached has no start: this move only provides one.
+      if (y === undefined || !Number.isFinite(from)) { from = y ?? Number.NaN; return; }
+      if (!scrolled()) return;
+      const top = shell.scrollTop <= 0, end = shell.scrollTop + shell.clientHeight >= shell.scrollHeight - 1;
+      const step = y - from; from = y;
+      const outward = step > 0 ? top : step < 0 ? end : null;
+      if (!pull && !outward) return; // let the platform scroll the list to its end first
+      event.preventDefault();
+      hold(); wind(-step); draw();
+    };
+    const onTouchEnd = () => release();
+    shell.addEventListener('wheel', onWheel, { passive: false });
+    shell.addEventListener('touchstart', onTouchStart);
+    shell.addEventListener('touchmove', onTouchMove, { passive: false });
+    shell.addEventListener('touchend', onTouchEnd); shell.addEventListener('touchcancel', onTouchEnd);
+    return () => {
+      shell.removeEventListener('wheel', onWheel);
+      shell.removeEventListener('touchstart', onTouchStart);
+      shell.removeEventListener('touchmove', onTouchMove);
+      shell.removeEventListener('touchend', onTouchEnd); shell.removeEventListener('touchcancel', onTouchEnd);
+      window.clearTimeout(wheel); window.clearTimeout(back);
+      const node = rows();
+      if (node) { node.classList.remove('hp-menu-back'); node.style.transform = ''; }
+    };
+  }, deps);
+  return ref;
+}
+function Option({ icon, label, hint, selected, disabled, multiple, onClick }: { icon?: ReactNode; label: string; hint?: string; selected: boolean; disabled?: boolean; multiple?: boolean; onClick: () => void }) {
+  return <button type="button" role={multiple ? 'menuitemcheckbox' : 'menuitemradio'} aria-checked={selected} className="hp-option" disabled={disabled} onClick={onClick}>
     {icon && <span className="hp-option-icon">{icon}</span>}
     <span className="hp-option-copy"><span className="hp-option-name">{label}</span>{hint && <span className="hp-option-hint">{hint}</span>}</span>
     <span className="hp-check">{selected ? <Check /> : null}</span>
@@ -526,6 +645,143 @@ function DelegateProject({ workspaceId, load, disabled, onChange, t }: { workspa
     </div>}
   </div>;
 }
+/** Rows for directories linked to one session alone, named after their last folder. */
+const customProjects = (paths: string[]): Project[] => paths.map(path => ({ id: `path:${path}`, title: path.split(/[\\/]/u).filter(Boolean).pop() ?? path, path, current: false, linked: true, custom: true }));
+/**
+ * The rows a session can link: every registered project but its own, marked when linked, then the directories picked for
+ * this session alone. A host on the previous build (mid-reload) reports neither kind of link.
+ */
+const linkable = (linked: string[] | undefined, list: Workspaces, paths: string[] = []): Project[] => {
+  const projects = list.filter(workspace => !workspace.current).map(workspace => ({ ...workspace, linked: (linked ?? []).includes(workspace.id) }));
+  return [...projects, ...customProjects(paths.filter(path => !list.some(workspace => workspace.path === path)))];
+};
+/**
+ * Tapping `+` makes the Host focus the draft editor for its menu, which raises the on-screen keyboard. This follows
+ * whether the focused text field got its caret from the user — a tap inside it, or the keyboard — rather than from a
+ * tap on another control; `putAway` blurs a field a touch on another control focused, and leaves the user's own alone.
+ */
+function trackTyping() {
+  let typed = false, touched: EventTarget | null = null, touch = false;
+  const editable = (target: EventTarget | null): target is HTMLElement => target instanceof HTMLElement && (target.isContentEditable || target.matches('input,textarea'));
+  const onPointerDown = (event: PointerEvent) => { touched = event.target; touch = event.pointerType === 'touch'; };
+  const onFocusIn = (event: FocusEvent) => { typed = editable(event.target) && (!(touched instanceof Node) || event.target.contains(touched)); };
+  const onKeyDown = () => { touched = null; };
+  document.addEventListener('pointerdown', onPointerDown, true); document.addEventListener('focusin', onFocusIn, true); document.addEventListener('keydown', onKeyDown, true);
+  return {
+    stop: () => { document.removeEventListener('pointerdown', onPointerDown, true); document.removeEventListener('focusin', onFocusIn, true); document.removeEventListener('keydown', onKeyDown, true); },
+    putAway: () => { if (touch && !typed && editable(document.activeElement)) document.activeElement.blur(); },
+  };
+}
+/** Where a project lives, short enough for a phone: `~` for the home directory, and without a folder named like the project itself. */
+const shortPath = (path: string) => path.replace(/^\/(?:Users|home)\/[^/]+(?=\/|$)/u, '~');
+function projectPlace({ title, path }: { title: string; path: string }): string {
+  const short = shortPath(path);
+  return short.endsWith(`/${title}`) ? short.slice(0, -title.length - 1) || '/' : short;
+}
+/** Sessions whose linked-projects panel is open; the `+` menu row opens it. */
+const linkPanels = new Set<string>(), linkPanelListeners = new Set<() => void>();
+const subscribeLinkPanel = (listener: () => void) => { linkPanelListeners.add(listener); return () => { linkPanelListeners.delete(listener); }; };
+function setLinkPanel(sessionId: string, open: boolean) {
+  if (open) linkPanels.add(sessionId); else linkPanels.delete(sessionId);
+  for (const listener of linkPanelListeners) listener();
+}
+/**
+ * The other projects this session's Harness may also work in, above the composer card where the Host's own select popup
+ * opens. That popup always focuses its search field, which raises the on-screen keyboard; this panel has no text field
+ * and takes no focus. Each toggle is saved at once and applies from the next turn; the panel stays open for more.
+ *
+ * "Choose another folder" walks the Host's folders a level at a time and links one to this session alone. The Host's
+ * own directory browser is not used: on a loopback-bound desktop it is the OS chooser, on the computer's screen.
+ */
+export function LinkedProjectsPanel({ sessionId, projects, linkProjects, directories, t }: LinkPanelProps) {
+  const open = useSyncExternalStore(subscribeLinkPanel, () => linkPanels.has(sessionId), () => false);
+  const [list, setList] = useState<Project[] | { error: string }>();
+  // Browsing folders: the level asked for, then its listing or the reason it could not be read. Absent on the project list.
+  const [folder, setFolder] = useState<{ path?: string; listing?: Directories; error?: string }>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  // The rows sit in one body so their ends can give (`useRubberBand`); a folder swap or a re-read resets any pull.
+  const root = useRubberBand([open, folder === undefined, folder?.listing?.path, list]);
+  const reads = useRef(0);
+  const close = useCallback(() => setLinkPanel(sessionId, false), [sessionId]);
+  useDismiss(open, close, root);
+  // Read on every open: projects are added and removed outside this panel.
+  useEffect(() => {
+    if (!open) { setList(undefined); setFolder(undefined); setError(undefined); return; }
+    if (list) return;
+    let live = true;
+    // Linked projects lead a long list; a toggle leaves the order alone, so rows do not jump under the finger.
+    void projects(sessionId).then(next => { if (live) setList([...next].sort((a, b) => Number(b.linked) - Number(a.linked))); }, cause => { if (live) setList({ error: cause instanceof Error ? cause.message : String(cause) }); });
+    return () => { live = false; };
+  }, [open, list, projects, sessionId]);
+  // A refusal shows above the rows; in a scrolled list it is brought into view. Each folder level starts at its top.
+  const alert = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (error) alert.current?.scrollIntoView({ block: 'nearest' }); }, [error]);
+  useEffect(() => { root.current?.scrollTo(0, 0); }, [folder?.listing?.path, folder === undefined]);
+  if (!open) return null;
+  const rows = list && !('error' in list) ? list : [];
+  // The whole set is sent, built from the listed rows, so a link to a project the Host no longer has is dropped.
+  async function save(next: Project[], added: string[] = []): Promise<boolean> {
+    setBusy(true); setError(undefined);
+    try {
+      const picked = next.filter(row => row.linked);
+      const state = await linkProjects(sessionId, picked.filter(row => !row.custom).map(row => row.id), [...picked.filter(row => row.custom).map(row => row.path), ...added]);
+      const linked = state.linked ?? [], paths = state.linkedPaths ?? [];
+      // A picked folder that is a registered project comes back as that project; any other becomes a row of its own.
+      setList([...rows.map(row => ({ ...row, linked: row.custom ? paths.includes(row.path) : linked.includes(row.id) })),
+        ...customProjects(paths.filter(path => !rows.some(row => row.path === path)))]);
+      return true;
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false; }
+    finally { setBusy(false); }
+  }
+  const toggle = (id: string) => save(rows.map(row => row.id === id ? { ...row, linked: !row.linked } : row));
+  function browse(path?: string) {
+    const read = ++reads.current;
+    setError(undefined); setFolder({ ...(path ? { path } : {}) });
+    void directories(sessionId, path).then(listing => { if (reads.current === read) setFolder({ path: listing.path, listing }); },
+      cause => { if (reads.current === read) setFolder({ ...(path ? { path } : {}), error: cause instanceof Error ? cause.message : String(cause) }); });
+  }
+  const folderRow = (path: string, label: string, hint?: string) => <button key={path} type="button" role="menuitem" className="hp-option" disabled={busy} onClick={() => browse(path)}>
+    <span className="hp-option-icon"><FolderIcon /></span>
+    <span className="hp-option-copy"><span className="hp-option-name">{label}</span>{hint && <span className="hp-option-hint">{hint}</span>}</span>
+    <span className="hp-cell-chevron"><ChevronRight /></span>
+  </button>;
+  const listing = folder?.listing;
+  return <div ref={root} className="hp-menu hp-menu-left" role="menu" aria-label={t('pickLinked')} aria-busy={!list || busy || (!!folder && !listing && !folder.error)}>
+    <div className="hp-menu-body">
+      {folder ? <>
+        <button type="button" role="menuitem" className="hp-cell" onClick={() => { reads.current++; setFolder(undefined); setError(undefined); }}><span className="hp-cell-back"><Back /></span><span className="hp-cell-label">{t('linked')}</span></button>
+        <div className="hp-separator" />
+        {error && <div ref={alert} className="hp-error" role="alert"><span>{error}</span></div>}
+        {folder.error && <div className="hp-error" role="alert"><span>{folder.error}</span><button type="button" className="hp-retry" onClick={() => browse(folder.path)}>{t('retry')}</button></div>}
+        {!listing && !folder.error && <div className="hp-empty">{t('loading')}</div>}
+        {listing && <>
+          <button type="button" role="menuitem" className="hp-option" disabled={busy} onClick={() => void save(rows, [listing.path]).then(saved => { if (saved) setFolder(undefined); })}>
+            <span className="hp-option-icon"><LinkIcon /></span>
+            <span className="hp-option-copy"><span className="hp-option-name">{t('linkHere')}</span><span className="hp-option-hint">{shortPath(listing.path)}</span></span>
+          </button>
+          <div className="hp-separator" />
+          {listing.parent !== null && folderRow(listing.parent, t('linkUp'), shortPath(listing.parent))}
+          {listing.entries.map(entry => folderRow(entry.path, entry.name))}
+          {!listing.entries.length && <div className="hp-empty">{t('linkNoFolders')}</div>}
+          {listing.truncated && <div className="hp-empty">{t('linkTruncated')}</div>}
+        </>}
+      </> : <>
+        {!list && <div className="hp-empty">{t('loading')}</div>}
+        {list && 'error' in list && <div className="hp-error"><span>{list.error}</span><button type="button" className="hp-retry" onClick={() => setList(undefined)}>{t('retry')}</button></div>}
+        {list && !('error' in list) && !rows.length && <div className="hp-empty">{t('linkedNone')}</div>}
+        {error && <div ref={alert} className="hp-error" role="alert"><span>{error}</span></div>}
+        {rows.map(row => <Option key={row.id} multiple label={row.title} hint={projectPlace(row)} selected={row.linked} disabled={busy} onClick={() => void toggle(row.id)} />)}
+        {list && !('error' in list) && <>
+          <div className="hp-separator" />
+          <button type="button" role="menuitem" className="hp-cell" disabled={busy} onClick={() => browse()}>
+            <span className="hp-option-icon"><FolderIcon /></span><span className="hp-cell-label">{t('linkBrowse')}</span><span className="hp-cell-value" /><span className="hp-cell-chevron"><ChevronRight /></span>
+          </button>
+        </>}
+      </>}
+    </div>
+  </div>;
+}
 function DelegationDockActive({ sessionId, t }: DelegationDockProps) {
   const [options, setOptions] = useState(() => optionsFor(sessionId));
   const busy = taskModes.get(sessionId)?.busy === true;
@@ -588,6 +844,7 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
   const root = useRef<HTMLDivElement>(null);
   const close = useCallback(() => setOpen(false), []);
   useDismiss(open, close, root);
+  const popover = useOnScreen<HTMLDivElement>([open]);
   if (!quota) return null;
   let trigger: ReactNode, panel: ReactNode, level = '';
   if (quota.kind === 'balance') {
@@ -630,7 +887,7 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
     <button type="button" className={`hp-chip${level}`} aria-label={t('quotaAria')} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(v => !v)}>
       {trigger}<Chevron open={open} />
     </button>
-    {open && <div className="hp-panel hp-panel-left" role="dialog" aria-label={t('quotaAria')}>
+    {open && <div ref={popover} className="hp-panel hp-panel-left" role="dialog" aria-label={t('quotaAria')}>
       {panel}
       {/* External Harness quota is served stale-while-revalidate (a probe spawns a CLI process): it follows turns, not the poll. */}
       <div className="hp-foot">{t('quotaSource', { source: quota.kind === 'windows' && quota.plan ? `${quota.source} · ${quota.plan}` : quota.source,
@@ -682,6 +939,7 @@ function SessionRecovery({ sessionId, recover, running, onChange }: {
   const root = useRef<HTMLSpanElement>(null);
   const close = useCallback(() => setOpen(false), []);
   useDismiss(open, close, root);
+  const popover = useOnScreen<HTMLDivElement>([open]);
   async function act(operation: 'check' | 'unlock') {
     setBusy(true); setDetail('');
     try {
@@ -692,7 +950,7 @@ function SessionRecovery({ sessionId, recover, running, onChange }: {
   }
   return <span className="hp-anchor" ref={root}>
     <button type="button" className="hp-chip" aria-expanded={open} aria-label="恢复会话" onClick={() => setOpen(!open)}>恢复会话</button>
-    {open && <div className="hp-panel hp-panel-left" role="dialog" aria-label="恢复会话">
+    {open && <div ref={popover} className="hp-panel hp-panel-left" role="dialog" aria-label="恢复会话">
       <p>上次请求结果未确认。先核对原生记录；手动解除暂停会保留原生上下文，不重发原请求。</p>
       <button disabled={busy || running} onClick={() => void act('check')}>核对原生记录</button>
       <button disabled={busy || running} onClick={() => void act('unlock')}>解除暂停，不重发</button>
@@ -1219,6 +1477,13 @@ const styles = `
 .hp-cell-value{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;color:var(--dsw-alias-label-tertiary)}
 .hp-cell-chevron,.hp-cell-back{display:inline-flex;flex:0 0 auto;color:var(--dsw-alias-label-tertiary)}
 .hp-separator{height:.5px;margin:4px 0;background:var(--dsw-alias-border-l2)}
+/* A menu is a column with a height cap: a row that could shrink is squeezed under its own text once the list overflows. */
+.hp-menu>*{flex-shrink:0}
+/* The rows of a menu that gives at its ends sit in one body (useRubberBand): drawn aside past the top or bottom with
+   damping and sprung back on release, while the shell — background, radius, shadow — stays where it is. */
+.hp-menu-body{display:flex;flex-direction:column}
+.hp-menu-body>*{flex-shrink:0}
+.hp-menu-back{transition:transform 340ms cubic-bezier(.3,.9,.35,1.05)}
 .hp-option{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:100%;min-height:38px;padding:6px 8px;border:none;border-radius:10px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}
 .hp-option:hover:not(:disabled),.hp-option:focus-visible{outline:none;background:var(--dsw-alias-interactive-bg-hover)}
 .hp-option:disabled{color:var(--dsw-alias-label-dimmed);cursor:default}
@@ -1541,6 +1806,12 @@ export async function apply(ctx: Context): Promise<void> {
       selectThinking:(id,thinking)=>value(scope.remote.harness.selectThinking({sessionId:id,thinking})),
       selectPermission:(id,permission)=>value(scope.remote.harness.selectPermission({sessionId:id,permission})),
       selectConfig:(id,configId,value_)=>value(scope.remote.harness.selectConfig({sessionId:id,configId,value:value_})),
+      projects:async id=>{
+        const [state,list]=await Promise.all([value(scope.remote.harness.state({sessionId:id})),value(scope.remote.harness.workspaces({sessionId:id}))]);
+        return linkable(state.linked,list,state.linkedPaths);
+      },
+      linkProjects:(id,workspaceIds,paths)=>value(scope.remote.harness.linkProjects({sessionId:id,workspaceIds,paths})),
+      directories:(id,path)=>value(scope.remote.harness.directories({sessionId:id,...(path?{path}:{})})),
       usage:id=>value(scope.remote.harness.usage({sessionId:id})),
       quota:id=>value(scope.remote.harness.quota({sessionId:id})),
       viewing:id=>value(scope.remote.harness.viewing({sessionId:id})),
@@ -1614,6 +1885,9 @@ export async function apply(ctx: Context): Promise<void> {
     scope.slots.inject('conversation.input.left',()=>scope.slots.register({
       name:'conversation.input.left',id:'harness-selector',order:-100,locale:'harness',inject:()=>api,
     },HarnessSelect));
+    scope.slots.inject('conversation.input.overlay',()=>scope.slots.register({
+      name:'conversation.input.overlay',id:'harness-linked-projects',order:10,locale:'harness',inject:()=>api,
+    },LinkedProjectsPanel));
   });
   // `/` in a Harness session keeps the DSH rows a Harness carries out: attaching files, and goal / plan / compact / clear, which the
   // server runs on the Harness. The rest act on DSH's agent (the server already hides its commands); a typed `/model`
@@ -1635,13 +1909,23 @@ export async function apply(ctx: Context): Promise<void> {
     const external = async (sessionId: string) => (await harnessOf(scope.remote.harness, sessionId).catch(() => 'dsh')) !== 'dsh';
     const candidates = runtime.candidates.bind(runtime), dispatch = runtime.dispatch.bind(runtime);
     const matchSpace = runtime.matchSpace.bind(runtime), matchEnter = runtime.matchEnter.bind(runtime);
-    const kept = new Set(['file', 'goal', 'plan', 'compact', 'clear']);
+    const kept = new Set(['file', 'link', 'goal', 'plan', 'compact', 'clear']);
+    // `+` menu → Add: opens the linked-projects panel, with a keyboard the `+` tap raised put away again.
+    const typing = trackTyping();
+    scope.effect(() => typing.stop, 'harness: who raised the keyboard');
+    scope.effect(() => scope.commandUi.register({
+      name: 'link', label: () => t('linked'), description: () => t('linkedHint'), icon: LinkIcon, available: () => true,
+      ui: { kind: 'action', run: session => { typing.putAway(); setLinkPanel(session.sessionId, true); } },
+    }), 'harness: linked projects command');
     const replacements: Source = {
       candidates: async (session, request, ...rest) => {
         if (taskModes.has(session.sessionId)) return [];
         const original = await candidates(session, request, ...rest);
-        const rows = await external(session.sessionId) ? original.filter(row => kept.has(row.name)).map(row => row.name === 'clear'
-          ? { ...row, label: t('clear'), description: t('clearDescription'), icon: ClearIcon, section: t('commands') } : row) : [...original];
+        // Linking needs a Harness session. The Host files a contributed row at the end of Commands; it belongs under Add, below the file row.
+        const unplaced = await external(session.sessionId) ? original.filter(row => kept.has(row.name)).map(row => row.name === 'clear'
+          ? { ...row, label: t('clear'), description: t('clearDescription'), icon: ClearIcon, section: t('commands') } : row) : original.filter(row => row.name !== 'link');
+        const link = unplaced.find(row => row.name === 'link'), others = unplaced.filter(row => row !== link), file = others.findIndex(row => row.name === 'file');
+        const rows = link && file >= 0 ? [...others.slice(0, file + 1), { ...link, section: others[file]!.section }, ...others.slice(file + 1)] : unplaced;
         const query = request.query.toLowerCase();
         const commands = [
           { name: 'delegate', label: t('delegate'), description: t('delegateDescription'), icon: PluginIcon, section: t('commands') },

@@ -31,6 +31,10 @@ const bindingSchema = z.object({
    * transcript in its session instructions, rebuilt from the session on every open, since no native session carries it.
    */
   carry: z.object({ throughSeq: z.number().int().nonnegative() }).strict().optional(),
+  /** Ids of other registered projects whose directories the Harness may use beside `cwd`; resolved on every open. */
+  linked: z.array(z.string().min(1)).optional(),
+  /** Absolute directories outside the registered projects, picked for this session alone. */
+  linkedPaths: z.array(z.string().min(1)).optional(),
 }).strict().refine(value => !value.nativeRef || value.nativeRef.harnessId === value.harness, 'Harness identity mismatch');
 export type Binding = z.infer<typeof bindingSchema>;
 export const DISCUSSION_PERMISSION = { codex: 'read-only', 'claude-code': 'plan' } as const;

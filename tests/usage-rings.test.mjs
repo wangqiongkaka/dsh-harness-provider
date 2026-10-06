@@ -118,7 +118,7 @@ window.requests=[];
 window.fail=false;
 const respond=async(mode,request)=>{window.requests.push({mode,...request});if(window.delay)await new Promise(resolve=>window.finish=resolve);if(window.fail)throw new Error('retry');return {ok:true,value:{sessionId:'child',accepted:true}};};
 const remote={delegateFromUser:request=>respond('delegate',request),startDiscussionFromUser:request=>respond('discuss',request)};
-const commandUi={async candidates(){return [];},dispatch(){},matchSpace(){},async matchEnter(){}};
+const commandUi={register(){return ()=>{};},async candidates(){return [];},dispatch(){},matchSpace(){},async matchEnter(){}};
 window.released=[];
 const conversation={async sendSession(session,text){window.requests.push({mode:'plain',prompt:text});return {kind:'success'};},async serializeDraftAttachments(ids){return {attachments:ids.map(receiptId=>({type:'file',receiptId}))};},releaseDraftAttachment(id){window.released.push(id);}};
 apply({remote:{harness:remote,async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},inject(keys,fn){if((keys.includes('conversation')&&keys.includes('remote.harness'))||keys.includes('commandUi'))fn({conversation,commandUi,remote:{harness:remote},effect(fn){fn();}});}});

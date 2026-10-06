@@ -77,6 +77,8 @@ export interface HostUsage {
 interface SessionHints {
   discussion?: true;
   cwd: string; environment?: Record<string, string | undefined>;
+  /** Absolute directories beside `cwd` the session may work in (ACP `additionalDirectories`). */
+  additionalDirectories?: string[];
   model?: HarnessModelRef; thinkingOptionId?: HarnessThinkingOptionId; permissionModeId?: HarnessPermissionModeId;
   configValues?: Record<string, HarnessConfigValue>;
   /** The last usage the Host persisted for this session; each adapter decides what of it still holds after reopening. */
