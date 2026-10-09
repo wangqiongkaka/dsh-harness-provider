@@ -39,7 +39,7 @@ import { DshRunner, linkedDirectories, linkedWorkspaces, unwrap } from './dsh-ru
 import { QueuedTurns } from './queued-turns.js';
 import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, linkRequest, directoriesRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest, SETTINGS_ENTRY, updateSettingsRequest } from './remote.js';
-import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest } from './delegation.js';
+import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest, renameRequest } from './delegation.js';
 import { createWorktree, mergeWorktree, removeWorktree, worktreeChanged } from './worktree.js';
 import { Config, defaultSettings, settingsOf, type SettingsSource } from './settings.js';
 
@@ -148,6 +148,12 @@ export function nativeSubagent(child: { id: string; parentId: string | null; lab
 }
 
 export class HarnessService extends TypertRemoteService {
+  async renameCurrentSession(source: string, input: unknown) {
+    const { title } = renameRequest.parse(input);
+    if (!await this.bindings.read(source)) throw new Error('当前会话没有 Harness 绑定，无法修改标题');
+    return this.ctx.sessionController.rename({ sessionId: SessionId(source), title });
+  }
+
   readonly bindings: Bindings;
   readonly runner: DshRunner;
   readonly delegation: DelegationBridge;
@@ -175,7 +181,7 @@ export class HarnessService extends TypertRemoteService {
     this.worktrees = resolve(root, 'worktrees');
     this.bindings = new Bindings(root);
     this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : method === 'discuss' ? this.discuss(source, input)
-      : method === 'models' ? this.delegationModels(source) : this.readDelegation(source, input), () => settings().discussionTimeoutMinutes * 60_000);
+      : method === 'rename' ? this.renameCurrentSession(source, input) : method === 'models' ? this.delegationModels(source) : this.readDelegation(source, input), () => settings().discussionTimeoutMinutes * 60_000);
     this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation, undefined, () => settings().idleCloseSeconds * 1000, () => settings().branchContextChars, (harness, status) => {
       const previous = this.accountStatuses.get(harness);
       this.accountStatuses.set(harness, status);
