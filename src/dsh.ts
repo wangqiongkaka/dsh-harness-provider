@@ -36,6 +36,7 @@ import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT } from './acp-adapter.js';
 import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, linkedDirectories, linkedWorkspaces, unwrap } from './dsh-runner.js';
+import { QueuedTurns } from './queued-turns.js';
 import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, linkRequest, directoriesRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest, SETTINGS_ENTRY, updateSettingsRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest } from './delegation.js';
@@ -183,6 +184,7 @@ export class HarnessService extends TypertRemoteService {
       for (const key of this.catalogs.keys()) if (key.startsWith(`${harness}\0`)) this.catalogs.delete(key);
       this.harnessQuotas.get(harness)?.reset();
     }, (harness, account) => this.harnessQuota(harness)?.supply(accountQuota(account, harness)));
+    const queuedTurns = new QueuedTurns(ctx, this.bindings, () => this.stopped);
     ctx.effect(() => ctx.typert.register({ package: contribution.package, face: 'host', schemas: [], invocations: contribution.descriptors, model: { services: [], events: [], objects: [] } }), 'harness: Remote contracts');
     ctx.effect(() => async () => {
       this.stopped = true;
@@ -200,6 +202,7 @@ export class HarnessService extends TypertRemoteService {
       const binding = await this.bindings.read(payload.agent.id);
       if (!binding) return next();
       await this.runner.run(payload, binding);
+      queuedTurns.completed(payload.agent, payload.turn, payload.signal, binding);
       return { kind: 'enter', messages: [] };
     }, { prepend: true }); // Own the step before native middleware can append context to the empty completion.
     ctx.on('agent/inbox/inserted', ({ agent }) => { this.runner.drainSteering(agent); });
