@@ -213,7 +213,7 @@ test('usageDelta splits cumulative Harness counts into per-turn buckets',()=>{
 
 test('Harness questions and edits land on DSH native ask_user_question and edit rows',async()=>{
  const appended=[];
- const agent={session:{append(type,data){appended.push({type,data});return {seq:appended.length};}}};
+ const agent={session:{requestHeader:()=>appended.findLast(e=>e.type==='request/header')?.data.header,append(type,data){appended.push({type,data});return {seq:appended.length};}}};
  const output=new DshOutput({},agent,{turn:1,step:1},()=>1,()=>({provider:'fixture',model:'fixture'}));
  const questions=[{id:'q',question:'Pick?',options:[{label:'A'}]}];
  const answer={answers:[{id:'q',selected:['A']}]};
@@ -244,6 +244,7 @@ test('Harness interactions send lossless JSON through DSH user questions',async(
  await runner.answer(agent,{type:'approval',interactionId:'a',turnId:'t',title:'Allow?',subject:{type:'nativeAction'},actions:[{id:'yes',label:'Allow',effect:'allowOnce'}]},signal,session,output);
  await runner.answer(agent,{type:'question',interactionId:'q',turnId:'t',questions:[{id:'choice',type:'choice',prompt:'Choose?',options:[{value:'one',label:'One'}],multiple:false,allowOther:false,optional:false}]},signal,session,output);
  assert.equal(asked.length,2);
+ assert.equal(asked[0].wait,undefined,'approvals remain transient');
  assert.deepEqual(responded.map(command=>command.response),[{type:'approval',actionId:'yes'},{type:'question',answers:{choice:['one']}}]);
 });
 

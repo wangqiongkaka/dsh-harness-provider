@@ -3,7 +3,7 @@ import { basename } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent';
 import { SessionId } from '@deepseek-ai/dsh-session';
-import { createUserMessage, type UserMessage, type TokenUsage } from '@deepseek-ai/dsh-llm';
+import { createUserMessage, type UserMessage, type TokenUsage, type ToolCallId } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-workspace';
 import type { HarnessAccountSnapshot, HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostItemOf, HostUsage } from './contracts.js';
@@ -367,7 +367,7 @@ export class DshRunner {
       ...(question.type === 'choice' ? { options: question.options.map(option => ({ label: option.label,
         ...(option.description === undefined ? {} : { description: option.description }) })), multiSelect: question.multiple } : {}),
     }));
-    const ask = () => this.ctx.userQuestions.ask({ agent, questions, signal });
+    const ask = (callId?: ToolCallId) => this.ctx.userQuestions.ask({ agent, questions, signal, ...(callId ? { wait: { callId } } : {}) });
     // Approvals stay transient like DSH's own; a question leaves the same answered row DSH's ask_user_question tool does.
     const answer = interaction.type === 'approval' ? await ask() : await output.question(interaction.interactionId, questions, ask);
     signal.throwIfAborted();

@@ -4,8 +4,9 @@ import { randomUUID } from 'node:crypto';
 import { agentEvents, type Agent, type AssistantStreamFrame } from '@deepseek-ai/dsh-agent';
 import {
   AssistantStreamAccumulator, createAssistantMessage, createToolResultMessage, createUserMessage, LlmAttemptId, ToolCallId,
-  type ContentBlock, type StreamChunk, type TokenUsage,
+  type ContentBlock, type StreamChunk, type TokenUsage, type ToolSchema,
 } from '@deepseek-ai/dsh-llm';
+import type { AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-attachment';
 import type { Context } from '@deepseek-ai/cordis';
 import type { SessionEventMap } from '@deepseek-ai/dsh-session';
@@ -23,6 +24,9 @@ declare module '@deepseek-ai/dsh-llm' {
  * so the rows before the last one report zero.
  */
 const ZERO: TokenUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+/** The projected Harness question uses the Host's continuable schema with its wait explicitly disabled. */
+const QUESTION_TOOL: ToolSchema = { name: 'ask_user_question', description: 'Ask the user and wait for their answer.',
+  parameters: { type: 'object', properties: { questions: { type: 'array', items: { type: 'object' } }, timeout: { type: 'integer', const: -1 } }, required: ['questions'] } };
 
 /** Projects external activities into DSH's existing message/tool/stream contracts. */
 export class DshOutput {
@@ -129,9 +133,17 @@ export class DshOutput {
   }
 
   /** A Harness question as DSH's native `ask_user_question` row: waiting while the user answers, then the answers or the verdict. */
-  async question<T extends { answers: readonly unknown[] }>(id: string, questions: readonly unknown[], ask: () => Promise<T>): Promise<T> {
+  async question<T extends { answers: readonly unknown[] }>(id: string, questions: readonly AskUserQuestionItem[], ask: (callId: ReturnType<typeof ToolCallId>) => Promise<T>): Promise<T> {
     this.flush();
-    const call = { type: 'tool-call' as const, id: ToolCallId(`question:${id}`), name: 'ask_user_question', arguments: JSON.stringify({ questions }) };
+    const header = this.agent.session.requestHeader();
+    // A named Client card is removed by projection refresh unless the log lists its unanswered call.
+    // Keep the existing route and other tools; the Host tracks only question schemas declaring timeout.
+    if (!header?.tools?.some(tool => { const properties = tool.parameters.properties;
+      return tool.name === QUESTION_TOOL.name && typeof properties === 'object' && properties !== null && 'timeout' in properties;
+    })) this.agent.session.append('request/header', { header: { ...(header ?? { config: this.source() }),
+      tools: [...(header?.tools ?? []).filter(tool => tool.name !== QUESTION_TOOL.name), QUESTION_TOOL] }, reason: header ? 'change' : 'initial' });
+    const call = { type: 'tool-call' as const, id: ToolCallId(`question:${id}`), name: QUESTION_TOOL.name,
+      arguments: JSON.stringify({ questions: questions.map(({ multiSelect, ...question }) => ({ ...question, ...(multiSelect === undefined ? {} : { multi_select: multiSelect }) })), timeout: -1 }) };
     this.call(call);
     const position = this.position;
     const result = async (text: string, error?: { name: string; code: string }) => {
@@ -142,7 +154,7 @@ export class DshOutput {
     };
     let answer: T;
     try {
-      answer = await ask();
+      answer = await ask(call.id);
     } catch (error) {
       const failure = error as { name?: unknown; code?: unknown; message?: unknown };
       // DSH names the user's dismissal ASK_CANCELLED and an interrupt ASK_ABORTED; anything else keeps its own identity.

@@ -382,8 +382,9 @@ test('session CLI creates a visible independent harness session, reads its resul
   assert.equal(created.length,beforeMultiSkill+2);
   // A hand-off aimed at another project keeps that project through the skill turn.
   target=project;
+  const turnsBeforeProjectHandoff=turns.length;
   await h.delegateFromUser({...handoffRequest,requestId:'handoff-project',workspaceId:'project',prompt:'/handoff 跨项目'});
-  for(let i=0;i<200&&created.length<beforeMultiSkill+3;i++)await new Promise(resolve=>setTimeout(resolve,10));
+  for(let i=0;i<200&&turns.length<turnsBeforeProjectHandoff+2;i++)await new Promise(resolve=>setTimeout(resolve,10));
   assert.equal(created.length,beforeMultiSkill+3);
   await ctx.agents.get(created.at(-1).sessionId).whenIdle();
   assert.equal((await h.bindings.read(created.at(-1).sessionId)).cwd,project.path);
