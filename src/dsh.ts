@@ -36,9 +36,10 @@ import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT } from './acp-adapter.js';
 import { claudeProfile, codexProfile } from './acp-profiles.js';
 import { DshRunner, linkedDirectories, linkedWorkspaces, unwrap } from './dsh-runner.js';
+import { QueuedTurns } from './queued-turns.js';
 import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, linkRequest, directoriesRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest, SETTINGS_ENTRY, updateSettingsRequest } from './remote.js';
-import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest } from './delegation.js';
+import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest, renameRequest } from './delegation.js';
 import { createWorktree, mergeWorktree, removeWorktree, worktreeChanged } from './worktree.js';
 import { Config, defaultSettings, settingsOf, type SettingsSource } from './settings.js';
 
@@ -147,6 +148,12 @@ export function nativeSubagent(child: { id: string; parentId: string | null; lab
 }
 
 export class HarnessService extends TypertRemoteService {
+  async renameCurrentSession(source: string, input: unknown) {
+    const { title } = renameRequest.parse(input);
+    if (!await this.bindings.read(source)) throw new Error('当前会话没有 Harness 绑定，无法修改标题');
+    return this.ctx.sessionController.rename({ sessionId: SessionId(source), title });
+  }
+
   readonly bindings: Bindings;
   readonly runner: DshRunner;
   readonly delegation: DelegationBridge;
@@ -174,7 +181,7 @@ export class HarnessService extends TypertRemoteService {
     this.worktrees = resolve(root, 'worktrees');
     this.bindings = new Bindings(root);
     this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : method === 'discuss' ? this.discuss(source, input)
-      : method === 'models' ? this.delegationModels(source) : this.readDelegation(source, input), () => settings().discussionTimeoutMinutes * 60_000);
+      : method === 'rename' ? this.renameCurrentSession(source, input) : method === 'models' ? this.delegationModels(source) : this.readDelegation(source, input), () => settings().discussionTimeoutMinutes * 60_000);
     this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation, undefined, () => settings().idleCloseSeconds * 1000, () => settings().branchContextChars, (harness, status) => {
       const previous = this.accountStatuses.get(harness);
       this.accountStatuses.set(harness, status);
@@ -183,6 +190,7 @@ export class HarnessService extends TypertRemoteService {
       for (const key of this.catalogs.keys()) if (key.startsWith(`${harness}\0`)) this.catalogs.delete(key);
       this.harnessQuotas.get(harness)?.reset();
     }, (harness, account) => this.harnessQuota(harness)?.supply(accountQuota(account, harness)));
+    const queuedTurns = new QueuedTurns(ctx, this.bindings, () => this.stopped);
     ctx.effect(() => ctx.typert.register({ package: contribution.package, face: 'host', schemas: [], invocations: contribution.descriptors, model: { services: [], events: [], objects: [] } }), 'harness: Remote contracts');
     ctx.effect(() => async () => {
       this.stopped = true;
@@ -200,6 +208,7 @@ export class HarnessService extends TypertRemoteService {
       const binding = await this.bindings.read(payload.agent.id);
       if (!binding) return next();
       await this.runner.run(payload, binding);
+      queuedTurns.completed(payload.agent, payload.turn, payload.signal, binding);
       return { kind: 'enter', messages: [] };
     }, { prepend: true }); // Own the step before native middleware can append context to the empty completion.
     ctx.on('agent/inbox/inserted', ({ agent }) => { this.runner.drainSteering(agent); });

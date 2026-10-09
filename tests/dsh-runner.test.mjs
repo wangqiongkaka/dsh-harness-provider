@@ -20,6 +20,7 @@ import { deriveTurnTokenUsage } from '@deepseek-ai/dsh-token-meter/client';
 import { isRemoteJsonValue } from '@deepseek-ai/dsh-typert-protocol';
 // The host's per-turn footer ("用量") needs every attempt of the turn to report usage.
 const turnUsage=(events,turn)=>deriveTurnTokenUsage(events.filter(e=>e.data?.turn===turn));
+import { DelegationBridge } from '../dist/delegation.js';
 import { DshOutput } from '../dist/dsh-output.js';
 
 function fakeAdapter(log,native) {
@@ -554,4 +555,30 @@ test('a notice the Harness sends once its turn is over waits for the step instea
   assert.ok(notice>events.findLastIndex(e=>e.type==='step/end'),'通知在该步结束后落盘');
   validateStoredEvents(agent.session.header,structuredClone(events));
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});
+
+test('current-title instructions stay trusted on every Harness create/resume and absent in readonly discussions', {timeout:15000}, async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-rename-instructions-')),ctx=new Context(),bindings=new Bindings(join(root,'bindings'));
+ const bridge=new DelegationBridge(async()=>({})),logs=[],native={turns:0};
+ try {
+  for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents])await ctx.plugin(plugin);
+  await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+  const adapters=Object.fromEntries(['codex','claude-code'].map(harness=>{const adapter=fakeAdapter(logs,native),open=adapter.open;adapter.open=async input=>{const result=await open(input);result.value.initialState.nativeRef.harnessId=harness;result.value.initialState.effectivePermissionModeId=input.permissionModeId;return result;};return [harness,adapter];}));
+  const runner=new DshRunner(ctx,bindings,adapters,bridge);
+  ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(payload.agent.id));return {kind:'enter',messages:[]};});
+  await ctx.plugin(Loop,{agents:[]});
+  for(const harness of Object.keys(adapters))for(const discussion of [false,true]){
+   const id=harness+'-'+discussion,{agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+   await bindings.write({version:1,sessionId:id,harness,cwd:root,locked:true,...(discussion?{delegation:{parentSessionId:'parent',requestHash:'hash',discussion:true}}:{})});
+   for(const kind of ['create','resume']){
+    const before=logs.length;
+    agent.followup(createUserMessage({content:[{type:'text',text:'User text'}],source:{kind:'user'}}));await agent.whenIdle();
+    const open=logs.slice(before).find(log=>log.kind===kind);assert.ok(open,kind);
+    if(discussion){assert.equal(open.environment,undefined);assert.doesNotMatch(open.instructions,/delegate-cli/);}
+    else {assert.match(open.instructions,/delegate-cli.* rename /);assert.ok(open.environment.DSH_DELEGATE_TOKEN);}
+    assert.deepEqual(native.inputs.at(-1),[{type:'text',text:'User text'}]);
+    await runner.live.get(id).session.close();runner.live.delete(id);
+   }
+  }
+ }finally{await ctx.fiber.dispose();await bridge.close();await rm(root,{recursive:true,force:true});}
 });
