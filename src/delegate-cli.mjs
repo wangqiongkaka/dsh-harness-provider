@@ -1,8 +1,8 @@
 // Bundled, session-scoped CLI. No shell execution and no persistent credentials.
 try {
   const [method, value, ...extra] = process.argv.slice(2);
-  if (!['create', 'read', 'discuss', 'models'].includes(method) || (method === 'models' ? value : !value) || extra.length) {
-    throw new Error('Usage: delegate-cli.mjs create <JSON> | read <sessionId> | discuss <JSON> | models');
+  if (!['create', 'read', 'discuss', 'models', 'rename'].includes(method) || (method === 'models' ? value : !value) || extra.length) {
+    throw new Error('Usage: delegate-cli.mjs create <JSON> | read <sessionId> | discuss <JSON> | models | rename <JSON>');
   }
   const endpoint = process.env.DSH_DELEGATE_ENDPOINT;
   const token = process.env.DSH_DELEGATE_TOKEN;

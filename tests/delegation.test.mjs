@@ -47,7 +47,7 @@ test('session CLI creates a visible independent harness session, reads its resul
    ctx.agents.get(request.sessionId).followup(createUserMessage({content:request.content,source:{kind:'user',rpcId:request.requestId}}));
    return {accepted:true};
   }
-  async rename(request) { if (renameUnavailable) throw new Error('rename unavailable'); renamed.push(request); }
+  async rename(request) { if (renameUnavailable) throw new Error('rename unavailable'); renamed.push(request); return {title:request.title,seq:37}; }
   async fork() {} async selectModel() {} updateQueue() {}
  }
  const adapter = harness => ({
@@ -92,6 +92,9 @@ test('session CLI creates a visible independent harness session, reads its resul
   await h.bindings.write({version:1,sessionId:'parent',harness:'claude-code',cwd:root,locked:true,permission:'default'});
   await h.bindings.writeDefaults({harness:'claude-code'});
   const environment=await h.delegation.environment('parent',true);
+  const renameResponse=await fetch(environment.DSH_DELEGATE_ENDPOINT+'/rename',{method:'POST',headers:{authorization:'Bearer '+environment.DSH_DELEGATE_TOKEN},body:JSON.stringify({title:'Current DSH title'})});
+  assert.equal(renameResponse.status,200);assert.deepEqual(await renameResponse.json(),{title:'Current DSH title',seq:37});
+  assert.deepEqual(renamed.pop(),{sessionId:'parent',title:'Current DSH title'});
   const cli = async (method,value,env=environment) => JSON.parse((await exec(process.execPath,[resolve('dist/delegate-cli.mjs'),method,typeof value==='string'?value:JSON.stringify(value)],{env:{...process.env,...env}})).stdout);
   const bridge = async (method,value,env) => {
    const response=await fetch(`${env.DSH_DELEGATE_ENDPOINT}/${method}`,{method:'POST',headers:{authorization:`Bearer ${env.DSH_DELEGATE_TOKEN}`,'content-type':'application/json'},body:JSON.stringify(value)});
@@ -385,7 +388,13 @@ test('session CLI creates a visible independent harness session, reads its resul
   await h.delegateFromUser({...handoffRequest,requestId:'handoff-project',workspaceId:'project',prompt:'/handoff 跨项目'});
   for(let i=0;i<200&&created.length<beforeMultiSkill+3;i++)await new Promise(resolve=>setTimeout(resolve,10));
   assert.equal(created.length,beforeMultiSkill+3);
-  await ctx.agents.get(created.at(-1).sessionId).whenIdle();
-  assert.equal((await h.bindings.read(created.at(-1).sessionId)).cwd,project.path);
+  const projectChildId=created.at(-1).sessionId;
+  // whenIdle can return before the hand-off admits its first prompt.
+  const promptAdmitted=()=>ctx.agents.get(projectChildId)?.session.snapshotEvents().some(event=>event.type==='user/message');
+  for(let i=0;i<200&&!promptAdmitted();i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok(promptAdmitted(),'the cross-project hand-off admitted its prompt');
+  const projectChild=ctx.agents.get(projectChildId);
+  await projectChild.whenIdle();
+  assert.equal((await h.bindings.read(projectChild.id)).cwd,project.path);
  } finally { await ctx.fiber.dispose();await rm(root,{recursive:true,force:true}); }
 });
