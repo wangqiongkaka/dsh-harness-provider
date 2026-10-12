@@ -81,7 +81,7 @@ const zh = {
   subagentsRunning: '{count} 个子代理正在运行', subagentStarting: '等待首个动作', subagentSince: '已运行 {time}', subagentTook: '耗时 {time}',
   'time.seconds': '{seconds} 秒', 'time.minutes': '{minutes} 分 {seconds} 秒', 'time.hours': '{hours} 小时 {minutes} 分', 'time.ago': '{time}前',
   plugins: '插件',
-  edit: '编辑', editCancel: '取消', editSend: '发送', editHint: '发送后从这条消息重新执行，之后的原生上下文会撤销；工作区文件不会还原。',
+  edit: '编辑', editCancel: '取消', editSend: '发送',
   clear: '清理', clearDescription: '清理上下文',
   delegate: '委派', delegateMode: '委派模式', delegateDescription: '创建独立会话执行任务', delegateTask: '当前处于委派模式：描述任务，将交给所选 Harness 在新的独立会话中执行；输入 / 可先用当前会话的 skill（如交接）', delegateCreated: '已创建委派会话', delegatePrepared: '正在当前会话执行 skill，完成后自动创建委派会话', commands: '指令',
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
@@ -140,7 +140,7 @@ const en: Record<keyof typeof zh,string> = {
   subagentsRunning:'{count} running', subagentStarting:'Waiting for its first step', subagentSince:'Running for {time}', subagentTook:'Took {time}',
   'time.seconds':'{seconds}s', 'time.minutes':'{minutes}m {seconds}s', 'time.hours':'{hours}h {minutes}m', 'time.ago':'{time} ago',
   plugins:'Plugins',
-  edit:'Edit', editCancel:'Cancel', editSend:'Send', editHint:'Sending reruns from this message and drops the native context after it; workspace files are not restored.',
+  edit:'Edit', editCancel:'Cancel', editSend:'Send',
   clear:'Clear', clearDescription:'Clear context',
   delegate:'Delegate', delegateMode:'Delegation mode', delegateDescription:'Create an independent session for this task', delegateTask:'Delegation mode: describe the task for the selected Harness to run in a new session; type / to run one of this session\'s skills (such as a hand-off) first', delegateCreated:'Delegation session created', delegatePrepared:'Running the skill in this session; the delegation starts when it finishes', commands:'Commands',
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
@@ -949,9 +949,9 @@ function SessionRecovery({ sessionId, recover, running, onChange }: {
     finally { setBusy(false); }
   }
   return <span className="hp-anchor" ref={root}>
-    <button type="button" className="hp-chip" aria-expanded={open} aria-label="恢复会话" onClick={() => setOpen(!open)}>恢复会话</button>
-    {open && <div ref={popover} className="hp-panel hp-panel-left" role="dialog" aria-label="恢复会话">
-      <p>上次请求结果未确认。先核对原生记录；手动解除暂停会保留原生上下文，不重发原请求。</p>
+    <button type="button" className="hp-chip" aria-expanded={open} aria-label="处理未确认请求" onClick={() => setOpen(!open)}>处理未确认请求</button>
+    {open && <div ref={popover} className="hp-panel hp-panel-left" role="dialog" aria-label="处理未确认请求">
+      <p>上次执行已停止，但结果未确认。先核对原生记录；如仍无法确认，可手动解除暂停，保留原生上下文，不重发上次请求。</p>
       <button disabled={busy || running} onClick={() => void act('check')}>核对原生记录</button>
       <button disabled={busy || running} onClick={() => void act('unlock')}>解除暂停，不重发</button>
       {detail && <p role="status" style={{whiteSpace:'pre-wrap',maxHeight:240,overflow:'auto'}}>{detail}</p>}
@@ -1052,7 +1052,7 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
     {/* A subscription login's label is its plan ("ChatGPT Plus"), which the composer row leaves out; the other statuses (not logged in, API key) stay. */}
     {authStatus && !authStatus.account?.plan && <span className="hp-chip-label" role="status" title={authStatus.detail ?? authStatus.account?.email}>{authStatus.label}</span>}
     <QuotaChip quota={quotaView} t={t} />
-    {current !== 'dsh' && state?.recoveryRequired && <SessionRecovery key={`recovery:${sessionId}`} sessionId={sessionId} recover={recover} running={!!summary?.running} onChange={setState} />}
+    {current !== 'dsh' && state?.recoveryRequired && !summary?.running && <SessionRecovery key={`recovery:${sessionId}`} sessionId={sessionId} recover={recover} running={!!summary?.running} onChange={setState} />}
     <SecretPanel key={sessionId} sessionId={sessionId} read={secretStatus} answer={answerSecret} />
     {error && <span role="alert" className="hp-alert">{error}</span>}
     {state?.recoveryRequired && !summary?.running && <span role="status" className="hp-alert">{t('recovery')}</span>}
@@ -1568,7 +1568,6 @@ ${nativeContextColors}
 .hp-edit textarea{box-sizing:border-box;width:100%;padding:10px 16px;border:1px solid var(--dsw-alias-border-l2);border-radius:16px;background:var(--dsw-specific-bubble);color:var(--dsw-alias-label-primary);font:inherit;font-size:var(--dsh-content-font-size,14px);line-height:calc(22px + var(--dsh-content-font-delta,0px));resize:vertical;outline:none}
 .hp-edit textarea:focus{border-color:var(--dsw-alias-border-l3)}
 .hp-edit-bar{display:flex;align-items:center;justify-content:flex-end;gap:8px}
-.hp-edit-hint{flex:1;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 .hp-edit-bar button{height:30px;padding:0 14px;border:1px solid var(--dsw-alias-border-l2);border-radius:15px;background:transparent;color:var(--dsw-alias-label-primary);font-size:13px;cursor:pointer}
 .hp-edit-bar button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .hp-edit-bar .hp-edit-send{border-color:transparent;background:var(--dsw-alias-label-primary);color:var(--dsw-specific-bubble)}
@@ -1667,7 +1666,6 @@ export function EditableUserMessage(props: ChatNodeViewProps<'user'> & InjectFac
       }} />
     {error && <p className="hp-edit-error" role="alert">{error}</p>}
     <div className="hp-edit-bar">
-      <span className="hp-edit-hint">{ht('editHint')}</span>
       <button type="button" disabled={busy} onClick={() => setDraft(undefined)}>{ht('editCancel')}</button>
       <button type="button" className="hp-edit-send" disabled={busy || (!draft.trim() && !attached)} onClick={() => void submit()}>{ht('editSend')}</button>
     </div>

@@ -120,7 +120,7 @@ try{
    await expect(selector).toHaveText(label);
    await expect(selector).toBeEnabled();
    await expect(page.getByRole('button',{name:'会话操作',exact:true})).toHaveCount(0);
-   await expect(page.getByRole('button',{name:'恢复会话',exact:true})).toHaveCount(0);
+   await expect(page.getByRole('button',{name:'处理未确认请求',exact:true})).toHaveCount(0);
    const catalog=await rpc('skills/list',{sessionId:'skills-probe'});
    assert.ok(catalog.skills.some(skill=>skill.name===expected),JSON.stringify(catalog));
    await editor.fill('/');
@@ -267,7 +267,7 @@ try{
  assert.ok(JSON.stringify(codex.requests[2].body.input).includes('Remember first marker'));
  console.log('PASS: DSH restart preserves the session list, transcript, and native Codex context');
  await expect(page.getByRole('button',{name:'会话操作',exact:true})).toHaveCount(0);
- await expect(page.getByRole('button',{name:'恢复会话',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'处理未确认请求',exact:true})).toHaveCount(0);
  await rpc('harness/rollback',{sessionId:codexSessionId});
  await send('After rollback marker','Codex after rollback');
  const afterRollback=JSON.stringify(codex.requests.at(-1).body.input);
@@ -301,14 +301,14 @@ try{
  await page.reload();await dismiss();
  await expect(userRow('Continue with second marker')).toBeHidden();
  await expect(userRow('Second marker edited')).toBeVisible();
- await page.getByRole('button',{name:'恢复会话',exact:true}).click();
+ await page.getByRole('button',{name:'处理未确认请求',exact:true}).click();
  await page.getByRole('button',{name:'核对原生记录',exact:true}).click();
  await page.getByText('无法确认原请求的执行结果；没有重发任何请求。',{exact:true}).waitFor();
  const recovered=page.waitForResponse(response=>response.url().includes('/api/harness/recover'));
  await page.getByRole('button',{name:'解除暂停，不重发',exact:true}).click();
  const recoveryResult=await (await recovered).json();
  assert.equal(recoveryResult.result?.value?.recoveryRequired,false,JSON.stringify(recoveryResult));
- await expect(page.getByRole('button',{name:'恢复会话',exact:true})).toHaveCount(0);
+ await expect(page.getByRole('button',{name:'处理未确认请求',exact:true})).toHaveCount(0);
  assert.equal((await rpc('harness/state',{sessionId:codexSessionId})).recoveryRequired,false);
  assert.equal(codex.requests.length,5);
  console.log('PASS: recovery UI keeps unknown results paused until explicit unlock, without model resubmission');
