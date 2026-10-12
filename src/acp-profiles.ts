@@ -272,6 +272,9 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
       } finally { await inspector.close().catch(() => {}); }
     },
     accountUpdate: meta => claudeRateLimitSnapshot(meta['_claude/rateLimit']),
+    // A result's usage_update names what the cycle answered (claude-agent-acp acp-agent.js 3957-3970); these origins are
+    // its AUTONOMOUS_RESULT_ORIGINS (257-263), the cycles that run with no prompt of the user's.
+    continuationEnd: update => ['task-notification', 'peer', 'coordinator', 'observer', 'observer-activity'].includes((update as { _meta?: { '_claude/origin'?: { kind?: string } } })._meta?.['_claude/origin']?.kind ?? ''),
     limits: limitsOf(settings),
   };
 }

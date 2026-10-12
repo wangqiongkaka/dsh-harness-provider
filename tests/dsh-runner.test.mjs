@@ -557,6 +557,62 @@ test('a notice the Harness sends once its turn is over waits for the step instea
  }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });
 
+test('后台任务结束后 Harness 自行续跑的输出进入跟进轮次：不发送提示、不登记原生轮次、期间的用户消息不插入',{timeout:10000},async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-continuation-')),ctx=new Context();
+ const bindings=new Bindings(join(root,'bindings')),id=SessionId('continuation');
+ try{
+  for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+  await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+  const commands=[],steered=[];let finish;
+  const adapter={async open(){
+   const channel=new HarnessOutputChannel(),emit=event=>channel.emit({kind:'event',event});
+   const message=(turnId,itemId,text)=>emit({type:'item.completed',turnId,snapshot:{item:{type:'agentMessage',itemId,text},outcome:{status:'succeeded'}}});
+   return {ok:true,value:{initialState:{nativeRef:{harnessId:'claude-code',nativeSessionId:'native-continuation',formatVersion:1}},initialUsage:null,outputs:channel.outputs,
+    async steer(input){steered.push(input);return {ok:true,value:{accepted:true}};},
+    async execute(command){
+     commands.push(command);const turnId=command.turnId;
+     if(command.continuation){
+      emit({type:'turn.started',turnId});message(turnId,'follow','六屏已全部完成');
+      finish=()=>emit({type:'turn.completed',turnId,outcome:{status:'succeeded'}});
+     }else{
+      emit({type:'turn.started',turnId,nativeTurnRef:{harnessId:'claude-code',nativeSessionId:'native-continuation',nativeTurnKey:'prompt.1',formatVersion:1}});
+      message(turnId,'reply','已在后台生成');
+      emit({type:'turn.completed',turnId,nativeTurnRef:{harnessId:'claude-code',nativeSessionId:'native-continuation',nativeTurnKey:'prompt.1',formatVersion:1},outcome:{status:'succeeded'}});
+      // The backgrounded task finishes after the turn and wakes the agent on its own.
+      setTimeout(()=>emit({type:'session.continued'}),30);
+     }
+     return {ok:true,value:{turnId}};
+    },async close(){channel.end();}}};
+  }};
+  const runner=new DshRunner(ctx,bindings,{'claude-code':adapter});
+  ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+  ctx.on('agent/inbox/inserted',({agent})=>{runner.drainSteering(agent);});
+  await ctx.plugin(Loop,{agents:[]});
+  await bindings.write({version:1,sessionId:id,harness:'claude-code',cwd:root,locked:true});
+  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  agent.followup(createUserMessage({content:[{type:'text',text:'go'}],source:{kind:'user'}}));
+  const deadline=Date.now()+5000;
+  while(!finish){assert.ok(Date.now()<deadline,'续跑没有开启跟进轮次');await new Promise(resolve=>setTimeout(resolve,5));}
+  assert.deepEqual(commands.map(command=>[command.type,command.input.length,command.continuation??false]),[['turn.start',1,false],['turn.start',0,true]],'跟进轮次不向 Harness 发送任何提示');
+  assert.equal(agent.status,'running','续跑期间会话显示为运行中');
+  agent.steer(createUserMessage({content:[{type:'text',text:'中途消息'}],source:{kind:'user'}}));
+  await new Promise(resolve=>setTimeout(resolve,30));
+  finish();await agent.whenIdle();
+  assert.deepEqual(steered,[],'续跑没有可插入的提示');
+  assert.equal(agent.inbox.nextStep.length,1,'期间的用户消息留在队列里等下一轮');
+  const events=agent.session.snapshotEvents();
+  assert.deepEqual(events.filter(e=>e.type==='turn/end').map(e=>[e.data.turn,e.data.reason.kind]),[[1,'completed'],[2,'completed']]);
+  const second=events.filter(e=>e.data?.turn===2);
+  assert.deepEqual(second.filter(e=>e.type==='assistant/message').flatMap(e=>e.data.message.content.filter(part=>part.type==='text').map(part=>part.text)),['六屏已全部完成']);
+  const notice=events.find(e=>e.type==='user/message'&&e.data.source.kind==='dsh-harness-provider');
+  assert.equal(notice.data.source.form,'notice');
+  const binding=await bindings.read(id);
+  assert.deepEqual(binding.turns,[{turn:1,key:'prompt.1'}],'跟进轮次不占用原生轮次标识');
+  assert.equal(binding.pending,undefined);
+  validateStoredEvents(agent.session.header,structuredClone(events));
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});
+
 test('current-title instructions stay trusted on every Harness create/resume and absent in readonly discussions', {timeout:15000}, async()=>{
  const root=await mkdtemp(join(tmpdir(),'dsh-rename-instructions-')),ctx=new Context(),bindings=new Bindings(join(root,'bindings'));
  const bridge=new DelegationBridge(async()=>({})),logs=[],native={turns:0};

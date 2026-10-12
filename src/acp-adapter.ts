@@ -63,6 +63,11 @@ export interface AcpProfile {
   listPlugins?(cwd: string): Promise<HarnessPlugin[]>;
   /** Live timeouts, output limit and stderr debugging; read on every use. Missing fields keep {@link DEFAULT_LIMITS}. */
   limits?(): Partial<AcpLimits>;
+  /**
+   * Whether this `usage_update` closes a cycle the agent ran on its own (Claude Code answering a finished background
+   * task). A profile that defines it gets such a cycle's output shown in a turn of its own instead of dropped.
+   */
+  continuationEnd?(update: acp.SessionUpdate): boolean;
 }
 export interface AcpLimits { requestTimeoutMs: number; loadTimeoutMs: number; toolOutputChars: number; stderr: boolean; cancelTimeoutMs: number }
 
@@ -114,6 +119,9 @@ export function modelValue(ref: HarnessModelRef): string {
   if (ref.id.startsWith(LEGACY_CLAUDE)) return Buffer.from(ref.id.slice(LEGACY_CLAUDE.length), 'base64url').toString('utf8');
   return ref.id;
 }
+/** The transcript input of a turn no prompt opened: a NUL keeps its hash apart from every prompt's, so no prompt turn's occurrence count moves. */
+const CONTINUATION_INPUT = '\0continuation';
+const DETACHED_LIMIT = 20_000;
 const turnHash = (input: string) => createHash('sha256').update(input).digest('hex').slice(0, 16);
 const promptText = (blocks: acp.ContentBlock[]) => blocks.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
 
@@ -616,6 +624,8 @@ const diffTool = (itemId: string, diff: acp.Diff): HostItemOf<'toolExecution'> =
 type Pending = { interaction: HostInteraction; settle(response: acp.RequestPermissionResponse | acp.CreateElicitationResponse): void; kind: 'permission' | 'form' | 'url'; form?: Form; elicitationId?: string };
 interface ActiveTurn {
   hostId: HostTurnId; transcript: TranscriptTurn; cancelled: boolean;
+  /** No prompt of the user's: the turn shows a cycle the agent ran on its own, and ends with it. */
+  continuation?: true;
   message?: HostItemOf<'agentMessage'>; messageId?: string;
   thought?: HostItemOf<'reasoning'>; thoughtId?: string;
   tools: Map<string, HostItemOf<'commandExecution'> | HostItemOf<'toolExecution'>>;
@@ -654,7 +664,10 @@ class AcpSession implements HarnessSession {
   #commands: HarnessSkill[] = [];
   #rawCommands: acp.AvailableCommand[] = [];
   #titlePending: boolean;
+  #titling = false;
   #active: ActiveTurn | null = null;
+  /** What the agent wrote between turns, kept for the turn that shows it; `ended` once that cycle's result arrived. */
+  #detached: { updates: acp.SessionUpdate[]; ended: boolean; adopted: PromiseWithResolvers<void> } | null = null;
   #fault: HarnessError | null = null;
   #closing: Promise<void> | null = null;
 
@@ -744,7 +757,7 @@ class AcpSession implements HarnessSession {
   }
   async listSkills(): Promise<HarnessSkill[]> { return this.#commands; }
   subagents(): HarnessSubagent[] { return this.#subagents.list(); }
-  hasBackgroundTasks(): boolean { return this.#backgroundTasks.size > 0; }
+  hasBackgroundTasks(): boolean { return this.#backgroundTasks.size > 0 || !!this.#detached; }
 
   async readSnapshot(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>> {
     if (this.#fault) return { ok: false, error: this.#fault };
@@ -896,6 +909,7 @@ class AcpSession implements HarnessSession {
 
   async #start(command: TurnStartCommand): Promise<HarnessResult<{ turnId: HostTurnId }>> {
     if (this.#active) return failed('sessionBusy', 'Turn is active', true);
+    if (command.continuation) return this.#continue(command.turnId);
     if (!command.input.some(part => part.type === 'image' ? part.base64Data.length > 0 : part.text.trim())) return failed('invalidRequest', 'A non-empty prompt is required');
     const blocks = blocksOf(command.input);
     const lead = blocks[0];
@@ -911,12 +925,15 @@ class AcpSession implements HarnessSession {
       const lead = blocks.find(block => block.type === 'text');
       const title = text(lead?.type === 'text' ? lead.text.split('\n').find(line => line.trim()) : undefined, 60);
       // A local command that hangs must not hold the turn; the timeout cancels the request on the agent.
-      if (title) await request(this.#process, 'session/prompt', { sessionId: this.#sessionId, prompt: [{ type: 'text', text: this.#profile.titleCommand!(title) }] }, TITLE_TIMEOUT_MS).catch(() => {});
+      // The command's own output ("Session renamed to: …") arrives before any turn exists; it is no follow-up of the agent's.
+      if (title) { this.#titling = true; await request(this.#process, 'session/prompt', { sessionId: this.#sessionId, prompt: [{ type: 'text', text: this.#profile.titleCommand!(title) }] }, TITLE_TIMEOUT_MS).catch(() => {}); this.#titling = false; }
     }
     const transcript = this.#transcript.begin(promptText(blocks));
     const active: ActiveTurn = { hostId: command.turnId, transcript, cancelled: false, tools: new Map(), announced: new Map(), compaction: new Map(), interactions: new Map(), done: Promise.withResolvers() };
     this.#active = active;
     this.#emit({ type: 'turn.started', turnId: command.turnId, nativeTurnRef: this.#turnRef(this.#transcript.key(transcript)) });
+    // A prompt sent before the Host opened a turn for the agent's own follow-up shows that follow-up first.
+    this.#adoptDetached();
     this.#process.agent.request<acp.PromptResponse>('session/prompt', { sessionId: this.#sessionId, prompt: blocks })
       .then(response => this.#finishPrompt(active, response), cause => {
         const failure = toError(cause, 'Turn failed');
@@ -924,6 +941,25 @@ class AcpSession implements HarnessSession {
         this.#finish(active, active.cancelled ? { status: 'cancelled', reason: 'Cancelled by user' } : { status: 'failed', error: failure });
       });
     return { ok: true, value: { turnId: command.turnId } };
+  }
+  /**
+   * The turn of a cycle the agent ran on its own. It carries no native turn key: history replays the cycle under the
+   * text of the notification that woke the agent, which is never forwarded live (claude-agent-acp acp-agent.js 4633).
+   */
+  #continue(turnId: HostTurnId): HarnessResult<{ turnId: HostTurnId }> {
+    const ended = this.#detached?.ended ?? true;
+    const active: ActiveTurn = { hostId: turnId, transcript: this.#transcript.begin(CONTINUATION_INPUT), cancelled: false, continuation: true, tools: new Map(), announced: new Map(), compaction: new Map(), interactions: new Map(), done: Promise.withResolvers() };
+    this.#active = active;
+    this.#emit({ type: 'turn.started', turnId });
+    this.#adoptDetached();
+    if (ended) this.#finish(active, { status: 'succeeded' });
+    return { ok: true, value: { turnId } };
+  }
+  #adoptDetached(): void {
+    const detached = this.#detached;
+    this.#detached = null;
+    for (const update of detached?.updates ?? []) this.#update(update);
+    detached?.adopted.resolve();
   }
   #turnRef(key: string) { return { harnessId: this.harnessId, nativeSessionId: this.#sessionId, nativeTurnKey: key, formatVersion: 1 as const }; }
 
@@ -952,7 +988,7 @@ class AcpSession implements HarnessSession {
     if (outcome.status !== 'succeeded') this.#subagents.settle(outcome.status === 'cancelled' ? 'cancelled' : 'failed');
     for (const [id, item] of active.tools) { active.tools.delete(id); this.#emit({ type: 'item.completed', turnId: active.hostId, snapshot: { item, outcome: outcome.status === 'succeeded' ? { status: 'succeeded' } : outcome } }); }
     for (const [id, item] of active.compaction) { active.compaction.delete(id); this.#emit({ type: 'item.completed', turnId: active.hostId, snapshot: { item, outcome } }); }
-    this.#emit({ type: 'turn.completed', turnId: active.hostId, nativeTurnRef: this.#turnRef(this.#transcript.key(active.transcript)), outcome });
+    this.#emit({ type: 'turn.completed', turnId: active.hostId, ...(active.continuation ? {} : { nativeTurnRef: this.#turnRef(this.#transcript.key(active.transcript)) }), outcome });
     this.#active = null;
     active.done.resolve();
   }
@@ -988,7 +1024,8 @@ class AcpSession implements HarnessSession {
     if (sessionId !== this.#sessionId) { this.#subagents.append(sessionId, update, showThoughts); return true; }
     const claude = record(record((update as { _meta?: unknown })._meta).claudeCode);
     const parent = text(claude.parentToolUseId, 200);
-    if ((update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') && (claude.subagent === true || claude.toolName === 'Agent' || claude.toolName === 'Task')) {
+    // A replayed result of a background-launched Agent call comes bare (claude-agent-acp 0.84): its call id is what names it.
+    if ((update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') && (claude.subagent === true || claude.toolName === 'Agent' || claude.toolName === 'Task' || this.#subagents.has(update.toolCallId))) {
       const input = record(update.rawInput);
       this.#subagents.upsert(update.toolCallId, { name: text(input.description, 200) ?? text(update.title, 200), task: text(input.prompt, 4000), ...(parent ? { parentId: parent } : {}) });
       if (update.status === 'completed' || update.status === 'failed') this.#subagents.finish(update.toolCallId, update.status);
@@ -1007,6 +1044,11 @@ class AcpSession implements HarnessSession {
       if (update.size > 0) this.#publishUsage({ contextUsedTokens: update.used, contextWindowTokens: update.size }, this.#active?.hostId);
       const account = this.#profile.accountUpdate?.(record(update._meta));
       if (account) this.#emit({ type: 'session.account.changed', account });
+      if (this.#profile.continuationEnd?.(update)) {
+        const active = this.#active;
+        if (active?.continuation) this.#finish(active, active.cancelled ? { status: 'cancelled', reason: 'Cancelled by user' } : { status: 'succeeded' });
+        else if (this.#detached) this.#detached.ended = true;
+      }
       return;
     }
     const active = this.#active;
@@ -1019,7 +1061,19 @@ class AcpSession implements HarnessSession {
       } else this.#emit({ type: 'session.notice', notice });
       return;
     }
-    if (!active) return;
+    if (!active) {
+      // The agent writes between turns when a finished background task wakes it; the Host opens a turn that takes this over.
+      if (!this.#profile.continuationEnd || this.#titling) return;
+      if (!this.#detached) {
+        if (!['agent_message_chunk', 'agent_thought_chunk', 'tool_call'].includes(update.sessionUpdate)) return;
+        this.#detached = { updates: [], ended: false, adopted: Promise.withResolvers() };
+        this.#emit({ type: 'session.continued' });
+      }
+      // ponytail: a follow-up no turn takes over stops being kept at the cap; spill to disk if cycles ever run that long unseen.
+      if (this.#detached.updates.length < DETACHED_LIMIT) this.#detached.updates.push(update);
+      this.#detached.ended = false;
+      return;
+    }
     active.transcript.hasOutput ||= ['agent_message_chunk', 'tool_call'].includes(update.sessionUpdate);
     const { hostId: turnId } = active;
     switch (update.sessionUpdate) {
@@ -1168,6 +1222,8 @@ class AcpSession implements HarnessSession {
 
   #permission(params: acp.RequestPermissionRequest, signal: AbortSignal): Promise<acp.RequestPermissionResponse> {
     const active = this.#active;
+    // An approval the agent needs for its own follow-up waits for the turn that shows it instead of being refused unseen.
+    if (!active && this.#detached) return this.#detached.adopted.promise.then(() => this.#permission(params, signal));
     if (!active || !this.#owns(params.sessionId) || !params.options.length) return Promise.resolve({ outcome: { outcome: 'cancelled' } });
     const meta = record(params._meta);
     const presentation = record(record(record(meta.jetbrains).air).permission ?? meta.permission);
@@ -1184,6 +1240,7 @@ class AcpSession implements HarnessSession {
   }
   #elicitation(params: acp.CreateElicitationRequest, signal: AbortSignal): Promise<acp.CreateElicitationResponse> {
     const active = this.#active;
+    if (!active && this.#detached) return this.#detached.adopted.promise.then(() => this.#elicitation(params, signal));
     if (!active || ('sessionId' in params && !this.#owns(String(params.sessionId)))) return Promise.resolve({ action: 'cancel' });
     const title = text(params.message, 200) ?? 'Input required';
     if (params.mode === 'url') {

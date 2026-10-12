@@ -31,7 +31,7 @@ export function linkedDirectories(ctx: Context, binding: Pick<Binding, 'cwd' | '
   // A directory deleted since it was picked is left out: the agent would be handed a workspace root that does not exist.
   return [...projects, ...(binding.linkedPaths ?? []).filter(path => !taken.has(path) && existsSync(path)).map(path => ({ title: basename(path), path }))];
 }
-type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; modelLabel?: string; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; held?: HostItemOf<'notice'>[]; turnId?: import('./contracts.js').HostTurnId; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
+type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; modelLabel?: string; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; held?: HostItemOf<'notice'>[]; turnId?: import('./contracts.js').HostTurnId; continuation?: boolean; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
 /**
  * How long an external Harness session may sit idle — no turn, and off screen — before its process is closed; the next
  * turn resumes it from its binding. Clients report a shown session every 15 seconds, well inside this window.
@@ -40,12 +40,12 @@ const IDLE_CLOSE_MS = 60_000;
 /** How often the idle reclaimer looks for sessions to close; short idle windows (tests) sweep proportionally faster. */
 const idleSweepMs = (idleCloseMs: number) => Math.min(60_000, Math.max(5, Math.floor(idleCloseMs / 4)));
 /** Drains the native session continuously: usage readings land as they arrive (also between turns), everything else queues for the turn loop. */
-function pump(live: Live, sessionEvent: (event: Extract<import('./contracts.js').HostEvent, { type: 'session.auth.changed' | 'session.account.changed' | 'session.notice' }>) => void): void {
+function pump(live: Live, sessionEvent: (event: Extract<import('./contracts.js').HostEvent, { type: 'session.auth.changed' | 'session.account.changed' | 'session.notice' | 'session.continued' }>) => void): void {
   void (async () => {
     try {
       for await (const value of live.session.outputs) {
         if (value.kind === 'event' && value.event.type === 'session.usage.changed') { live.usage = value.event.usage; continue; }
-        if (value.kind === 'event' && (value.event.type === 'session.auth.changed' || value.event.type === 'session.account.changed' || value.event.type === 'session.notice')) { sessionEvent(value.event); continue; }
+        if (value.kind === 'event' && (value.event.type === 'session.auth.changed' || value.event.type === 'session.account.changed' || value.event.type === 'session.notice' || value.event.type === 'session.continued')) { sessionEvent(value.event); continue; }
         live.queue.push(value);
         live.wake();
       }
@@ -72,6 +72,9 @@ function note(agent: Agent, notice: HostItemOf<'notice'>): void {
   agent.session.append('user/message', createUserMessage({ source: { kind: 'dsh-harness-provider', form: 'notice', summary: notice.title },
     content: [{ type: 'text', text: `${notice.title}${notice.text ? `\n${notice.text}` : ''}` }] }), { surfaceOp: 'append' });
 }
+/** Marks the message that opens a turn for what the agent did on its own after a background task finished; it is never sent to the agent. */
+const CONTINUATION = '后台任务完成后继续';
+const isContinuation = (message: UserMessage) => { const source = message.source as { kind?: string; summary?: string }; return source.kind === 'dsh-harness-provider' && source.summary === CONTINUATION; };
 async function take(live: Live): Promise<HarnessOutput | undefined> {
   while (!live.queue.length) {
     if (live.ended) return undefined;
@@ -131,7 +134,8 @@ export class DshRunner {
 
   drainSteering(agent: Agent): void {
     const live = this.live.get(agent.id);
-    if (!live?.turnId || !live.session.steer) return;
+    // A follow-up the agent runs on its own has no prompt to steer; the message waits in the inbox for the next turn.
+    if (!live?.turnId || live.continuation || !live.session.steer) return;
     for (const message of [...agent.inbox.nextStep]) {
       (live.steerMessages ??= []).push(message);
       agent.inbox.remove(message.id);
@@ -156,14 +160,23 @@ export class DshRunner {
     // A worktree delegation keeps its DSH session in the source workspace while the Harness works in the checkout.
     if (binding.cwd !== agent.session.header.cwd && !worktree) throw new Error('Harness workspace identity mismatch');
     if (binding.pending) throw new Error('上次 Harness 请求的结果尚未确认；为避免重复执行，本会话暂停发送。');
-    const input = await harnessInput(this.ctx, messages, signal);
-    if (!input.length) throw new Error('Harness prompt is empty');
+    const continuation = messages.length > 0 && messages.every(isContinuation);
+    const input = await harnessInput(this.ctx, messages.filter(message => !isContinuation(message)), signal);
+    if (!input.length && !continuation) throw new Error('Harness prompt is empty');
     const delegation = this.delegation;
     const discussion = binding.delegation?.discussion;
     if (discussion) binding.permission = DISCUSSION_PERMISSION[binding.harness] as Binding['permission'];
     let live = this.live.get(agent.id);
     // A session the adapter closed on its own (a wedged native turn) is reopened like a reclaimed one.
     if (live?.ended) { this.live.delete(agent.id); live = undefined; }
+    if (!live && continuation) {
+      // The process that was writing is gone, and so is what it had not shown yet; nothing is opened to show nothing.
+      agent.session.append('step/start', { turn, step });
+      for (const message of messages) agent.session.append('user/message', message, { surfaceOp: 'append' });
+      agent.session.append('step/end', { turn, step });
+      await agentEvents(this.ctx, agent).serial('agent/turn-stopping', { turn, signal });
+      return;
+    }
     if (!live) {
       // The adapter places the instructions: the agent's system prompt, or Codex's developer instructions at launch. A branch
       // switched from another Harness gets its inherited history there on every open, since its native session lacks it.
@@ -188,6 +201,9 @@ export class DshRunner {
         if (event.type === 'session.auth.changed') this.authChanged(binding.harness, event.authStatus);
         else if (event.type === 'session.account.changed') this.accountChanged(binding.harness, event.account);
         // The adapter's turn is over, yet this turn's tool results may still be queued here: the notice waits for the step to end.
+        else if (event.type === 'session.continued') {
+          if (this.ctx.agents.get(agent.id) === agent) agent.followup(createUserMessage({ source: { kind: 'dsh-harness-provider', form: 'notice', summary: CONTINUATION }, content: [{ type: 'text', text: '后台任务已结束，Harness 继续执行。' }] }));
+        }
         else if (opened.held) opened.held.push(event.notice);
         else note(agent, event.notice);
       });
@@ -238,12 +254,12 @@ export class DshRunner {
       current.held = [];
       await this.ctx.sessions.flush(agent.session);
       signal.throwIfAborted();
-      binding.pending = turnId;
-      await this.bindings.write(binding);
+      // Nothing is sent for a continuation, so no result can be left unconfirmed.
+      if (!continuation) { binding.pending = turnId; await this.bindings.write(binding); }
       signal.throwIfAborted();
       submitted = true;
-      current.turnId = turnId; current.steerError = undefined; current.steerMessages = [];
-      const starting = current.session.execute({ type: 'turn.start', turnId, input });
+      current.turnId = turnId; current.continuation = continuation; current.steerError = undefined; current.steerMessages = [];
+      const starting = current.session.execute({ type: 'turn.start', turnId, input, ...(continuation ? { continuation } : {}) });
       current.ready = starting;
       this.drainSteering(agent);
       signal.addEventListener('abort', cancel, { once: true });
@@ -300,14 +316,14 @@ export class DshRunner {
       // A projection/storage/transport failure must not leave native tools running.
       if (binding.pending && !submitted) {
         delete binding.pending; await this.bindings.write(binding);
-      } else if (binding.pending || discussion) {
+      } else if (binding.pending || discussion || continuation) {
         cancel();
         await cancelWork;
         try { await current.session.close(); } finally { this.live.delete(agent.id); }
       }
       throw error;
     } finally {
-      current.turnId = undefined;
+      current.turnId = undefined; current.continuation = false;
       current.activeAt = Date.now();
       await current.steering;
       signal.removeEventListener('abort', cancel);

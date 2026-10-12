@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import { AcpAdapter, modelRef, formOf, formContent } from '../dist/acp-adapter.js';
 import { validateHostInteractionResponse } from '../dist/contracts.js';
-import { codexPlugins, codexTurnOutcomes } from '../dist/acp-profiles.js';
+import { claudeProfile, codexPlugins, codexTurnOutcomes } from '../dist/acp-profiles.js';
 import { Context } from '@deepseek-ai/cordis';
 import Agents from '@deepseek-ai/dsh-agent';
 import Loop from '@deepseek-ai/dsh-agent-loop';
@@ -69,7 +69,8 @@ const app = agent({ name: 'peer' })
     note({ prompt: raw });
     const text = raw.replace('[HOST]', '');
     const image = params.prompt.find(b => b.type === 'image');
-    if (text.startsWith('/rename ')) return { stopReason: 'end_turn' };
+    // Claude Code answers the local command with a line of its own, before any turn of the user's exists.
+    if (text.startsWith('/rename ')) { await update({ sessionUpdate: 'agent_message_chunk', messageId: 'rename', content: { type: 'text', text: 'Session renamed to: ' + text.slice(8) } }); return { stopReason: 'end_turn' }; }
     const turn = ++counter, userId = 'u' + turn, replyId = 'm' + turn;
     const entries = load();
     const reply = async body => { await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: body } }); entries.push({ input: raw, userId, reply: body, replyId }); save(entries); };
@@ -189,6 +190,41 @@ const app = agent({ name: 'peer' })
       for (const entry of updates) await update(entry);
       await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: 'found it' } });
       entries.push({ input: raw, userId, reply: 'found it', replyId, updates }); save(entries);
+      return end();
+    }
+    if (text === 'claude-background-agent') {
+      // claude-agent-acp 0.84 replays a background-launched Agent call's result as a bare update: the call id, no tool name.
+      const updates = [
+        { sessionUpdate: 'tool_call', toolCallId: 'agent-bg', name: 'Agent', title: 'Map pages', kind: 'think', status: 'pending', rawInput: { description: 'Map pages', prompt: 'List the pages' }, _meta: { claudeCode: { toolName: 'Agent' } } },
+        { sessionUpdate: 'tool_call_update', toolCallId: 'agent-bg', status: 'completed' },
+      ];
+      for (const entry of updates) await update(entry);
+      await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: 'launched' } });
+      entries.push({ input: raw, userId, reply: 'launched', replyId, updates }); save(entries);
+      return end();
+    }
+    if (text === 'claude-background-task') {
+      // Claude Code: the prompt ends while a backgrounded shell runs; its completion wakes the agent, which then writes with no
+      // prompt in flight and closes the cycle with a usage_update naming what it answered. History replays the cycle as a turn
+      // opened by the notification text, which is never forwarded live.
+      const follow = [
+        { sessionUpdate: 'agent_message_chunk', messageId: 'f1', content: { type: 'text', text: 'task finished' } },
+        { sessionUpdate: 'tool_call', toolCallId: 'follow-read', name: 'Read', title: 'read result', kind: 'read', status: 'pending', rawInput: { file_path: '/tmp/out' } },
+        { sessionUpdate: 'tool_call_update', toolCallId: 'follow-read', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'ok' } }] },
+        { sessionUpdate: 'agent_message_chunk', messageId: 'f2', content: { type: 'text', text: 'all six screens are ready' } },
+      ];
+      await update({ sessionUpdate: 'agent_message_chunk', messageId: replyId, content: { type: 'text', text: 'started' } });
+      entries.push({ input: raw, userId, reply: 'started', replyId }, { input: '<task-notification>done</task-notification>', userId: 'n' + turn, updates: follow });
+      save(entries);
+      setTimeout(async () => {
+        await update(follow[0]);
+        // The approval is asked at once, before the Host can have opened a turn for this cycle.
+        const answer = await ctx.request('session/request_permission', { sessionId, toolCall: { toolCallId: 'follow-read', title: 'read result', kind: 'read', status: 'pending', rawInput: { file_path: '/tmp/out' } },
+          options: [{ optionId: 'allow-once', name: 'Yes', kind: 'allow_once' }, { optionId: 'reject', name: 'No', kind: 'reject_once' }] });
+        if (answer.outcome.optionId !== 'allow-once') return;
+        for (const entry of follow.slice(1)) await update(entry);
+        await update({ sessionUpdate: 'usage_update', used: 5000, size: 200000, _meta: { '_claude/origin': { kind: 'task-notification' } } });
+      }, 30);
       return end();
     }
     if (text === 'codex-subagent') {
@@ -693,6 +729,84 @@ test('Harness subagents leave the main transcript for the sidebar: Claude Code t
     assert.equal(child.finishedAt, child.updatedAt, 'work that arrives after the settle does not reopen its clock');
     await session.close();
   } finally { await adapter.close(); await g.close(); }
+});
+
+test('an Agent call whose result arrives without its tool name still settles its subagent, live and after a resume', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  let adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  let ref;
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    ref = session.initialState.nativeRef;
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-bg', input: [{ type: 'text', text: 'claude-background-agent' }] }));
+    await until(output, 'turn.completed');
+    assert.deepEqual(session.subagents().map(agent => [agent.id, agent.name, agent.status]), [['agent-bg', 'Map pages', 'completed']]);
+    await session.close();
+  } finally { await adapter.close(); }
+  adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref }));
+    const [replayed] = session.subagents();
+    assert.deepEqual([replayed.id, replayed.status], ['agent-bg', 'completed'], 'a resumed session must not show a finished subagent as running');
+    assert.notEqual(replayed.finishedAt, null);
+    await session.close();
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('what Claude Code writes after its turn, woken by a finished background task, is shown in a turn of its own; prompt turns keep their keys across a resume', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  const { continuationEnd } = claudeProfile({ environment: {} });
+  const usage = meta => ({ sessionUpdate: 'usage_update', used: 1, size: 2, ...(meta ? { _meta: meta } : {}) });
+  assert.deepEqual([usage(), usage({ '_claude/origin': { kind: 'human' } }), usage({ '_claude/origin': { kind: 'task-notification' } })].map(continuationEnd), [false, false, true]);
+  const profile = { ...f.profile, continuationEnd };
+  const prompt = async (session, output, turnId, text, reply) => {
+    value(await session.execute({ type: 'turn.start', turnId, input: [{ type: 'text', text }] }));
+    const seen = await until(output, 'turn.completed');
+    // The title command's own line, written before the turn exists, is neither a follow-up nor part of the reply.
+    assert.deepEqual(events(seen, 'session.continued'), []);
+    assert.deepEqual(events(seen, 'item.completed').map(event => event.snapshot.item.text), [reply]);
+    return events(seen, 'turn.completed')[0].nativeTurnRef.nativeTurnKey;
+  };
+  let adapter = new AcpAdapter({ profile, environment: {} });
+  let ref, keys;
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    ref = session.initialState.nativeRef;
+    const output = session.outputs[Symbol.asyncIterator]();
+    const first = await prompt(session, output, 'host-bg', 'claude-background-task', 'started');
+    await until(output, 'session.continued');
+    assert.equal(session.hasBackgroundTasks(), true, 'the process must not be reclaimed while the agent works on its own');
+    // The Host needs a moment to open the turn; the agent's approval request is already here by then.
+    await new Promise(resolve => setTimeout(resolve, 150));
+    value(await session.execute({ type: 'turn.start', turnId: 'host-follow', input: [], continuation: true }));
+    const seen = [];
+    // An approval refused unseen would leave the cycle, and this turn, open for good.
+    const overdue = new Promise((_, reject) => setTimeout(() => reject(new Error('the follow-up turn never completed')), 5000).unref());
+    while (events(seen, 'turn.completed').length === 0) {
+      const next = (await Promise.race([output.next(), overdue])).value;
+      seen.push(next);
+      // Asked before the turn existed: it must reach the user once the turn does, not be refused unseen.
+      if (next.kind === 'interaction') value(await session.execute({ type: 'interaction.respond', interactionId: next.interaction.interactionId, response: { type: 'approval', actionId: 'allow-once' } }));
+    }
+    assert.equal(seen.filter(entry => entry.kind === 'interaction').length, 1);
+    const [started] = events(seen, 'turn.started'), [done] = events(seen, 'turn.completed');
+    assert.deepEqual([started.turnId, done.turnId, done.outcome.status], ['host-follow', 'host-follow', 'succeeded']);
+    assert.equal(started.nativeTurnRef ?? done.nativeTurnRef, undefined, 'a turn no prompt opened binds no native turn');
+    assert.deepEqual(events(seen, 'item.completed').map(event => [event.snapshot.item.type, event.snapshot.item.text ?? event.snapshot.outcome.status]),
+      [['agentMessage', 'task finished'], ['toolExecution', 'succeeded'], ['agentMessage', 'all six screens are ready']], 'what arrived before and after the turn opened, in order');
+    assert.equal(session.hasBackgroundTasks(), false);
+    keys = [first, await prompt(session, output, 'host-next', 'after', 'reply:after')];
+    await session.close();
+  } finally { await adapter.close(); }
+  adapter = new AcpAdapter({ profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: ref }));
+    const turns = value(await session.readSnapshot()).turns;
+    assert.deepEqual(turns.map(turn => turn.input[0].text), ['claude-background-task', '<task-notification>done</task-notification>', 'after']);
+    assert.deepEqual([turns[0], turns[2]].map(turn => turn.nativeTurnRef.nativeTurnKey), keys, 'replayed prompt turns carry the keys their live turns were bound to');
+    await session.close();
+  } finally { await adapter.close(); await f.close(); }
 });
 
 test('a new process resumes through session/load, rebuilds the same turn keys, and forks at a message boundary', { timeout: 20000 }, async () => {

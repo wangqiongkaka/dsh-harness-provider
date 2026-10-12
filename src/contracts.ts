@@ -99,7 +99,8 @@ export interface HarnessSessionState {
 
 export interface HostTextInput { type: 'text'; text: string }
 export type HostInput = HostTextInput | { type: 'image'; mimeType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'; base64Data: string };
-export interface TurnStartCommand { type: 'turn.start'; turnId: HostTurnId; input: HostInput[] }
+/** `continuation` sends nothing: the turn shows what the agent wrote on its own since the last turn (see `session.continued`) and ends with that cycle. */
+export interface TurnStartCommand { type: 'turn.start'; turnId: HostTurnId; input: HostInput[]; continuation?: true }
 export interface TurnCancelCommand { type: 'turn.cancel'; turnId: HostTurnId }
 export interface ModelSelectCommand { type: 'model.select'; model: HarnessModelRef }
 export interface ThinkingSelectCommand { type: 'thinking.select'; thinkingOptionId: HarnessThinkingOptionId }
@@ -185,6 +186,8 @@ export type HostEvent =
   | { type: 'session.auth.changed'; authStatus: HarnessAuthStatus }
   | { type: 'session.account.changed'; account: HarnessAccountSnapshot }
   | { type: 'session.notice'; notice: HostItemOf<'notice'> }
+  /** The agent started writing between turns (a finished background task woke it); a `continuation` turn takes that output over. */
+  | { type: 'session.continued' }
   | { type: 'turn.started'; turnId: HostTurnId; nativeTurnRef?: NativeTurnRef }
   | { type: 'turn.completed'; turnId: HostTurnId; nativeTurnRef?: NativeTurnRef; outcome: TurnOutcome }
   | { type: 'item.started'; turnId: HostTurnId; item: HostItem }
@@ -210,7 +213,7 @@ export interface HarnessSession {
   readSnapshot?(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>>;
   /** Subagents the Harness ran in this session (live and replayed), oldest first, with what each one said and did. */
   subagents?(): HarnessSubagent[];
-  /** Whether work the agent backgrounded (a shell) still runs after its turn; closing the process would kill it. */
+  /** Whether work outlives the turn — a backgrounded shell, or the agent's own follow-up to one; closing the process would kill it. */
   hasBackgroundTasks?(): boolean;
   execute(command: TurnStartCommand): Promise<HarnessResult<TurnStartAccepted>>;
   execute(command: TurnCancelCommand): Promise<HarnessResult<TurnCancelAccepted>>;
