@@ -122,6 +122,12 @@ export function modelValue(ref: HarnessModelRef): string {
 /** The transcript input of a turn no prompt opened: a NUL keeps its hash apart from every prompt's, so no prompt turn's occurrence count moves. */
 const CONTINUATION_INPUT = '\0continuation';
 const DETACHED_LIMIT = 20_000;
+/**
+ * How long a finished background task keeps the process for the cycle its notification wakes: the notification itself is
+ * never forwarded (claude-agent-acp acp-agent.js 4644), so nothing shows until the model's first output, which can take a minute.
+ */
+// ponytail: fixed cap for wakes no cycle answers (one cycle taking several notifications); count per task id if it matters.
+const WAKE_GRACE_MS = 600_000;
 const turnHash = (input: string) => createHash('sha256').update(input).digest('hex').slice(0, 16);
 const promptText = (blocks: acp.ContentBlock[]) => blocks.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
 
@@ -646,6 +652,9 @@ class AcpSession implements HarnessSession {
   readonly #subagents = new Subagents();
   /** Background tasks (backgrounded shells) still running; they keep going after the turn ends. */
   readonly #backgroundTasks = new Set<string>();
+  /** Finished background tasks whose wake-up cycle has not reported its result yet, and when the last one changed. */
+  #pendingWakes = 0;
+  #wakeAt = 0;
   readonly #process: AcpProcess;
   readonly #sessionId: string;
   readonly #cwd: string;
@@ -757,7 +766,9 @@ class AcpSession implements HarnessSession {
   }
   async listSkills(): Promise<HarnessSkill[]> { return this.#commands; }
   subagents(): HarnessSubagent[] { return this.#subagents.list(); }
-  hasBackgroundTasks(): boolean { return this.#backgroundTasks.size > 0 || !!this.#detached; }
+  hasBackgroundTasks(): boolean {
+    return this.#backgroundTasks.size > 0 || !!this.#detached || (this.#pendingWakes > 0 && Date.now() - this.#wakeAt < WAKE_GRACE_MS);
+  }
 
   async readSnapshot(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>> {
     if (this.#fault) return { ok: false, error: this.#fault };
@@ -1003,7 +1014,9 @@ class AcpSession implements HarnessSession {
     const task = update as unknown as AsyncTaskUpdate;
     if (task.sessionUpdate === 'async_task_spawned') this.#backgroundTasks.add(task.asyncTaskId);
     else if (task.sessionUpdate === 'async_task_state_update') {
-      if (task.state === 'running' || task.state === 'paused') this.#backgroundTasks.add(task.asyncTaskId); else this.#backgroundTasks.delete(task.asyncTaskId);
+      if (task.state === 'running' || task.state === 'paused') this.#backgroundTasks.add(task.asyncTaskId);
+      // An agent that answers finished tasks on its own (Claude Code) is about to be woken; the process must outlive the wait.
+      else if (this.#backgroundTasks.delete(task.asyncTaskId) && this.#profile.continuationEnd) { this.#pendingWakes++; this.#wakeAt = Date.now(); }
     } else if (task.sessionUpdate !== 'async_task_progress') return false;
     return true;
   }
@@ -1045,6 +1058,8 @@ class AcpSession implements HarnessSession {
       const account = this.#profile.accountUpdate?.(record(update._meta));
       if (account) this.#emit({ type: 'session.account.changed', account });
       if (this.#profile.continuationEnd?.(update)) {
+        // One wake answered; another may already be queued behind it, so the wait for it starts over.
+        if (this.#pendingWakes) { this.#pendingWakes--; this.#wakeAt = Date.now(); }
         const active = this.#active;
         if (active?.continuation) this.#finish(active, active.cancelled ? { status: 'cancelled', reason: 'Cancelled by user' } : { status: 'succeeded' });
         else if (this.#detached) this.#detached.ended = true;

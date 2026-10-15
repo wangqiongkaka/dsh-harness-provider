@@ -247,6 +247,15 @@ const app = agent({ name: 'peer' })
       await update({ sessionUpdate: 'async_task_progress', asyncTaskId: 'task-1', outputFilePath: '/tmp/out' });
       await reply('started'); return end();
     }
+    if (text === 'claude-background-done') {
+      // Claude Code: the task's end wakes the agent, which shows nothing until the model's first output arrives.
+      await update({ sessionUpdate: 'async_task_state_update', asyncTaskId: 'task-1', state: 'completed' });
+      setTimeout(async () => {
+        await update({ sessionUpdate: 'agent_message_chunk', messageId: 'wake', content: { type: 'text', text: 'tests passed' } });
+        await update({ sessionUpdate: 'usage_update', used: 5000, size: 200000, _meta: { '_claude/origin': { kind: 'task-notification' } } });
+      }, 300);
+      await reply('done'); return end();
+    }
     if (text === 'background-done') {
       await update({ sessionUpdate: 'async_task_state_update', asyncTaskId: 'task-1', state: 'completed' });
       await reply('done'); return end();
@@ -1043,6 +1052,25 @@ test('background tasks the agent announces keep the session busy until they end,
     assert.deepEqual(events(seen, 'item.completed').map(event => [event.snapshot.item.type, event.snapshot.item.text]), [['agentMessage', 'started']]);
     assert.equal(session.hasBackgroundTasks(), true);
     value(await session.execute({ type: 'turn.start', turnId: 'host-bg-done', input: [{ type: 'text', text: 'background-done' }] }));
+    await until(output, 'turn.completed');
+    assert.equal(session.hasBackgroundTasks(), false);
+    await session.close();
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('a finished background task keeps the Claude Code process until the follow-up it wakes reports its result', { timeout: 20000 }, async () => {
+  const f = await fixture();
+  const adapter = new AcpAdapter({ profile: { ...f.profile, continuationEnd: claudeProfile({ environment: {} }).continuationEnd }, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'host-bg', input: [{ type: 'text', text: 'background' }] }));
+    await until(output, 'turn.completed');
+    value(await session.execute({ type: 'turn.start', turnId: 'host-bg-done', input: [{ type: 'text', text: 'claude-background-done' }] }));
+    await until(output, 'turn.completed');
+    assert.equal(session.hasBackgroundTasks(), true, 'the agent is about to answer the notification; closing now would cut that cycle off');
+    await until(output, 'session.continued');
+    value(await session.execute({ type: 'turn.start', turnId: 'host-wake', input: [], continuation: true }));
     await until(output, 'turn.completed');
     assert.equal(session.hasBackgroundTasks(), false);
     await session.close();
