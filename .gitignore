@@ -4,3 +4,4 @@ node_modules/
 *.tgz
 
 pnpm-lock.yaml
+.DS_Store
