@@ -12,7 +12,7 @@ async function withDock(run, { touch = false } = {}) {
  const nodePaths = [dirname(dirname(require.resolve('react/package.json'))), dirname(dirname(require.resolve('react-dom/package.json')))];
  const bundle = await build({
   stdin: { contents: `${await readFile('src/client.tsx', 'utf8')}\nexport { DelegatePick, DelegateProject, QuotaChip, setLinkPanel, trackTyping, styles };\nexport { createRoot } from 'react-dom/client';\nexport { createElement } from 'react';`, resolveDir: resolve('src'), loader: 'tsx' },
-  bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'HarnessProvider', jsx: 'automatic', nodePaths, logLevel: 'warning',
+  bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'HarnessProvider', jsx: 'automatic', nodePaths, logLevel: 'warning', external: ['@deepseek-ai/dsh-client-ui-primitives'],
  });
  const browser = await chromium.launch({ headless: true });
  try {

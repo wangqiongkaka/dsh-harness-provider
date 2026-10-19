@@ -412,3 +412,10 @@ Codex app-server 初始化现在声明标准及扩展 MCP 表单能力。MCP 工
 
 - 新增测试在改动前的构建产物上失败：映射函数不存在、缓存没有 `supply`、适配器不发 `session.account.changed`、运行器没有 `accountChanged`。
 - 真实链路：用构建产物的 `AcpAdapter` + `claudeProfile` 开一个真实会话跑一轮，冷启动探测 1 次，收到推送并合并，回合结束后探测次数仍为 1，套餐名与 `Fable · 7-day` 保留。
+
+## Agent 运行卡片迁入（2026-10-19）
+
+- 「Agent 运行」卡片原在 dsh-remote-control，只在远程手机抽屉显示；按用户决定迁入本插件，因为它的 Harness 图标与「未释放」统计都来自本插件的 `harnesses` 接口。电脑本机与手机都由本插件显示，dsh-remote-control 只保留手机抽屉的布局（隐藏「新会话」、点行收起抽屉），worktree 折叠另迁入 dsh-git-sidebar。
+- `src/agent-board.ts`（纯逻辑）与 `src/agent-board-view.tsx`（卡片）由原实现搬来，只改类名（`hp-agents-*`）与标记（`data-hp-agents`、`data-hp-agents-pick`）；历史记录沿用原存储键 `dsh-remote-control.agent-history.v1`，迁移后不丢失。卡片在 `shell.overlay` 中注册，置顶、重命名等调用宿主 ui-workspace 与 Session Controller，与侧栏会话菜单一致。
+- 宿主组件库（`@deepseek-ai/dsh-client-ui-primitives`）在渲染时经宿主模块加载器 `require`，构建设为 external：该包的产物导入 CSS 模块与 katex 字体，静态导入会让所有在 Node 或浏览器中打包 `client.tsx` 的测试打包失败。`react-dom`（`createPortal`）同样由宿主提供；类型检查补了宿主仓库的 `@types/react-dom` 路径映射，相关测试的打包配置加了 external 或 `react-dom` 别名。
+- 验证：原 dsh-remote-control 的 6 项逻辑测试与 29 项渲染测试移植为 `tests/agent-board.test.mjs`（渲染用例在无界面 Chromium 中运行，组件库用替身），临时改坏折叠阈值与行标记后 13 项失败、还原后通过；`npm run check` 全部 215 项测试通过。隔离 Profile（桌面版附带的 DSH CLI）装上三个插件的新包，在 1280×800 与 390×844（加远程代理标记）下截图核对：卡片位于「新会话」之后、旧卡片不再出现，手机抽屉中卡片占据「新会话」位置。隔离环境无法创建会话，只核对了空卡片的版式；当前使用中的 Profile 未重载。

@@ -65,7 +65,8 @@ for (const [entry, outfile, external] of [
 await build({
   entryPoints: ['src/client.tsx'], outfile: 'dist/client.js', bundle: true,
   platform: 'browser', format: 'cjs', target: 'es2022', jsx: 'automatic',
-  external: ['react', 'react/jsx-runtime'],
+  // The host's module loader serves its primitives (see agent-board-view.tsx).
+  external: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
   banner: { js: 'window.__ModuleLoader__.load({id:"dsh-harness-provider",factory:(require)=>{var module={exports:{}};var exports=module.exports;' },
   footer: { js: 'return module.exports;}});' },
 });

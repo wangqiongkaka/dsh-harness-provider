@@ -16,6 +16,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-commands/client';
 import type { PropsRuntime, PropsLocale, InjectFace } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-chat/client';
 import type { Settings } from './settings.js';
+import type { UiWorkspace } from '@deepseek-ai/dsh-client-ui-workspace/client';
+import { AgentBoard, agentsEn, agentsZh, type AgentBoardInjected } from './agent-board-view.js';
 import { contribution, SETTINGS_ENTRY, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema, type settingsViewSchema, type updateSettingsRequest, type workspacesSchema, type directoriesSchema } from './remote.js';
 import type { z } from 'zod';
 
@@ -115,6 +117,7 @@ const zh = {
   'setting.acpStderr': 'ACP 调试输出', 'setting.acpStderr.hint': '把 Agent 进程的 stderr 输出到 DSH 日志，仅用于排查启动问题；可能包含提示词或凭据。',
   discuss: '讨论', discussDescription: '由主 Agent 分配一个或多个会话并汇总', discussTask: '讨论任务', discussStarted: '已开始讨论',
   discussHint: '可多选；主 Agent 为选中的 Harness 分工并汇总', discussExit: '退出讨论模式', discussNative: 'DSH 原生暂不支持只读讨论',
+  ...agentsZh,
 };
 const en: Record<keyof typeof zh,string> = {
   harness:'Select Harness', model:'Select Harness model', native:'Native DSH', defaultModel:'Default model',
@@ -174,8 +177,15 @@ const en: Record<keyof typeof zh,string> = {
   'setting.acpStderr':'ACP debug output', 'setting.acpStderr.hint':'Sends the agent process stderr to the DSH log, for startup problems only; it may contain prompts or credentials.',
   discuss:'Discuss', discussDescription:'Let the main agent assign one or more sessions and synthesize', discussTask:'Discussion task', discussStarted:'Discussion started',
   discussHint:'Select one or more; the main agent assigns the selected Harnesses and synthesizes', discussExit:'Exit discussion mode', discussNative:'Native DSH does not support read-only discussions yet',
+  ...agentsEn,
 };
 type Key = keyof typeof zh;
+/** The Session Controller call ui-workspace's rename dialog makes. */
+interface RenamingSessions {
+  using(sessionId: string, options: { source: 'workspaceOperation' },
+    operation: (reference: { binding: { session: { rename(title: string): Promise<RenameResult> } } }) => Promise<RenameResult>): Promise<RenameResult>;
+}
+type RenameResult = { ok: true } | { ok: false; error: { message: string } };
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap { harness: Key }
 }
@@ -2053,6 +2063,31 @@ export async function apply(ctx: Context): Promise<void> {
     scope.effect(() => scope.slots.inject('conversation.input.dock', () => scope.slots.register({
       name: 'conversation.input.dock', id: 'harness-delegation', order: -100, locale: 'harness',
     }, DelegationDock)), 'harness: delegation composer mode');
+  });
+  // The sidebar's Agent card. The host row menu's own operations (ui-workspace) and the Session Controller rename are
+  // read at call time, so a build without them still shows the card and only that action fails.
+  ctx.inject(['slots', 'remote.harness'], scope => {
+    const workspace = (): UiWorkspace => {
+      const service = ctx.get('uiWorkspace') as UiWorkspace | undefined;
+      if (service === undefined) throw new Error('uiWorkspace is not mounted');
+      return service;
+    };
+    scope.effect(() => scope.slots.inject('shell.overlay', () => scope.slots.register({ name: 'shell.overlay', id: 'harness-agents', locale: 'harness',
+      inject: (): AgentBoardInjected => ({
+        openSession: sessionId => { (ctx.get('uiWorkspace') as UiWorkspace | undefined)?.openSession(sessionId); },
+        pinSession: sessionId => workspace().pinSession(sessionId),
+        unpinSession: sessionId => workspace().unpinSession(sessionId),
+        archiveSession: (sessionId, options) => workspace().archiveSession(sessionId, options),
+        forkSession: sessionId => workspace().forkSession(sessionId),
+        renameSession: async (sessionId, title) => {
+          const sessions = ctx.get('sessions') as RenamingSessions | undefined;
+          if (sessions === undefined) throw new Error('sessions is not mounted');
+          const result = await sessions.using(sessionId, { source: 'workspaceOperation' }, reference => reference.binding.session.rename(title));
+          if (!result.ok) throw new Error(result.error.message);
+        },
+        harnesses: sessionIds => value(scope.remote.harness.harnesses({ sessionIds })),
+      }),
+    }, AgentBoard)), 'harness: agent board');
   });
   // Optional: a DSH build without the right sidebar simply has no subagents tab.
   ctx.inject(['sidebarRightTabs', 'remote.harness'], scope => {

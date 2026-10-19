@@ -23,8 +23,8 @@ window.renderEditor = locale => root.render(<><style>{styles}</style><EditableUs
   sessionId="session" useSessions={useSessions} node={node} read={read} edit={edit} host={host}
   ht={key => (locale === 'zh' ? zh : en)[key]} /></>);
 window.renderEditor('zh');`, resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false,
-    platform: 'browser', format: 'iife', jsx: 'automatic',
-    alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom/client': require.resolve('react-dom/client') } });
+    platform: 'browser', format: 'iife', jsx: 'automatic', external: ['@deepseek-ai/dsh-client-ui-primitives'],
+    alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom': require.resolve('react-dom'), 'react-dom/client': require.resolve('react-dom/client') } });
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 1000, height: 360 } });

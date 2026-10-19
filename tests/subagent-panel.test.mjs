@@ -11,7 +11,7 @@ import { chromium } from '@playwright/test';
 const panel = async () => {
   const require = createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
   const React = require('react'), { renderToStaticMarkup } = require('react-dom/server');
-  const bundle = await build({ stdin: { contents: await readFile('src/client.tsx', 'utf8') + '\nexport { styles, zh, en, subscribeSubagents, subagentFeeds };', resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['react', 'react/jsx-runtime'] });
+  const bundle = await build({ stdin: { contents: await readFile('src/client.tsx', 'utf8') + '\nexport { styles, zh, en, subscribeSubagents, subagentFeeds };', resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'] });
   const module = { exports: {} };
   runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, require, setInterval, clearInterval });
   const { SubagentRow, SubagentsTab, SubagentsTitle, styles, zh, en, subscribeSubagents, subagentFeeds } = module.exports;
@@ -86,7 +86,7 @@ test('running and finished subagents are told apart by color and motion, not onl
 
 test('the subagents chip reads the same session as the panel, so both report a running subagent', async () => {
   const require = createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
-  const bundle = await build({ stdin: { contents: await readFile('src/client.tsx', 'utf8'), resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['react', 'react/jsx-runtime'] });
+  const bundle = await build({ stdin: { contents: await readFile('src/client.tsx', 'utf8'), resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false, platform: 'node', format: 'cjs', jsx: 'automatic', external: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'] });
   const module = { exports: {} };
   runInNewContext(bundle.outputFiles[0].text, { module, exports: module.exports, require, document: { createElement: () => ({ setAttribute() {}, remove() {} }), head: { append() {} } } });
   const asked = [], registrations = [], injected = [];

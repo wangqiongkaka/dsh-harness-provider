@@ -27,8 +27,8 @@ function App() {
     recover={recover} t={key => zh[key] ?? key} /></>;
 }
 createRoot(document.querySelector('#root')).render(<App />);`, resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false,
-    platform: 'browser', format: 'iife', jsx: 'automatic',
-    alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom/client': require.resolve('react-dom/client') } });
+    platform: 'browser', format: 'iife', jsx: 'automatic', external: ['@deepseek-ai/dsh-client-ui-primitives'],
+    alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom': require.resolve('react-dom'), 'react-dom/client': require.resolve('react-dom/client') } });
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 960, height: 500 } });
@@ -87,8 +87,8 @@ function App() {
     recover={read} t={key => ({ harness: '选择 Harness' }[key] ?? key)} />;
 }
 root.render(<App />);`, resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false,
-    platform: 'browser', format: 'iife', jsx: 'automatic',
-    alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom/client': require.resolve('react-dom/client') } });
+    platform: 'browser', format: 'iife', jsx: 'automatic', external: ['@deepseek-ai/dsh-client-ui-primitives'],
+    alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom': require.resolve('react-dom'), 'react-dom/client': require.resolve('react-dom/client') } });
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
@@ -127,8 +127,8 @@ function Row({ id }) {
     recover={read} t={key => ({ harness: '选择 Harness' }[key] ?? key)} /></div>;
 }
 createRoot(document.querySelector('#root')).render(<><Row id="plan" /><Row id="none" /></>);`, resolveDir: resolve('src'), loader: 'tsx' }, bundle: true, write: false,
-    platform: 'browser', format: 'iife', jsx: 'automatic',
-    alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom/client': require.resolve('react-dom/client') } });
+    platform: 'browser', format: 'iife', jsx: 'automatic', external: ['@deepseek-ai/dsh-client-ui-primitives'],
+    alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom': require.resolve('react-dom'), 'react-dom/client': require.resolve('react-dom/client') } });
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();

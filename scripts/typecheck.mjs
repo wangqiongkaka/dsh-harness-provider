@@ -8,6 +8,7 @@ const options = {
   paths: {
     react: [resolve(dsh, 'packages/client/ui-agent-preset/node_modules/@types/react/index.d.ts')],
     'react/*': [resolve(dsh, 'packages/client/ui-agent-preset/node_modules/@types/react/*.d.ts')],
+    'react-dom': [resolve(dsh, 'packages/client/ui-chat/node_modules/@types/react-dom/index.d.ts')],
   },
 };
 // Host and browser augment the same Cordis keys with different services.

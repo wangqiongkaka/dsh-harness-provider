@@ -12,7 +12,7 @@ test('quota remaining and context used have opposite arcs but the same scarcity 
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const React=require('react'), {renderToStaticMarkup}=require('react-dom/server');
  const source=await readFile('src/client.tsx','utf8');
- const bundle=await build({stdin:{contents:source+'\nexport {QuotaChip,ContextRing,styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:source+'\nexport {QuotaChip,ContextRing,styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require});
  const {QuotaChip,ContextRing,styles}=module.exports;
@@ -50,7 +50,7 @@ test('quota remaining and context used have opposite arcs but the same scarcity 
 
 test('delegation and discussion modes share composer styling with distinct colors', async () => {
  const source=await readFile('src/client.tsx','utf8');
- const bundle=await build({stdin:{contents:source+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:source+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require:createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'))});
  const browser=await chromium.launch({headless:true});
@@ -74,7 +74,7 @@ test('delegation and discussion modes share composer styling with distinct color
 
 test('settings harness choices match row typography without changing composer choices', async () => {
  const source=await readFile('src/client.tsx','utf8');
- const bundle=await build({stdin:{contents:source+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:source+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require:createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'))});
  const browser=await chromium.launch({headless:true});
@@ -88,7 +88,7 @@ test('settings harness choices match row typography without changing composer ch
 
 test('输入提示条在宽屏和窄屏下与输入框顶边直线段等长', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime']});
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require});
  const hostCss=await readFile('node_modules/@deepseek-ai/dsh-client-ui-conversation/src/client/skeleton/InputBar.module.css','utf8');
@@ -145,7 +145,7 @@ window.snapshot=()=>({...shell.snapshot,taskMode:taskModes.get('s')?.task.name})
 window.attach=()=>shell.addAttachments(['receipt']);
 window.plain=text=>{setTaskMode('s');shell.setDraft(text);shell.submit();};
 window.selectedHarnesses=mode=>mode==='delegate'?optionsFor('s').harnesses:discussionFor('s');`,resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'browser',format:'iife',jsx:'automatic',loader:{'.css':'empty','.module.css':'empty'},
-  alias:{react:require.resolve('react'),'react/jsx-runtime':require.resolve('react/jsx-runtime'),'react-dom/client':require.resolve('react-dom/client'),lexical:lexical('lexical'),'@lexical/plain-text':lexical('@lexical/plain-text')}});
+  alias:{react:require.resolve('react'),'react/jsx-runtime':require.resolve('react/jsx-runtime'),'react-dom':require.resolve('react-dom'),'react-dom/client':require.resolve('react-dom/client'),lexical:lexical('lexical'),'@lexical/plain-text':lexical('@lexical/plain-text')}});
  const browser=await chromium.launch({headless:true});
  try {
   const page=await browser.newPage(),errors=[];
