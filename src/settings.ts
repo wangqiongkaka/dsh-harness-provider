@@ -15,6 +15,7 @@ export const Config = Schema.object({
   codexCommand: Schema.string().default('codex').volatile(),
   /** Unset: `CLAUDE_COMMAND_PATH`, then `claude` on PATH and the usual install locations. */
   claudeCommand: Schema.string().volatile(),
+  defaultHarness: Schema.union(['last', 'dsh', 'codex', 'claude-code']).default('last').volatile(),
   idleCloseSeconds: count(5, 60),
   delegateHarnesses: Schema.array(Schema.union(['dsh', 'codex', 'claude-code'])).default(['codex']).volatile(),
   delegateReportBack: Schema.boolean().default(false).volatile(),

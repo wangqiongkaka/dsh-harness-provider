@@ -41,7 +41,11 @@ export const DISCUSSION_PERMISSION = { codex: 'read-only', 'claude-code': 'plan'
 const nativeDelegationSchema = z.object({
   version: z.literal(1), sessionId: z.string().min(1), harness: z.literal('dsh'), cwd: z.string().min(1), locked: z.boolean(), delegation: delegationSchema,
 }).strict();
-const storedBindingSchema = z.union([bindingSchema, nativeDelegationSchema]);
+/** An explicit native choice must survive a reopen without becoming an external Harness binding. */
+const nativeSelectionSchema = z.object({
+  version: z.literal(1), sessionId: z.string().min(1), harness: z.literal('dsh'), locked: z.literal(false), delegation: z.never().optional(),
+}).strict();
+const storedBindingSchema = z.union([bindingSchema, nativeDelegationSchema, nativeSelectionSchema]);
 type StoredBinding = z.infer<typeof storedBindingSchema>;
 export type DelegatedBinding = (Omit<Binding, 'delegation'> & { delegation: Delegation }) | z.infer<typeof nativeDelegationSchema>;
 
@@ -75,11 +79,19 @@ export class Bindings {
     const binding = await this.stored(id);
     return binding?.delegation ? binding as DelegatedBinding : undefined;
   }
+  async isNative(id: string): Promise<boolean> {
+    return (await this.stored(id))?.harness === 'dsh';
+  }
+  /** Callers hold serial(sessionId), just as for an external Harness choice. */
+  async writeNativeSelection(sessionId: string): Promise<void> {
+    await this.save(this.path(sessionId), nativeSelectionSchema.parse({ version: 1, sessionId, harness: 'dsh', locked: false }));
+  }
   /** Callers that can race with native delegation creation must hold serial(sessionId). */
   async write(binding: Binding): Promise<void> {
     const data = bindingSchema.parse(binding);
-    // read() hides native delegation records, so a racing remembered-Harness bind must not replace one.
-    if ((await this.stored(data.sessionId))?.harness === 'dsh') throw new Error('DSH 原生委派会话不能绑定外部 Harness');
+    // read() hides native records; only an ordinary native choice may be replaced by a manual Harness switch.
+    const current = await this.stored(data.sessionId);
+    if (current?.harness === 'dsh' && current.delegation) throw new Error('DSH 原生委派会话不能绑定外部 Harness');
     await this.save(this.path(data.sessionId), data);
   }
   async writeDelegated(binding: DelegatedBinding): Promise<void> {

@@ -563,7 +563,7 @@ test('后台任务结束后 Harness 自行续跑的输出进入跟进轮次：�
  try{
   for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
   await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
-  const commands=[],steered=[];let finish;
+  const commands=[],steered=[];let finish,continueAfterTurn;
   const adapter={async open(){
    const channel=new HarnessOutputChannel(),emit=event=>channel.emit({kind:'event',event});
    const message=(turnId,itemId,text)=>emit({type:'item.completed',turnId,snapshot:{item:{type:'agentMessage',itemId,text},outcome:{status:'succeeded'}}});
@@ -579,7 +579,7 @@ test('后台任务结束后 Harness 自行续跑的输出进入跟进轮次：�
       message(turnId,'reply','已在后台生成');
       emit({type:'turn.completed',turnId,nativeTurnRef:{harnessId:'claude-code',nativeSessionId:'native-continuation',nativeTurnKey:'prompt.1',formatVersion:1},outcome:{status:'succeeded'}});
       // The backgrounded task finishes after the turn and wakes the agent on its own.
-      setTimeout(()=>emit({type:'session.continued'}),30);
+      continueAfterTurn=()=>emit({type:'session.continued'});
      }
      return {ok:true,value:{turnId}};
     },async close(){channel.end();}}};
@@ -591,6 +591,8 @@ test('后台任务结束后 Harness 自行续跑的输出进入跟进轮次：�
   await bindings.write({version:1,sessionId:id,harness:'claude-code',cwd:root,locked:true});
   const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
   agent.followup(createUserMessage({content:[{type:'text',text:'go'}],source:{kind:'user'}}));
+  await agent.whenIdle();
+  continueAfterTurn();
   const deadline=Date.now()+5000;
   while(!finish){assert.ok(Date.now()<deadline,'续跑没有开启跟进轮次');await new Promise(resolve=>setTimeout(resolve,5));}
   assert.deepEqual(commands.map(command=>[command.type,command.input.length,command.continuation??false]),[['turn.start',1,false],['turn.start',0,true]],'跟进轮次不向 Harness 发送任何提示');

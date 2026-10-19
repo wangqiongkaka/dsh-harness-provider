@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import type { Context } from '@deepseek-ai/cordis';
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
 import type {} from '@deepseek-ai/dsh-api-remotes/client';
@@ -48,7 +49,7 @@ type Api = {
   linkProjects(request: {sessionId: string; workspaceIds: string[]; paths?: string[]}): Promise<RemoteResult<State>>;
   directories(request: {sessionId: string; path?: string}): Promise<RemoteResult<Directories>>;
   usage(request: {sessionId: string}): Promise<RemoteResult<Usage>>;
-  harnesses(request: {sessionIds: string[]}): Promise<RemoteResult<Record<string, {harness: State['harness']; delegated: boolean; running: boolean}>>>;
+  harnesses(request: {sessionIds: string[]}): Promise<RemoteResult<Record<string, {harness: State['harness']; delegated: boolean; running: boolean; cwd?: string}>>>;
   quota(request: {sessionId: string}): Promise<RemoteResult<Quota>>;
   viewing(request: {sessionId: string}): Promise<RemoteResult<null>>;
   subagents(request: {sessionId: string}): Promise<RemoteResult<Subagents>>;
@@ -60,6 +61,7 @@ type Api = {
   startDiscussionFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
 };
 const zh = {
+  workingDirectory: '工作目录', noWorkingDirectory: '未连接工作目录',
   harness: '选择 Harness', model: '选择 Harness 模型', native: 'DSH 原生', defaultModel: '默认模型',
   retry: '重试', locked: '开始对话后 Harness 固定；可新建会话，或从消息新建分支后在发送前切换',
   recovery: '上次请求结果未确认，已暂停发送以避免重复执行。', loading: '加载中',
@@ -96,6 +98,8 @@ const zh = {
   settingsReadOnly: '当前连接不能修改配置，以下内容只读。', settingsUnavailable: '当前 Profile 没有提供本插件的配置。', settingsReset: '恢复默认',
   settingsRejected: '未保存：取值无效或超出范围。',
   'settingsGroup.sessions': '会话', 'settingsGroup.delegation': '委派与讨论', 'settingsGroup.feedback': '进展反馈', 'settingsGroup.advanced': '高级',
+  lastHarness: '沿用上次选择',
+  'setting.defaultHarness': '新会话默认 Harness', 'setting.defaultHarness.hint': '新会话首次打开时使用此 Harness；可在发送前手动切换，已有会话保持原选择。',
   'setting.idleCloseSeconds': '空闲回收（秒）', 'setting.idleCloseSeconds.hint': '会话不在屏幕上且空闲超过该时长后关闭原生进程，下一轮按原生会话恢复；仍有后台任务时保留。',
   'setting.delegateHarnesses': '委派默认目标', 'setting.delegateHarnesses.hint': '进入委派模式时预选的 Harness。',
   'setting.delegateReportBack': '委派默认回传', 'setting.delegateReportBack.hint': '进入委派模式时预选“完成后回传到当前会话”。',
@@ -120,6 +124,7 @@ const zh = {
   ...agentsZh,
 };
 const en: Record<keyof typeof zh,string> = {
+  workingDirectory: 'Working directory', noWorkingDirectory: 'No working directory connected',
   harness:'Select Harness', model:'Select Harness model', native:'Native DSH', defaultModel:'Default model',
   retry:'Retry', locked:'Harness is fixed after the first prompt. Start a new session, or branch from a message and switch before sending.',
   recovery:'The previous request was not confirmed. Sending is paused to avoid duplicate execution.', loading:'Loading',
@@ -156,6 +161,8 @@ const en: Record<keyof typeof zh,string> = {
   settingsReadOnly:'This connection cannot change configuration; the values below are read-only.', settingsUnavailable:'This profile does not serve the plugin\'s configuration.', settingsReset:'Reset',
   settingsRejected:'Not saved: the value is invalid or out of range.',
   'settingsGroup.sessions':'Sessions', 'settingsGroup.delegation':'Delegation and discussion', 'settingsGroup.feedback':'Progress feedback', 'settingsGroup.advanced':'Advanced',
+  lastHarness: 'Use last selection',
+  'setting.defaultHarness':'Default Harness for new sessions', 'setting.defaultHarness.hint':'Used when a new session first opens. Switch manually before sending; existing sessions keep their selection.',
   'setting.idleCloseSeconds':'Idle close (seconds)', 'setting.idleCloseSeconds.hint':'An off-screen session idle this long closes its native process and resumes on the next turn; background tasks keep it open.',
   'setting.delegateHarnesses':'Default delegation targets', 'setting.delegateHarnesses.hint':'Harnesses preselected when delegation mode opens.',
   'setting.delegateReportBack':'Report back by default', 'setting.delegateReportBack.hint':'Preselects "Report back to this session when complete".',
@@ -1276,7 +1283,14 @@ export function HarnessSettingsSection({ useHarnessSettings, form, t }: Settings
     <h2 className="hp-set-page">{t('settingsNav')}</h2>
     <p className="hp-set-intro">{t('settingsIntro')}</p>
     {disabled && <p className="hp-set-intro" role="note">{t('settingsReadOnly')}</p>}
-    {group('settingsGroup.sessions', row('idleCloseSeconds', number('idleCloseSeconds')))}
+    {group('settingsGroup.sessions', <>
+      {row('defaultHarness', <select aria-label={label('defaultHarness')} disabled={disabled} value={value.defaultHarness ?? 'last'}
+        onChange={event => settle('defaultHarness', form.set('defaultHarness', event.target.value))}>
+        <option value="last">{t('lastHarness')}</option><option value="dsh">{t('native')}</option>
+        <option value="codex">Codex</option><option value="claude-code">Claude Code</option>
+      </select>)}
+      {row('idleCloseSeconds', number('idleCloseSeconds'))}
+    </>)}
     {group('settingsGroup.delegation', <>
       {row('delegateHarnesses', <TaskHarnessSelector selected={value.delegateHarnesses ?? ['codex']} disabled={disabled} t={t} onChange={next => settle('delegateHarnesses', form.set('delegateHarnesses', next))} />)}
       {row('delegateReportBack', toggle('delegateReportBack'))}
@@ -1619,10 +1633,11 @@ ${nativeContextColors}
 .hp-set-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .hp-set-control{display:flex;justify-content:flex-end;flex:0 0 auto;min-width:0}
 .hp-set-control .hp-delegate-harness{font-size:14px;line-height:20px}
-.hp-set-control input,.hp-set-control textarea{box-sizing:border-box;padding:6px 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px}
+.hp-set-control input,.hp-set-control textarea,.hp-set-control select{box-sizing:border-box;padding:6px 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px}
+.hp-set-control select{width:200px;max-width:100%}
 .hp-set-control input{width:260px}.hp-set-control input.hp-set-number{width:120px;text-align:right;font-variant-numeric:tabular-nums}
 .hp-set-control textarea{width:100%;resize:vertical;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:12px;line-height:18px}
-.hp-set-control input:focus-visible,.hp-set-control textarea:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px}
+.hp-set-control input:focus-visible,.hp-set-control textarea:focus-visible,.hp-set-control select:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px}
 .hp-set-control :disabled{opacity:.5;cursor:not-allowed}
 .hp-switch{box-sizing:border-box;position:relative;flex:0 0 auto;width:36px;height:20px;padding:2px;border:0;border-radius:10px;background:var(--dsw-alias-border-l3);cursor:pointer}
 .hp-switch[aria-checked=true]{background:var(--dsw-alias-brand-primary)}.hp-switch:disabled{opacity:.5;cursor:default}
@@ -1721,6 +1736,36 @@ function rowSessionId(row: Element): string | undefined {
     if (typeof id === 'string') return id;
   }
   return undefined;
+}
+
+function TeamDirectory({ sessionId, useSessions, loadDirectory, t }: Pick<PropsRuntime<'conversation.session.header.actions'>, 'sessionId' | 'useSessions'> & PropsLocale<'harness'> & {
+  loadDirectory: (id: string) => Promise<string | undefined>;
+}) {
+  const anchor = useRef<HTMLSpanElement>(null);
+  const [target, setTarget] = useState<Element | null>(null);
+  const [resolved, setResolved] = useState<{ id: string; target: Element; cwd?: string }>();
+  const summaryCwd = useSessions(state => state.byId[sessionId]?.cwd);
+  useEffect(() => {
+    // shortcut: the host has no member-row slot; switch to that slot if one becomes available.
+    const locate = () => setTarget(anchor.current?.closest('[class*="_headerActions"]')?.querySelector('[data-team-action] button[aria-expanded="true"]')
+      ? document.querySelector('[data-team-panel] [class*="_currentTag"]')?.parentElement?.parentElement ?? null : null);
+    locate();
+    const observer = new MutationObserver(locate);
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded'] });
+    return () => observer.disconnect();
+  }, [sessionId]);
+  useEffect(() => {
+    if (!target) return;
+    let active = true;
+    setResolved(undefined);
+    void loadDirectory(sessionId).then(cwd => { if (active) setResolved({ id: sessionId, target, cwd }); }, () => {});
+    return () => { active = false; };
+  }, [sessionId, target, loadDirectory]);
+  const cwd = (resolved?.id === sessionId && resolved.target === target ? resolved.cwd : undefined) ?? summaryCwd;
+  return <><span ref={anchor} hidden />{target && createPortal(<span data-hp-team-directory style={{ display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', alignItems: 'start', columnGap: 4,
+    marginTop: 4, fontSize: 11, lineHeight: '16px', textAlign: 'left', color: 'var(--dsw-alias-label-tertiary)', userSelect: 'text' }}>
+    <span style={{ whiteSpace: 'nowrap' }}>{t('workingDirectory')}：</span><span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{cwd || t('noWorkingDirectory')}</span>
+  </span>, target)}</>;
 }
 
 export async function apply(ctx: Context): Promise<void> {
@@ -2067,6 +2112,10 @@ export async function apply(ctx: Context): Promise<void> {
   // The sidebar's Agent card. The host row menu's own operations (ui-workspace) and the Session Controller rename are
   // read at call time, so a build without them still shows the card and only that action fails.
   ctx.inject(['slots', 'remote.harness'], scope => {
+    scope.effect(() => scope.slots.inject('conversation.session.header.actions', () => scope.slots.register({
+      name: 'conversation.session.header.actions', id: 'harness-working-directory', locale: 'harness',
+      inject: () => ({ loadDirectory: async (sessionId: string) => (await value(scope.remote.harness.harnesses({ sessionIds: [sessionId] })))[sessionId]?.cwd }),
+    }, TeamDirectory)), 'harness: current team member directory');
     const workspace = (): UiWorkspace => {
       const service = ctx.get('uiWorkspace') as UiWorkspace | undefined;
       if (service === undefined) throw new Error('uiWorkspace is not mounted');

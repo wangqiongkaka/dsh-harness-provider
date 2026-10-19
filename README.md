@@ -153,6 +153,7 @@ Codex / Claude Code 会话点输入栏的 **+**（或输入 `/link`），在“�
 
 | 分组 | 配置项 | 默认值 | 生效时机 |
 | --- | --- | --- | --- |
+| 会话 | `defaultHarness` 新会话默认 Harness | `last`（沿用上次选择） | 新会话首次打开；可固定为 `dsh`、`codex` 或 `claude-code`，已有会话和单次手动选择保持不变 |
 | 会话 | `idleCloseSeconds` 空闲回收（秒） | 60 | 下一次空闲扫描 |
 | 委派与讨论 | `delegateHarnesses` / `delegateReportBack` / `delegateWorktree` 委派默认目标、回传、独立 worktree | Codex / 关 / 关 | 下次进入委派模式 |
 | 委派与讨论 | `discussHarnesses` 讨论默认参与者 | Codex + Claude Code | 下次进入讨论模式 |

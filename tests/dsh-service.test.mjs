@@ -219,7 +219,7 @@ test('thinking selection validates against the catalog, persists, and quota read
   await h.select({sessionId:'bound',harness:'codex'});
   // Sidebar marks read bindings only: an unbound fresh session stays native instead of adopting the remembered Harness.
   // A Harness session without a live process is closed (gray); a loaded DSH agent is running.
-  assert.deepEqual(await h.harnesses({sessionIds:['bound','fresh','unknown']}),{bound:{harness:'codex',delegated:false,running:false},fresh:{harness:'dsh',delegated:false,running:true},unknown:{harness:'dsh',delegated:false,running:true}});
+  assert.deepEqual(await h.harnesses({sessionIds:['bound','fresh','unknown']}),{bound:{harness:'codex',delegated:false,running:false,cwd:root},fresh:{harness:'dsh',delegated:false,running:true},unknown:{harness:'dsh',delegated:false,running:true}});
   assert.equal(inspections,2); // one per harness, cached per cwd afterwards
   const quota=await h.quota({sessionId:'bound'});
   assert.deepEqual(quota,{kind:'windows',source:'codex',plan:'pro',windows:[
@@ -346,7 +346,7 @@ test('remote pages read and write only the plugin settings namespace through the
   ctx.provide('settings',settings);
   assert.deepEqual(await h.readSettings({}),{value:{idleCloseSeconds:30},user:{idleCloseSeconds:30},revision:3,writable:true},'only the projected view of this namespace');
   assert.ok(describes.every(options=>options?.redactSecrets===true),'remote reads are always redacted');
-  const ops=[{op:'set',path:['delegateReportBack'],value:true},{op:'unset',path:['idleCloseSeconds']}];
+  const ops=[{op:'set',path:['defaultHarness'],value:'codex'},{op:'set',path:['delegateReportBack'],value:true},{op:'unset',path:['idleCloseSeconds']}];
   assert.deepEqual(await h.updateSettings({ops,revision:3}),{value:{idleCloseSeconds:30},user:{idleCloseSeconds:30},revision:4,writable:true});
   assert.deepEqual(mutations,[['harness-plugin',ops,3]]);
   assert.equal(await h.updateSettings({ops,revision:3}),null,'a stale revision is refused without the internal error');

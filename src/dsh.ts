@@ -440,10 +440,11 @@ export class HarnessService extends TypertRemoteService {
     const { sessionIds } = harnessesRequest.parse(raw);
     return Object.fromEntries(await Promise.all(sessionIds.map(async id => {
       const delegated = await this.bindings.readDelegated(id).catch(() => undefined);
-      const harness = delegated?.harness ?? (await this.bindings.read(id).catch(() => undefined))?.harness ?? 'dsh';
+      const binding = delegated ?? await this.bindings.read(id).catch(() => undefined);
+      const harness = binding?.harness ?? 'dsh';
       // Running: an external Harness has a live process; a DSH session is loaded as an agent.
       const running = harness === 'dsh' ? !!this.ctx.agents.get(SessionId(id)) : this.runner.live.has(id);
-      return [id, { harness, delegated: !!delegated, running }] as const;
+      return [id, { harness, delegated: !!delegated, running, ...(binding ? { cwd: binding.cwd } : {}) }] as const;
     })));
   }
 
@@ -458,10 +459,20 @@ export class HarnessService extends TypertRemoteService {
     this.checks.delete(sessionId);
     const nativeDelegation = binding ? undefined : await this.bindings.readDelegated(sessionId);
     if (binding || nativeDelegation || !this.fresh(agent)) return this.view(binding, nativeDelegation?.locked || (!binding && !this.unstarted(agent)), agent.session.snapshotEvents());
-    // A fresh session starts on the Harness picked last time; failures fall back to native silently.
-    const remembered = (await this.bindings.readDefaults()).harness;
-    if (!remembered || remembered === 'dsh' || !agent.session.header.cwd) return this.view();
-    return this.bindings.serial(sessionId, async () => this.view(await this.bindings.read(sessionId) ?? await this.bind(agent, sessionId, remembered).catch(() => undefined)));
+    // Initialize only an untouched session; a manual native choice must also survive later state reads.
+    return this.bindings.serial(sessionId, async () => {
+      const current = await this.bindings.read(sessionId);
+      if (current || await this.bindings.isNative(sessionId) || !this.fresh(agent)) return this.view(current, !current && !this.unstarted(agent), agent.session.snapshotEvents());
+      const configured = this.settings().defaultHarness;
+      const preferred = configured === 'last' ? (await this.bindings.readDefaults()).harness : configured;
+      if (!preferred) return this.view();
+      if (preferred === 'dsh') {
+        if (configured !== 'last') await this.bindings.writeNativeSelection(sessionId);
+        return this.view();
+      }
+      if (!agent.session.header.cwd) return this.view();
+      return this.view(await this.bind(agent, sessionId, preferred).catch(() => undefined));
+    });
   }
 
   /**
@@ -888,7 +899,7 @@ export class HarnessService extends TypertRemoteService {
       // history goes along as a transcript, and native DSH reads the inherited events directly.
       const inherited = agent.session.inheritedEventCount ?? 0;
       let binding: Binding | undefined = current?.harness === request.harness ? current : undefined;
-      if (request.harness === 'dsh') await this.bindings.remove(request.sessionId);
+      if (request.harness === 'dsh') await this.bindings.writeNativeSelection(request.sessionId);
       else binding ??= await this.bind(agent, request.sessionId, request.harness, { ...(inherited ? { carry: { throughSeq: inherited } } : {}), ...(current?.linked ? { linked: current.linked } : {}), ...(current?.linkedPaths ? { linkedPaths: current.linkedPaths } : {}) });
       // ponytail: DSH 0.1.6 only exposes preset-event invalidation; use a skill-specific event when available.
       // Re-announce the unchanged preset; no preset selection or durable event is written.
