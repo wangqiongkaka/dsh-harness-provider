@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
@@ -22,6 +22,7 @@ import { isRemoteJsonValue } from '@deepseek-ai/dsh-typert-protocol';
 const turnUsage=(events,turn)=>deriveTurnTokenUsage(events.filter(e=>e.data?.turn===turn));
 import { DelegationBridge } from '../dist/delegation.js';
 import { DshOutput } from '../dist/dsh-output.js';
+import { HarnessService } from '../dist/dsh.js';
 
 function fakeAdapter(log,native) {
  const sessions=[];
@@ -45,6 +46,7 @@ function fakeAdapter(log,native) {
      assert.equal(command.type,'turn.start');active=command.turnId;(native.inputs??=[]).push(command.input);
      emit({type:'turn.started',turnId:active});
      const text=command.input.map(p=>p.text).join('|');
+     await native.onTurn?.();
      if(text==='tools'){
       // Two calls one after another, then two Codex runs in parallel.
       const cmd=(id,command)=>({type:'commandExecution',itemId:id,command,description:command});
@@ -639,4 +641,41 @@ test('current-title instructions stay trusted on every Harness create/resume and
    }
   }
  }finally{await ctx.fiber.dispose();await bridge.close();await rm(root,{recursive:true,force:true});}
+});
+
+test('当前轮切换目录不会被完成事件写回，下一轮从新目录恢复同一原生会话', {timeout:10000}, async()=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'dsh-harness-directory-runner-'))),ctx=new Context(),native={turns:0},opened=[];
+ const bindings=new Bindings(join(root,'bindings')),id=SessionId('directory-switch'),target=join(root,'worktree');
+ try {
+  await mkdir(target);
+  for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+  await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+  let cwd=root;
+  ctx.provide('workingDirectory',{get:()=>cwd,set:async(_agent,path)=>{cwd=path;return path;}});
+  const adapter=fakeAdapter(opened,native),runner=new DshRunner(ctx,bindings,{codex:adapter});
+  ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+  await ctx.plugin(Loop,{agents:[]});
+  await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
+  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const service=Object.create(HarnessService.prototype);
+  Object.assign(service,{bindings,runner,agent:async()=>agent});
+  native.onTurn=async()=>{
+   delete native.onTurn;
+   assert.equal((await bindings.read(id)).pending,'dsh:directory-switch:1');
+   await service.changeWorkingDirectory(id,{path:target});
+   assert.equal(opened.length,1,'切换目录不应中断当前原生轮次');
+  };
+  const prompt=async text=>{agent.followup(createUserMessage({content:[{type:'text',text}],source:{kind:'user'}}));await agent.whenIdle();};
+  await prompt('one');
+  assert.equal((await bindings.read(id)).cwd,target,'当前轮完成后仍保持新目录');
+  assert.equal((await bindings.read(id)).pending,undefined);
+  assert.equal(agent.session.header.cwd,root);
+  await prompt('two');
+  assert.equal(opened.length,2);
+  assert.equal(opened[1].kind,'resume');
+  assert.equal(opened[1].cwd,target);
+  assert.equal(opened[1].nativeRef.nativeSessionId,'native-fixed');
+  assert.deepEqual(agent.session.snapshotEvents().filter(event=>event.type==='turn/end').map(event=>event.data.reason.kind),['completed','completed']);
+  await adapter.close();
+ } finally {await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });

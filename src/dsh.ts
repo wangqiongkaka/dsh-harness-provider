@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, realpath, stat } from 'node:fs/promises';
 import { Context } from '@deepseek-ai/cordis';
 import { TypertRemoteService, RemoteError } from '@deepseek-ai/dsh-typert-protocol';
 import { SessionId } from '@deepseek-ai/dsh-session';
@@ -39,7 +39,8 @@ import { DshRunner, linkedDirectories, linkedWorkspaces, unwrap } from './dsh-ru
 import { QueuedTurns } from './queued-turns.js';
 import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, linkRequest, directoriesRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest, SETTINGS_ENTRY, updateSettingsRequest } from './remote.js';
-import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest, renameRequest } from './delegation.js';
+import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest, renameRequest, directoryRequest } from './delegation.js';
+import { workingDirectory } from './working-directory.js';
 import { createWorktree, mergeWorktree, removeWorktree, worktreeChanged } from './worktree.js';
 import { Config, defaultSettings, settingsOf, type SettingsSource } from './settings.js';
 
@@ -148,6 +149,30 @@ export function nativeSubagent(child: { id: string; parentId: string | null; lab
 }
 
 export class HarnessService extends TypertRemoteService {
+  async changeWorkingDirectory(source: string, input: unknown) {
+    const { path } = directoryRequest.parse(input);
+    const target = await realpath(path);
+    if (!(await stat(target)).isDirectory()) throw new Error('工作目录必须是已存在的目录');
+    const agent = await this.agent(source);
+    const directory = workingDirectory(agent);
+    if (!directory) throw new Error('当前 DSH 不支持切换会话工作目录');
+    return this.bindings.serial(source, async () => {
+      const binding = await this.bindings.read(source);
+      if (binding?.delegation?.discussion) throw new Error('只读讨论会话不能切换工作目录');
+      if (this.runner.live.get(source)?.session.hasBackgroundTasks?.()) throw new Error('当前会话有后台任务，请等待任务结束后再切换工作目录');
+      const previous = directory.get(agent.session);
+      const cwd = await directory.set(agent, target);
+      try {
+        if (binding) await this.bindings.write({ ...binding, cwd });
+      } catch (error) {
+        try { await directory.set(agent, previous); }
+        catch (restoreError) { throw new AggregateError([error, restoreError], '保存会话工作目录失败，且无法恢复原目录'); }
+        throw error;
+      }
+      return { cwd };
+    });
+  }
+
   async renameCurrentSession(source: string, input: unknown) {
     const { title } = renameRequest.parse(input);
     if (!await this.bindings.read(source)) throw new Error('当前会话没有 Harness 绑定，无法修改标题');
@@ -181,7 +206,7 @@ export class HarnessService extends TypertRemoteService {
     this.worktrees = resolve(root, 'worktrees');
     this.bindings = new Bindings(root);
     this.delegation = new DelegationBridge((source, method, input) => method === 'create' ? this.delegate(source, input) : method === 'discuss' ? this.discuss(source, input)
-      : method === 'rename' ? this.renameCurrentSession(source, input) : method === 'models' ? this.delegationModels(source) : this.readDelegation(source, input), () => settings().discussionTimeoutMinutes * 60_000);
+      : method === 'rename' ? this.renameCurrentSession(source, input) : method === 'directory' ? this.changeWorkingDirectory(source, input) : method === 'models' ? this.delegationModels(source) : this.readDelegation(source, input), () => settings().discussionTimeoutMinutes * 60_000);
     this.runner = new DshRunner(ctx, this.bindings, adapters, this.delegation, undefined, () => settings().idleCloseSeconds * 1000, () => settings().branchContextChars, (harness, status) => {
       const previous = this.accountStatuses.get(harness);
       this.accountStatuses.set(harness, status);
@@ -442,9 +467,11 @@ export class HarnessService extends TypertRemoteService {
       const delegated = await this.bindings.readDelegated(id).catch(() => undefined);
       const binding = delegated ?? await this.bindings.read(id).catch(() => undefined);
       const harness = binding?.harness ?? 'dsh';
+      const agent = this.ctx.agents.get(SessionId(id));
+      const cwd = binding && agent && !binding.delegation?.worktree ? workingDirectory(agent)?.get(agent.session) : undefined;
       // Running: an external Harness has a live process; a DSH session is loaded as an agent.
       const running = harness === 'dsh' ? !!this.ctx.agents.get(SessionId(id)) : this.runner.live.has(id);
-      return [id, { harness, delegated: !!delegated, running, ...(binding ? { cwd: binding.cwd } : {}) }] as const;
+      return [id, { harness, delegated: !!delegated, running, ...(binding ? { cwd: cwd ?? binding.cwd } : {}) }] as const;
     })));
   }
 
