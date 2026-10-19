@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { delayedFixture } from './delayed-fixture.mjs';
 const reference=resolve(process.env.DSH_REFERENCE_ROOT ?? '../../deepseek-harness');
+const dshCommand=process.env.DSH_COMMAND ?? 'dsh';
 const require=createRequire(import.meta.url);
 const {chromium,expect}=require('@playwright/test');
 const {startResponsesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-codex/tests/responses-fixture.ts')));
@@ -16,12 +17,14 @@ const codex=await startResponsesFixture([{kind:'complete',text:'Codex native fir
 const skillsProbe=process.env.DSH_SKILLS_PROBE === '1';
 const delegationProbe=process.env.DSH_DELEGATION_PROBE === '1';
 const subagentProbe=process.env.DSH_SUBAGENT_PROBE === '1';
+const titlesProbe=process.env.DSH_TITLES_PROBE === '1';
 const claude=await startMessagesFixture(subagentProbe
  ? {kind:'tool-use',toolName:'Agent',input:{description:'Find fixture files',prompt:'List the fixture files',subagent_type:'general-purpose'},finalText:'Claude native reply'}
  : {kind:'complete',text:'Claude native reply'});
 // DSH's own subagent: the parent calls the subagent tool, the child replies, then the parent finishes.
 // DeepSeek's default Messages protocol posts to {DEEPSEEK_BASE_URL}/v1/messages, which the Messages fixture serves.
-const deepseek=subagentProbe ? await startMessagesFixture({kind:'tool-use',toolName:'subagent',
+const titleBehavior={kind:'complete',text:'首轮自动标题'};
+const deepseek=titlesProbe ? await startMessagesFixture(titleBehavior) : subagentProbe ? await startMessagesFixture({kind:'tool-use',toolName:'subagent',
  input:{description:'Scan workspace natively',prompt:'List the workspace files',run_in_background:false},finalText:'DSH child reply'}) : undefined;
 // Both fixtures answer with one fixed message id; the proxies make ids unique so message-addressed forks (rollback) are exact.
 const codexProxy=await delayedFixture(codex.baseUrl),claudeProxy=await delayedFixture(claude.baseUrl);
@@ -51,7 +54,7 @@ enabled = false
 await writeFile(join(claudeHome,'settings.json'),JSON.stringify({model:'claude-sonnet-4-6',permissions:{defaultMode:'default'}}));
 const env={PATH:process.env.PATH,HOME:root,DSH_HOME:dshHome,DSH_TELEMETRY_DISABLED:'1',CODEX_HOME:codexHome,
  ...(process.env.COREPACK_HOME ? {COREPACK_HOME:process.env.COREPACK_HOME} : {}),
- CLAUDE_COMMAND_PATH:process.env.CLAUDE_COMMAND ?? '/opt/homebrew/bin/claude',CLAUDE_CONFIG_DIR:claudeHome,
+ ...(process.env.CLAUDE_COMMAND ? {CLAUDE_COMMAND_PATH:process.env.CLAUDE_COMMAND} : {}),CLAUDE_CONFIG_DIR:claudeHome,
  OPENAI_API_KEY:'fixture-only',ANTHROPIC_API_KEY:'fixture-only',ANTHROPIC_BASE_URL:claudeProxy.baseUrl,
  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:'1',
  DISABLE_TELEMETRY:'1',DISABLE_ERROR_REPORTING:'1',NO_PROXY:'127.0.0.1,localhost',
@@ -60,11 +63,13 @@ const pkg=JSON.parse(await readFile('package.json','utf8'));
 const tar=resolve(process.env.DSH_PLUGIN_TAR ?? `${pkg.name}-${pkg.version}.tgz`);
 const hash=createHash('sha256').update(await readFile(tar)).digest('hex').slice(0,12);
 const installedTar=join(root,`plugin-${hash}.tgz`);await copyFile(tar,installedTar);
-execFileSync('dsh',['plugin','--profile','web','add','--offline',installedTar],{env,stdio:'pipe'});
+execFileSync(dshCommand,['plugin','--profile','web','add','--offline',installedTar],{env,stdio:'pipe'});
+const titlesPatch=join(root,'titles.yml');
+if(titlesProbe) await copyFile(join(reference,'packages/experimental/session-titles-bundle/cordis.patch.yml'),titlesPatch);
 let child,browser,page,logs='';
 async function boot(){
  const ready=Promise.withResolvers();
- child=spawn('dsh',['--profile','web','--no-open','--port','0'],{env,cwd:workspace,stdio:['ignore','pipe','pipe']});
+ child=spawn(dshCommand,['--profile','web',...(titlesProbe ? ['--patch',titlesPatch] : []),'--no-open','--port','0'],{env,cwd:workspace,stdio:['ignore','pipe','pipe']});
  child.stdout.on('data',chunk=>{const text=chunk.toString();const match=text.match(/dsh web: (http:\/\/[^\s]+)/);if(match)ready.resolve(match[1]);});
  child.stderr.on('data',chunk=>{logs=(logs+chunk.toString()).slice(-10000);});
  child.once('error',ready.reject);child.once('exit',()=>ready.reject(new Error('DSH exited before ready')));
@@ -110,7 +115,25 @@ try{
  page.on('pageerror',error=>{logs+='\nBrowser: '+error.message;});
  await page.goto(url);await dismiss();
  const created=await rpc('workspace/create',{path:workspace});
- if(skillsProbe){
+ if(titlesProbe){
+  await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:'titles-probe'});
+  await page.reload();await dismiss();
+  for(const [label,harness,firstReply,secondReply] of [['Codex','codex','Codex native first','Codex native second'],['Claude Code','claude-code','Claude native reply','Claude native reply']]){
+   if(harness==='claude-code'){await page.getByRole('button').filter({hasText:'New Session'}).first().click();await dismiss();}
+   const selector=page.getByLabel('Select Harness',{exact:true});
+   await selector.click();await page.getByRole('menuitemradio',{name:label,exact:true}).click();
+   titleBehavior.text=`${label} 首轮标题`;
+   await send(`${label} 第一条标题验证`,firstReply);
+   const row=page.locator(`[role="treeitem"][data-hp-harness="${harness}"]`).first();
+   await expect(row).toContainText(titleBehavior.text,{timeout:15000});
+   titleBehavior.text=`${label} 随对话更新的标题`;
+   await send(`${label} 第二条标题验证`,secondReply);
+   await expect(row).toContainText(titleBehavior.text,{timeout:15000});
+   await page.screenshot({path:resolve(`.cache/${harness}-session-titles.png`)});
+   console.log(`通过：${label} 连续两轮自动更新侧栏标题`);
+  }
+  assert.equal(deepseek.requests.length,4,'每条用户消息只生成一次标题');
+ }else if(skillsProbe){
   await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:'skills-probe'});
   await page.reload();await dismiss();
   const editor=page.locator('[contenteditable="true"][role="textbox"]');

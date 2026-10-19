@@ -21,7 +21,7 @@ import { HarnessOutputChannel } from '../dist/contracts.js';
 
 test('discussion approvals never ask the user or grant persistent permissions', async () => {
  const commands=[];
- const ctx={effect(){},userQuestions:{ask(){throw new Error('unexpected UI');}}};
+ const ctx={effect(){},inject(){},userQuestions:{ask(){throw new Error('unexpected UI');}}};
  const runner=new DshRunner(ctx,{async readDelegated(){return {delegation:{discussion:true}};}},{});
  const session={async execute(command){commands.push(command);return {ok:true,value:{accepted:true}};}};
  const interaction={type:'approval',interactionId:'approval',turnId:'turn',title:'Write / network / exit plan',actions:[

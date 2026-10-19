@@ -2,6 +2,14 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## 外部 Harness 自动标题（2026-10-19）
+
+- Codex / Claude Code 的用户消息原本会被标题服务记录为待处理任务，但外部对话不经过 DSH 的原生 LLM 请求，因而不会启动标题生成。`DshRunner` 现在在这些用户消息写入后消费标题服务已排好的任务；沿用其首条 / 全部提示频率、手动标题锁定、插件开关、旧请求取消和结果验收，不调用会解除锁定的 `refresh()`。
+- 标题模型按用户决定沿用 DSH：标题插件显式配置的 provider/model 优先；否则提供 `agentDefaultModel.currentSelection()` 的当前默认路由。标题请求独立于原生会话，不发送额外的 Harness 提示，不写入虚构的 `request/header`，失败或缺少模型凭据时保留原标题且不阻塞对话。
+- 兼容入口集中在 `src/dsh-runner.ts`：当前宿主没有公开的自动启动接口，读取 `sessionTitle.work` 并调用 `startPending`（依据 `node_modules/@deepseek-ai/dsh-session-title/lib/index.js`）。启动前检查 Map / 函数能力，宿主接口不匹配时记录警告并保留兜底标题；未修改宿主文件。宿主将来提供公共接口时应替换此入口。
+- 验证：6 项新增行为测试均在改动前的构建产物上失败；修复后，包含原生会话对照的 7 项新测试通过。最终 `npm run check` 的类型检查、构建和全部 180 项测试通过，覆盖两种 Harness、首条 / 全部提示、显式 / 默认标题路由、手动标题锁定、插件关闭、失败不阻塞及旧结果不能覆盖新消息或手动标题。
+- 真实网页：使用桌面版附带的 DSH 0.2.1-rc.2 CLI，在隔离 Profile 中运行 `DSH_TITLES_PROBE=1` 网页探针；真实 Codex / Claude Code CLI 各连续对话两轮，顶部与侧栏更新到第二轮标题，4 条用户消息恰好生成 4 次标题，截图已核对。模型全部使用本地响应夹具，未调用真实模型端点；当前使用中的 Profile 未重载。探针支持 `DSH_COMMAND` 指定匹配的宿主 CLI，未指定 `CLAUDE_COMMAND` 时按 PATH 查找 Claude Code。
+
 ## 会话关联项目（2026-10-06）
 
 - 行为：Codex / Claude Code 会话在加号菜单“添加”分组的“关联项目”（`/link`）中勾选宿主已注册的其他项目；Harness 在本会话中直接访问这些目录。按会话保存在绑定的 `linked`（工作区 id），每次打开会话时按宿主当前的项目列表解析为路径，已移除的项目与会话自身目录自动排除。

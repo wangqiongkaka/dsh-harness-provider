@@ -232,7 +232,7 @@ test('Harness questions and edits land on DSH native ask_user_question and edit 
 
 test('Harness interactions send lossless JSON through DSH user questions',async()=>{
  const asked=[],responded=[];
- const ctx={effect(){},userQuestions:{async ask(request){
+ const ctx={effect(){},inject(){},userQuestions:{async ask(request){
   asked.push(request);
   assert.equal(isRemoteJsonValue({questions:request.questions}),true,'the gateway must accept the forwarded question');
   return {answers:[{id:request.questions[0].id,selected:[request.questions[0].options?.[0]?.label??'ok']}]};

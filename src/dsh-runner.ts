@@ -6,6 +6,8 @@ import { SessionId } from '@deepseek-ai/dsh-session';
 import { createUserMessage, type UserMessage, type TokenUsage, type ToolCallId } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-workspace';
+import type {} from '@deepseek-ai/dsh-agent-default-model';
+import type {} from '@deepseek-ai/dsh-session-title';
 import type { HarnessAccountSnapshot, HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostItemOf, HostUsage } from './contracts.js';
 import { hostTurnIdSchema } from './contracts.js';
 import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
@@ -104,6 +106,31 @@ export class DshRunner {
       schedule();
       return () => clearTimeout(timer);
     }, 'harness: idle session reclamation');
+    ctx.inject(['sessionTitle'], scope => {
+      const titles = scope.sessionTitle;
+      // DSH has no public automatic-start API: consume its scheduled work, keeping cadence, pins and cancellation there.
+      const work: unknown = Reflect.get(titles, 'work'), startPending: unknown = Reflect.get(titles, 'startPending');
+      if (!(work instanceof Map) || typeof startPending !== 'function') {
+        scope.logger.warn('当前 DSH 标题服务不兼容，Harness 会话仅保留兜底标题');
+        return;
+      }
+      let disposed = false;
+      scope.effect(() => () => { disposed = true; }, 'harness: automatic titles');
+      scope.on('session/event', (session, event) => {
+        if (event.type !== 'user/message' || event.data.source.kind !== 'user' || !this.live.has(session.id)) return;
+        // Wait for all title-service listeners, and coalesce messages appended together into their latest revision.
+        queueMicrotask(() => {
+          if (disposed) return;
+          const state = work.get(session);
+          if (!state?.pending) return;
+          try {
+            const selection = scope.get('agentDefaultModel')?.currentSelection();
+            startPending.call(titles, session, state, state.pending,
+              selection ? { provider: selection.provider, model: selection.model } : undefined);
+          } catch (error) { scope.logger.warn(`会话 ${session.id} 自动标题启动失败：${String(error)}`); }
+        });
+      });
+    });
   }
 
   /** A client shows this session; its process stays open while it is on screen and for the idle window after. */

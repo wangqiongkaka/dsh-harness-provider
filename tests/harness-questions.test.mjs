@@ -60,7 +60,7 @@ test('Harness question survives disconnect and projection refresh with its draft
   const first = new AbortController(), resumed = new AbortController();
   const delivered = Promise.withResolvers(), disconnected = Promise.withResolvers();
   const controller = new AbortController();
-  const ctx = { effect() {}, userQuestions: { async ask(request) {
+  const ctx = { effect() {}, inject() {}, userQuestions: { async ask(request) {
     requests.push(request); delivered.resolve();
     const initial = answerQuestion(client, client, { ...request, signal: AbortSignal.any([first.signal, request.signal]) }, () => assert.fail('unexpected delegation'), cards);
     await assert.rejects(initial, { code: 'ASK_ABORTED' });
