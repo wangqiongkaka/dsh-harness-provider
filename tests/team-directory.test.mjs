@@ -29,18 +29,18 @@ const entries = [];
 window.directoryRequests = [];
 const scope = {
   effect: fn => fn(),
-  slots: { inject: (name, fn) => fn(), register: (definition, component) => { if (definition.name === 'conversation.session.header.actions') entries.push({ definition, component }); return () => {}; } },
+  slots: { inject: (name, fn) => fn(), register: (definition, component) => { if (definition.name === 'conversation.session.header.actions') entries.push({ definition, component, injected: definition.inject?.() }); return () => {}; } },
   remote: { harness: { harnesses: async ({sessionIds}) => { window.directoryRequests.push(sessionIds); return window.lookup(); } } },
 };
 const applied = apply({ remote: { $mount: async () => () => {} }, locale: { register: () => () => {} },
   effect: () => {}, inject: (keys, fn) => { if (keys.length === 2 && keys.includes('slots') && keys.includes('remote.harness')) fn(scope); } });
 const root = createRoot(document.querySelector('#root'));
 const team = { members: [{ id: 'session', name: 'lead', phase: 'active' }, { id: 'worker', name: 'worker', phase: 'active' }], tasks: [] };
-window.renderTeam = (id, cwd, compact = false) => {
-  const props = { sessionId: id, useSessions: pick => pick({ byId: { [id]: {cwd} }, projectionsBySession: { session: { values: { agentTeam: compact ? {...team, members: team.members.filter(member => member.id === id)} : team } } } }),
+window.renderTeam = (id, cwd, compact = false, workingDirectory) => {
+  const props = { sessionId: id, useSessions: pick => pick({ byId: { [id]: {cwd, projectionValues: {workingDirectory}} }, projectionsBySession: { session: { values: { agentTeam: compact ? {...team, members: team.members.filter(member => member.id === id)} : team } } } }),
     useSession: pick => pick({ subagent: id === 'worker' ? { address: { parentSessionId: 'session' } } : null, openState: 'open' }),
     useSessionStatus: pick => pick(new Map()), openTeammate() {}, t: key => ({ trigger: '智能体团队', roster: '成员', current: '当前会话', empty: '暂无共享任务，可以通过对话创建', 'memberStatus.inactive': '未运行' }[key] ?? key) };
-  root.render(<div className="host_headerActions"><TeamAction {...props} />{entries.map(({definition, component: Component}) => <Component key={definition.id} {...props} {...definition.inject?.()} t={key => zh[key] ?? key} />)}</div>);
+  root.render(<div className="host_headerActions"><TeamAction {...props} />{entries.map(({definition, component: Component, injected}) => <Component key={definition.id} {...props} {...injected} t={key => zh[key] ?? key} />)}</div>);
 };
 window.unmountTeam = () => root.unmount();
 window.lookup = async () => ({ ok: true, value: {} });
@@ -119,6 +119,23 @@ void applied.then(() => window.renderTeam('session', '/Users/me/项目/很长的
     await expect(directory).toHaveText('工作目录：/work/new-session');
     await page.evaluate(() => window.finishLookup({ok: true, value: {worker: {cwd: '/work/stale'}}}));
     await expect(directory).toHaveText('工作目录：/work/new-session');
+    await page.evaluate(() => {
+      window.lookup = async () => ({ok: true, value: {session: {cwd: window.boundDirectory}}});
+      window.boundDirectory = '/work/original';
+      window.renderTeam('session', '/work/original');
+    });
+    await expect(directory).toHaveText('工作目录：/work/original');
+    await page.evaluate(() => {
+      window.boundDirectory = '/work/review-worktree';
+      window.renderTeam('session', '/work/original', false, '/work/review-worktree');
+    });
+    await expect(directory).toHaveText('工作目录：/work/review-worktree');
+    await page.locator('[data-team-panel]').screenshot({path: resolve('.cache/team-directory-switched.png')});
+    await page.evaluate(() => {
+      window.boundDirectory = '/work/original';
+      window.renderTeam('session', '/work/original', false, '/work/original');
+    });
+    await expect(directory).toHaveText('工作目录：/work/original');
     await page.evaluate(() => window.unmountTeam());
     await expect(directory).toHaveCount(0);
   } finally { await browser.close(); }

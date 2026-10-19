@@ -17,6 +17,7 @@ import { DshOutput } from './dsh-output.js';
 import { modelValue } from './acp-adapter.js';
 import { delegationInstructions, type DelegationBridge } from './delegation.js';
 import { branchTranscript } from './branch-context.js';
+import { workingDirectory } from './working-directory.js';
 
 export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
@@ -33,7 +34,7 @@ export function linkedDirectories(ctx: Context, binding: Pick<Binding, 'cwd' | '
   // A directory deleted since it was picked is left out: the agent would be handed a workspace root that does not exist.
   return [...projects, ...(binding.linkedPaths ?? []).filter(path => !taken.has(path) && existsSync(path)).map(path => ({ title: basename(path), path }))];
 }
-type Live = { session: HarnessSession; revision: number; usage: HostUsage | null; modelLabel?: string; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; held?: HostItemOf<'notice'>[]; turnId?: import('./contracts.js').HostTurnId; continuation?: boolean; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
+type Live = { session: HarnessSession; cwd: string; revision: number; usage: HostUsage | null; modelLabel?: string; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; held?: HostItemOf<'notice'>[]; turnId?: import('./contracts.js').HostTurnId; continuation?: boolean; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
 /**
  * How long an external Harness session may sit idle — no turn, and off screen — before its process is closed; the next
  * turn resumes it from its binding. Clients report a shown session every 15 seconds, well inside this window.
@@ -185,7 +186,9 @@ export class DshRunner {
     const worktree = binding.delegation?.worktree;
     if (worktree?.removed) throw new Error('该委派会话的独立 worktree 已合并或删除，无法继续对话；如需继续，请在来源会话重新委派。');
     // A worktree delegation keeps its DSH session in the source workspace while the Harness works in the checkout.
-    if (binding.cwd !== agent.session.header.cwd && !worktree) throw new Error('Harness workspace identity mismatch');
+    const directory = workingDirectory(agent);
+    if (directory && !worktree) binding.cwd = directory.get(agent.session);
+    if (binding.cwd !== agent.session.header.cwd && !worktree && !directory) throw new Error('Harness workspace identity mismatch');
     if (binding.pending) throw new Error('上次 Harness 请求的结果尚未确认；为避免重复执行，本会话暂停发送。');
     const continuation = messages.length > 0 && messages.every(isContinuation);
     const input = await harnessInput(this.ctx, messages.filter(message => !isContinuation(message)), signal);
@@ -196,6 +199,12 @@ export class DshRunner {
     let live = this.live.get(agent.id);
     // A session the adapter closed on its own (a wedged native turn) is reopened like a reclaimed one.
     if (live?.ended) { this.live.delete(agent.id); live = undefined; }
+    if (live && live.cwd !== binding.cwd) {
+      if (live.session.hasBackgroundTasks?.()) throw new Error('当前会话有后台任务，请等待任务结束后再恢复新工作目录');
+      await live.session.close();
+      this.live.delete(agent.id);
+      live = undefined;
+    }
     if (!live && continuation) {
       // The process that was writing is gone, and so is what it had not shown yet; nothing is opened to show nothing.
       agent.session.append('step/start', { turn, step });
@@ -221,7 +230,7 @@ export class DshRunner {
       const session = unwrap(await this.adapters[binding.harness].open(binding.nativeRef
         ? { kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef, ...hints }
         : { kind: 'create', cwd: binding.cwd, ...hints }));
-      live = { session, revision: 0, usage: session.initialUsage, queue: [], ended: false, wake: () => {}, activeAt: Date.now(),
+      live = { session, cwd: binding.cwd, revision: 0, usage: session.initialUsage, queue: [], ended: false, wake: () => {}, activeAt: Date.now(),
         ...(session.initialState.resolvedModelLabel ? { modelLabel: session.initialState.resolvedModelLabel } : {}) };
       const opened = live;
       pump(opened, event => {
@@ -282,7 +291,7 @@ export class DshRunner {
       await this.ctx.sessions.flush(agent.session);
       signal.throwIfAborted();
       // Nothing is sent for a continuation, so no result can be left unconfirmed.
-      if (!continuation) { binding.pending = turnId; await this.bindings.write(binding); }
+      if (!continuation) { binding.pending = turnId; await this.saveBinding(binding); }
       signal.throwIfAborted();
       submitted = true;
       current.turnId = turnId; current.continuation = continuation; current.steerError = undefined; current.steerMessages = [];
@@ -313,7 +322,7 @@ export class DshRunner {
         switch (event.type) {
           case 'interaction.closed': this.secrets.cancel(agent.id, event.interactionId); break;
           case 'turn.started':
-            if (event.nativeTurnRef) { binding.pendingNative = event.nativeTurnRef.nativeTurnKey; await this.bindings.write(binding); }
+            if (event.nativeTurnRef) { binding.pendingNative = event.nativeTurnRef.nativeTurnKey; await this.saveBinding(binding); }
             break;
           case 'item.started': output.start(event.item); break;
           case 'item.updated': output.update(event.itemId, event.update); break;
@@ -328,7 +337,7 @@ export class DshRunner {
             if (current.usage) binding.usage = Object.fromEntries(USAGE_KEYS.flatMap(key => current.usage![key] !== undefined ? [[key, current.usage![key]]] : []));
             if (event.nativeTurnRef) binding.turns = [...(binding.turns ?? []).filter(entry => entry.turn !== turn), { turn, key: event.nativeTurnRef.nativeTurnKey }];
             if (!uncertain) { delete binding.pending; delete binding.pendingNative; }
-            await this.bindings.write(binding);
+            await this.saveBinding(binding);
             completed = true;
             if (event.outcome.status === 'failed') throw new Error(event.outcome.error.message);
             if (event.outcome.status === 'cancelled' && !signal.aborted && !interactionError) throw new Error('Harness cancelled the turn');
@@ -342,7 +351,7 @@ export class DshRunner {
     } catch (error) {
       // A projection/storage/transport failure must not leave native tools running.
       if (binding.pending && !submitted) {
-        delete binding.pending; await this.bindings.write(binding);
+        delete binding.pending; await this.saveBinding(binding);
       } else if (binding.pending || discussion || continuation) {
         cancel();
         await cancelWork;
@@ -367,6 +376,17 @@ export class DshRunner {
     await agentEvents(this.ctx, agent).serial('agent/turn-stopping', { turn, signal });
   }
 
+  private async saveBinding(binding: Binding): Promise<void> {
+    await this.bindings.serial(binding.sessionId, async () => {
+      const stored = await this.bindings.read(binding.sessionId);
+      const agent = this.ctx.agents?.get(SessionId(binding.sessionId));
+      const directory = agent && workingDirectory(agent);
+      // A directory switch may commit while this native turn still holds its old binding.
+      binding.cwd = directory && agent && !binding.delegation?.worktree ? directory.get(agent.session) : stored?.cwd ?? binding.cwd;
+      await this.bindings.write(binding);
+    });
+  }
+
   private async saveState(binding: Binding, state: HarnessSessionState): Promise<void> {
     if (binding.delegation?.discussion && state.effectivePermissionModeId !== undefined && state.effectivePermissionModeId !== DISCUSSION_PERMISSION[binding.harness]) {
       throw new Error('讨论会话权限发生变化，已停止');
@@ -380,7 +400,7 @@ export class DshRunner {
     if (state.effectiveThinkingOptionId) binding.thinking = state.effectiveThinkingOptionId;
     if (state.effectivePermissionModeId) binding.permission = state.effectivePermissionModeId;
     if (state.configValues) binding.configs = state.configValues;
-    await this.bindings.write(binding);
+    await this.saveBinding(binding);
   }
 
   private async answer(agent: Agent, interaction: HostInteraction, signal: AbortSignal, session: HarnessSession, output: DshOutput): Promise<void> {

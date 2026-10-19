@@ -125,7 +125,7 @@ test('linking projects validates against the registered ones, persists, survives
 test('thinking selection validates against the catalog, persists, and quota reads the account snapshot once per minute',async()=>{
  const root=await mkdtemp(join(tmpdir(),'dsh-harness-service-'));
  const ctx=new Context();
- const agent={id:'bound',status:'idle',inbox:{nextTurn:[],nextStep:[]},session:{header:{cwd:root},snapshotEvents:()=>[],requestHeader:()=>undefined}};
+ const agent={id:'bound',ctx,status:'idle',inbox:{nextTurn:[],nextStep:[]},session:{header:{cwd:root},snapshotEvents:()=>[],requestHeader:()=>undefined}};
  const fresh={...agent,id:'fresh',session:{...agent.session}};
  const started={...agent,id:'started',session:{...agent.session,snapshotEvents:()=>[{type:'user/message'}]}};
  class NativeCommands extends Service {

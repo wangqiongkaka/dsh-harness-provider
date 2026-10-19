@@ -1744,7 +1744,10 @@ function TeamDirectory({ sessionId, useSessions, loadDirectory, t }: Pick<PropsR
   const anchor = useRef<HTMLSpanElement>(null);
   const [target, setTarget] = useState<Element | null>(null);
   const [resolved, setResolved] = useState<{ id: string; target: Element; cwd?: string }>();
-  const summaryCwd = useSessions(state => state.byId[sessionId]?.cwd);
+  const summaryCwd = useSessions(state => {
+    const summary = state.byId[sessionId], values = summary?.projectionValues;
+    return values && 'workingDirectory' in values && typeof values.workingDirectory === 'string' ? values.workingDirectory : summary?.cwd;
+  });
   useEffect(() => {
     // shortcut: the host has no member-row slot; switch to that slot if one becomes available.
     const locate = () => setTarget(anchor.current?.closest('[class*="_headerActions"]')?.querySelector('[data-team-action] button[aria-expanded="true"]')
@@ -1760,7 +1763,7 @@ function TeamDirectory({ sessionId, useSessions, loadDirectory, t }: Pick<PropsR
     setResolved(undefined);
     void loadDirectory(sessionId).then(cwd => { if (active) setResolved({ id: sessionId, target, cwd }); }, () => {});
     return () => { active = false; };
-  }, [sessionId, target, loadDirectory]);
+  }, [sessionId, target, loadDirectory, summaryCwd]);
   const cwd = (resolved?.id === sessionId && resolved.target === target ? resolved.cwd : undefined) ?? summaryCwd;
   return <><span ref={anchor} hidden />{target && createPortal(<span data-hp-team-directory style={{ display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', alignItems: 'start', columnGap: 4,
     marginTop: 4, fontSize: 11, lineHeight: '16px', textAlign: 'left', color: 'var(--dsw-alias-label-tertiary)', userSelect: 'text' }}>
