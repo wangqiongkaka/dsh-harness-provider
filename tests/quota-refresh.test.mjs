@@ -15,7 +15,7 @@ async function clientBundle() {
  const nodePaths = [dirname(dirname(require.resolve('react/package.json'))), dirname(dirname(require.resolve('react-dom/package.json')))];
  const source = await readFile('src/client.tsx', 'utf8');
  const bundle = await build({
-  stdin: { contents: `${source}\nexport { createRoot } from 'react-dom/client';\nexport { createElement, useSyncExternalStore } from 'react';`, resolveDir: resolve('src'), loader: 'tsx' },
+  stdin: { contents: `${source}\nexport { QuotaChip, styles, zh };\nexport { createRoot } from 'react-dom/client';\nexport { createElement, useSyncExternalStore } from 'react';`, resolveDir: resolve('src'), loader: 'tsx' },
   bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'HarnessProvider', jsx: 'automatic', nodePaths, logLevel: 'warning', external: ['@deepseek-ai/dsh-client-ui-primitives'],
  });
  return bundle.outputFiles[0].text;
@@ -161,5 +161,29 @@ test('a turn starting keeps the context reading on screen while it is re-read', 
   await page.waitForFunction(() => window.__context.seat.calls === 2, undefined, { timeout: 3_000 });
   await page.waitForTimeout(100);
   assert.equal(await ring.count(), 1);
+ } finally { await browser.close(); }
+});
+
+test('the quota panel footer stays on one line for an external Harness plan', async () => {
+ const script = await clientBundle();
+ const browser = await chromium.launch({ headless: true });
+ try {
+  const page = await browser.newPage();
+  await page.setContent('<div id="root"></div>');
+  await page.addScriptTag({ content: script });
+  await page.evaluate(() => {
+   const { createElement, createRoot, QuotaChip, styles, zh } = window.HarnessProvider;
+   const style = document.createElement('style'); style.textContent = styles; document.head.append(style);
+   const t = (key, params = {}) => zh[key].replace(/\{(\w+)\}/g, (_, name) => params[name]);
+   const quota = { kind: 'windows', source: 'claude-code', plan: 'max', windows: [{ id: 'five_hour', label: '5 小时', usedPercent: 7, resetsAt: null }] };
+   createRoot(document.getElementById('root')).render(createElement(QuotaChip, { quota, t }));
+  });
+  await page.locator('.hp-chip').click();
+  const foot = page.locator('.hp-foot');
+  const box = await foot.evaluate(element => ({ height: element.clientHeight - parseFloat(getComputedStyle(element).paddingTop) - parseFloat(getComputedStyle(element).paddingBottom), line: parseFloat(getComputedStyle(element).lineHeight),
+   overflow: element.scrollWidth > element.clientWidth, text: element.textContent }));
+  assert.ok(box.height <= box.line, `footer wraps: ${JSON.stringify(box)}`);
+  assert.ok(!box.overflow, `footer is cut off: ${JSON.stringify(box)}`);
+  assert.match(box.text, /claude-code · max/u);
  } finally { await browser.close(); }
 });

@@ -74,8 +74,8 @@ const zh = {
   'mode.agent-full-access': '完全权限', 'mode.agent': '自动审批', 'mode.read-only': '逐项审批',
   contextAria: '上下文', contextUsed: '上下文已用', contextWindow: '模型窗口', sessionTotal: '本会话累计',
   quotaAria: '额度', quotaUsed: '已用', quotaLeft: '剩余', quotaReset: '{time} 重置', balance: '余额', balanceTotal: '账户余额',
-  balanceTopped: '充值余额', balanceGranted: '赠送余额', quotaSource: '额度由 {source} 提供 · {sync}',
-  'sync.poll': '每 60 秒同步', 'sync.turn': '对话一轮后同步',
+  balanceTopped: '充值余额', balanceGranted: '赠送余额', quotaSource: '{source} · {sync}',
+  'sync.poll': '每 60 秒同步', 'sync.turn': '每轮对话后同步',
   'window.five_hour': '5 小时', 'window.seven_day': '本周', 'window.weekly': '本周', 'window.monthly': '本月', 'window.unknown': '额度',
   'window.5-hour window': '5 小时', 'window.7-day window': '本周', 'window.Opus · 7-day': 'Opus 本周', 'window.Sonnet · 7-day': 'Sonnet 本周',
   'window.OAuth apps · 7-day': 'OAuth 应用本周',
@@ -137,8 +137,8 @@ const en: Record<keyof typeof zh,string> = {
   'mode.agent-full-access':'Full access', 'mode.agent':'Approve for me', 'mode.read-only':'Ask for approval',
   contextAria:'Context', contextUsed:'Context used', contextWindow:'Model window', sessionTotal:'Session total',
   quotaAria:'Quota', quotaUsed:'Used', quotaLeft:'Left', quotaReset:'Resets {time}', balance:'Balance', balanceTotal:'Account balance',
-  balanceTopped:'Topped up', balanceGranted:'Granted', quotaSource:'Quota from {source} · {sync}',
-  'sync.poll':'refreshed every 60s', 'sync.turn':'refreshed after each turn',
+  balanceTopped:'Topped up', balanceGranted:'Granted', quotaSource:'{source} · {sync}',
+  'sync.poll':'synced every 60s', 'sync.turn':'synced per turn',
   'window.five_hour':'5-hour', 'window.seven_day':'Weekly', 'window.weekly':'Weekly', 'window.monthly':'Monthly', 'window.unknown':'Quota',
   'window.5-hour window':'5-hour', 'window.7-day window':'Weekly', 'window.Opus · 7-day':'Opus weekly', 'window.Sonnet · 7-day':'Sonnet weekly',
   'window.OAuth apps · 7-day':'OAuth apps weekly',
@@ -900,15 +900,17 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
       </div>;
     });
   }
+  // External Harness quota is served stale-while-revalidate (a probe spawns a CLI process): it follows turns, not the poll.
+  // One line in the panel; a longer plan name ends in an ellipsis, with the whole text on hover.
+  const foot = t('quotaSource', { source: quota.kind === 'windows' && quota.plan ? `${quota.source} · ${quota.plan}` : quota.source,
+    sync: quota.source === 'codex' || quota.source === 'claude-code' ? t('sync.turn') : t('sync.poll') });
   return <div ref={root} className="hp-anchor">
     <button type="button" className={`hp-chip${level}`} aria-label={t('quotaAria')} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(v => !v)}>
       {trigger}<Chevron open={open} />
     </button>
     {open && <div ref={popover} className="hp-panel hp-panel-left" role="dialog" aria-label={t('quotaAria')}>
       {panel}
-      {/* External Harness quota is served stale-while-revalidate (a probe spawns a CLI process): it follows turns, not the poll. */}
-      <div className="hp-foot">{t('quotaSource', { source: quota.kind === 'windows' && quota.plan ? `${quota.source} · ${quota.plan}` : quota.source,
-        sync: quota.source === 'codex' || quota.source === 'claude-code' ? t('sync.turn') : t('sync.poll') })}</div>
+      <div className="hp-foot" title={foot}>{foot}</div>
     </div>}
   </div>;
 }
@@ -1547,7 +1549,7 @@ ${nativeContextColors}
 .hp-row dt{color:var(--dsw-alias-label-secondary)}
 .hp-row dd{margin:0;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
 .hp-section{margin-top:12px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}
-.hp-foot{margin-top:10px;padding-top:8px;border-top:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-caption)}
+.hp-foot{margin-top:10px;padding-top:8px;border-top:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-caption);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hp-guide{display:flex;gap:14px;align-items:center;box-sizing:border-box;width:380px;max-width:100%;min-height:56px;padding:14px 20px;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:24px;cursor:pointer}
 .hp-guide:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .hp-guide-icon{display:flex;flex:none;align-items:center;justify-content:center;width:26px;height:26px;color:var(--dsw-alias-label-tertiary)}
