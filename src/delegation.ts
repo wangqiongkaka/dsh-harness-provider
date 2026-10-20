@@ -98,7 +98,6 @@ export function delegationInstructions(): string {
   // Leading blank line: the agent joins prompt blocks verbatim, so this stays apart from the user's last line.
   return `\n\n[DSH 会话能力，由宿主提供]
 仅当用户明确要求修改当前 DSH 会话标题时，根据上下文选择简洁标题，调用 ${command} rename '{"title":"简洁标题"}'。只修改当前 DSH 标题，不修改原生会话标题；参数只能有 title，不要传 sessionId。等待返回接受的 title 和 seq 后才能声称成功；失败时如实告知，不要声称已改名。
-用户要求在新建或已有 Worktree 中工作时，创建成功后、开始在该目录工作前，调用 ${command} directory '{"path":"Worktree 的绝对路径"}'，把当前会话切换到该目录；返回主目录也调用此入口。仅为单条命令指定 workdir、执行 cd 或创建 Worktree 不会切换会话目录。等待返回 cwd 后核对成功，本轮后续命令必须显式设置 workdir/cwd 为返回目录，文件操作使用绝对路径；下一轮从新目录恢复同一原生会话。仅临时读取其他目录、且未切换工作位置时不调用此入口。有后台任务时切换会被拒绝，不要终止任务来强行切换；失败时保留原目录并明确报告。参数只能有 path，不要传 sessionId。
 只有用户可以通过界面中的委派指令创建独立会话；不要自行创建或建议调用创建入口。
 仅当用户在当前轮明确使用 /discuss 开启讨论模式时，调用 ${command} discuss '{"assignments":[{"harness":"codex","role":"角色","task":"分工"}]}'。根据任务并发性自行选择 1–4 个 Codex 或 Claude Code 参与者（harness 为 codex 或 claude-code，DSH 原生暂不支持只读讨论）；一个参与者直接执行，多个参与者会自动互评一轮。参与者只读，不能修改代码。每轮只调用一次，等待返回后综合结论。
 可按每项分工的复杂度为参与者加上 model 与 thinking：先运行 ${command} models 查询各 Harness 可用的模型与推理强度，简单分工选较轻的模型或较低强度，复杂分工选更强的模型或更高强度；省略时沿用该 Harness 上次的选择。

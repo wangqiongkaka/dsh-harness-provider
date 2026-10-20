@@ -16,7 +16,7 @@ const request = async (env, input) => {
   return { status: response.status, result: await response.json() };
 };
 
-test('directory bridge and CLI bind the caller, reject invalid paths and explain this-turn execution', { timeout: 10000 }, async () => {
+test('directory bridge and CLI bind the caller, reject invalid paths and stay out of the agent instructions', { timeout: 10000 }, async () => {
   const calls = [];
   const bridge = new DelegationBridge(async (source, method, input) => { calls.push({ source, method, input }); return { cwd: input.path }; });
   try {
@@ -30,9 +30,8 @@ test('directory bridge and CLI bind the caller, reject invalid paths and explain
     const cli = value => exec(process.execPath, [resolve('dist/delegate-cli.mjs'), 'directory', value], { env: { ...process.env, ...first }, timeout: 3000 });
     assert.deepEqual(JSON.parse((await cli('{"path":"/work/tree"}')).stdout), { cwd: '/work/tree' });
     await assert.rejects(cli('{"path":"relative"}'), error => { assert.equal(error.code, 1); assert.ok(!(error.stdout + error.stderr).includes(first.DSH_DELEGATE_TOKEN)); return true; });
-    assert.match(delegationInstructions(), /directory '\{"path":/);
-    assert.match(delegationInstructions(), /workdir/);
-    assert.match(delegationInstructions(), /下一轮/);
+    // Agents enter a Worktree only through a new session opened there; the entry stays for the Git sidebar.
+    assert.doesNotMatch(delegationInstructions(), /directory|Worktree/);
   } finally { await bridge.close(); }
 });
 
