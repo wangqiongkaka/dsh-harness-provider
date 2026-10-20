@@ -18,7 +18,7 @@ test('成员目录查询返回绑定的实际工作目录，不加载会话', as
   assert.equal(result.native.cwd, undefined);
 });
 
-test('真实成员弹窗在手机和桌面展示当前会话目录，支持更新、重开与卸载', async () => {
+test('工作目录作为团队同级按钮，在手机和桌面独立展示并支持更新、重开与卸载', async () => {
   const require = createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
   const reference = resolve(process.env.DSH_REFERENCE_ROOT ?? '../../deepseek-harness');
   const bundle = await build({
@@ -34,6 +34,7 @@ const scope = {
 };
 const applied = apply({ remote: { $mount: async () => () => {} }, locale: { register: () => () => {} },
   effect: () => {}, inject: (keys, fn) => { if (keys.length === 2 && keys.includes('slots') && keys.includes('remote.harness')) fn(scope); } });
+const style = document.createElement('style'); style.textContent = styles; document.head.append(style);
 const root = createRoot(document.querySelector('#root'));
 const team = { members: [{ id: 'session', name: 'lead', phase: 'active' }, { id: 'worker', name: 'worker', phase: 'active' }], tasks: [] };
 window.renderTeam = (id, cwd, compact = false, workingDirectory) => {
@@ -53,7 +54,8 @@ void applied.then(() => window.renderTeam('session', '/Users/me/项目/很长的
       builder.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: `import { createElement } from 'react';
         export const IconChevronDownOutlineRegular = () => null, IconUserOutlineRegular = () => null, IconUsersOutlineRegular = () => createElement('span', null, '♧');
         export const StateDot = () => createElement('span', null, '○'), Tag = ({children, ...props}) => createElement('span', props, children), Tooltip = ({children}) => children;
-        export const useAnchoredPosition = () => ({top: 75, right: 16}), useDismissOnOutsidePointer = () => {};`, loader: 'js', resolveDir: resolve('src') }));
+        export { useAnchoredPosition } from '${resolve('node_modules/@deepseek-ai/dsh-client-ui-primitives/src')}/useAnchoredPosition.ts';
+        export { useDismissOnOutsidePointer } from '${resolve('node_modules/@deepseek-ai/dsh-client-ui-primitives/src')}/useDismissOnOutsidePointer.ts';`, loader: 'js', resolveDir: resolve('src') }));
       builder.onLoad({ filter: /TeamAction\.module\.css$/ }, async ({path}) => {
         const css = (await readFile(path, 'utf8')).replace(/\.([a-zA-Z]\w*)/g, '.host_$1');
         return { contents: `const style = document.createElement('style'); style.textContent = ${JSON.stringify(css)}; document.head.append(style); export default new Proxy({}, {get: (_, key) => 'host_' + key});`, loader: 'js' };
@@ -63,35 +65,31 @@ void applied.then(() => window.renderTeam('session', '/Users/me/项目/很长的
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
-    await page.setContent(`<style>:root{--dsw-alias-label-primary:#eee;--dsw-alias-label-tertiary:#aaa;--dsw-alias-bg-layer-2:#29292c;--dsw-specific-menu:#303034;--dsw-alias-border-l2:#555;--dsw-elevation-stroke:inset 0 0 0 1px #555;--dsw-elevation-prominent:0 0 0 1px #444}body{background:#1b1b1b;color:#eee;font:14px sans-serif;margin:20px}button{font:inherit}.host_headerActions{display:flex;justify-content:flex-end}</style><div id="root"></div>`);
+    await page.setContent(`<style>:root{--dsw-alias-label-primary:#eee;--dsw-alias-label-secondary:#ccc;--dsw-alias-label-tertiary:#aaa;--dsw-alias-bg-layer-2:#29292c;--dsw-specific-menu:#303034;--dsw-alias-border-l2:#555;--dsw-elevation-stroke:inset 0 0 0 1px #555;--dsw-elevation-prominent:0 0 0 1px #444}body{background:#1b1b1b;color:#eee;font:14px sans-serif;margin:20px}button{font:inherit}#root{container-type:inline-size}.host_headerActions{display:flex;align-items:center;gap:8px;justify-content:flex-end}</style><div id="root"></div>`);
     await page.addScriptTag({ content: bundle.outputFiles[0].text });
     await page.getByRole('button', { name: '智能体团队' }).waitFor();
     assert.deepEqual(await page.evaluate(() => window.directoryRequests), []);
-    const directory = page.locator('[data-hp-team-directory]');
+    const trigger = page.getByRole('button', { name: '工作目录', exact: true });
+    await expect(trigger).toHaveCount(1);
+    assert.equal(await trigger.evaluate(node => node.parentElement.parentElement.className), 'host_headerActions');
+    const directory = page.getByRole('dialog', { name: '工作目录', exact: true });
+    await page.getByRole('button', { name: '智能体团队' }).click();
+    await expect(page.locator('[data-team-panel]')).toBeVisible();
+    await expect(page.locator('[data-team-panel]')).not.toContainText('工作目录');
+    await expect(directory).toHaveCount(0);
+    await page.keyboard.press('Escape');
     for (const width of [390, 1280]) {
       await page.setViewportSize({ width, height: 800 });
-      await page.getByRole('button', { name: '智能体团队' }).click();
+      assert.equal(await trigger.locator('.hp-directory-label').evaluate(node => getComputedStyle(node).display), width === 390 ? 'none' : 'block');
+      await trigger.click();
       await expect(directory).toContainText('工作目录');
       await expect(directory).toContainText('long-project-name'.repeat(5));
-      const layout = await directory.evaluate(node => {
-        const label = node.firstElementChild, path = node.lastElementChild;
-        return label && path ? {
-          label: label.textContent,
-          nowrap: getComputedStyle(label).whiteSpace,
-          align: getComputedStyle(node).textAlign,
-          singleLine: label.getBoundingClientRect().height <= parseFloat(getComputedStyle(node).lineHeight) + 1,
-          sameTop: Math.abs(label.getBoundingClientRect().top - path.getBoundingClientRect().top) < 1,
-        } : null;
-      });
-      assert.deepEqual(layout, {label: '工作目录：', nowrap: 'nowrap', align: 'left', singleLine: true, sameTop: true});
       assert.equal(await directory.evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
-      assert.equal(await page.locator('[data-team-panel]').evaluate(node => node.getBoundingClientRect().right <= innerWidth), true);
-      await expect(page.locator('.host_member').filter({ hasText: 'worker' }).locator('[data-hp-team-directory]')).toHaveCount(0);
+      assert.equal(await directory.evaluate(node => { const rect = node.getBoundingClientRect(); return rect.left >= 16 && rect.right <= innerWidth - 16; }), true);
       await page.evaluate(cwd => window.renderTeam('session', cwd, true), resolve('.'));
-      await expect(page.locator('.host_member')).toHaveCount(1);
-      await expect(directory).toHaveText('工作目录：' + resolve('.'));
+      await expect(directory).toHaveText('工作目录' + resolve('.'));
       await mkdir('.cache', { recursive: true });
-      await page.locator('[data-team-panel]').screenshot({ path: resolve('.cache/team-directory-' + (width === 390 ? 'mobile' : 'desktop') + '.png') });
+      await page.screenshot({ clip: { x: Math.max(0, width - 600), y: 0, width: Math.min(width, 600), height: 180 }, path: resolve('.cache/team-directory-' + (width === 390 ? 'mobile' : 'desktop') + '.png') });
       await page.keyboard.press('Escape');
       await expect(directory).toHaveCount(0);
       await page.evaluate(() => window.renderTeam('session', '/Users/me/项目/很长的工作目录/' + 'long-project-name'.repeat(5)));
@@ -100,42 +98,50 @@ void applied.then(() => window.renderTeam('session', '/Users/me/项目/很长的
       window.lookup = async () => ({ok: true, value: {worker: {cwd: '/work/isolated-checkout'}}});
       window.renderTeam('worker', '/work/original');
     });
-    await page.getByRole('button', { name: '智能体团队' }).click();
-    await expect(directory).toHaveText('工作目录：/work/isolated-checkout');
-    await expect(page.locator('.host_member').filter({ hasText: 'lead' }).locator('[data-hp-team-directory]')).toHaveCount(0);
+    await trigger.click();
+    await expect(directory).toHaveText('工作目录/work/isolated-checkout');
     await page.keyboard.press('Escape');
     await page.evaluate(() => { window.lookup = async () => { throw new Error('offline'); }; window.renderTeam('worker', '/work/updated'); });
-    await page.getByRole('button', { name: '智能体团队' }).click();
-    await expect(directory).toHaveText('工作目录：/work/updated');
+    await trigger.click();
+    await expect(directory).toHaveText('工作目录/work/updated');
     await page.evaluate(() => window.renderTeam('worker', undefined));
-    await expect(directory).toHaveText('工作目录：未连接工作目录');
+    await expect(directory).toHaveText('工作目录未连接工作目录');
     await page.keyboard.press('Escape');
     await page.evaluate(() => { window.lookup = () => new Promise(resolve => { window.finishLookup = resolve; }); });
-    await page.getByRole('button', { name: '智能体团队' }).click();
+    await trigger.click();
     await expect.poll(() => page.evaluate(() => typeof window.finishLookup)).toBe('function');
     await page.keyboard.press('Escape');
     await page.evaluate(() => { window.lookup = async () => ({ok: true, value: {}}); window.renderTeam('session', '/work/new-session'); });
-    await page.getByRole('button', { name: '智能体团队' }).click();
-    await expect(directory).toHaveText('工作目录：/work/new-session');
+    await trigger.click();
+    await expect(directory).toHaveText('工作目录/work/new-session');
     await page.evaluate(() => window.finishLookup({ok: true, value: {worker: {cwd: '/work/stale'}}}));
-    await expect(directory).toHaveText('工作目录：/work/new-session');
+    await expect(directory).toHaveText('工作目录/work/new-session');
     await page.evaluate(() => {
       window.lookup = async () => ({ok: true, value: {session: {cwd: window.boundDirectory}}});
       window.boundDirectory = '/work/original';
       window.renderTeam('session', '/work/original');
     });
-    await expect(directory).toHaveText('工作目录：/work/original');
+    await expect(directory).toHaveText('工作目录/work/original');
     await page.evaluate(() => {
       window.boundDirectory = '/work/review-worktree';
       window.renderTeam('session', '/work/original', false, '/work/review-worktree');
     });
-    await expect(directory).toHaveText('工作目录：/work/review-worktree');
-    await page.locator('[data-team-panel]').screenshot({path: resolve('.cache/team-directory-switched.png')});
+    await expect(directory).toHaveText('工作目录/work/review-worktree');
+    await page.screenshot({clip: {x: 680, y: 0, width: 600, height: 180}, path: resolve('.cache/team-directory-switched.png')});
     await page.evaluate(() => {
       window.boundDirectory = '/work/original';
       window.renderTeam('session', '/work/original', false, '/work/original');
     });
-    await expect(directory).toHaveText('工作目录：/work/original');
+    await expect(directory).toHaveText('工作目录/work/original');
+    await page.locator('body').click({ position: { x: 2, y: 200 } });
+    await expect(directory).toHaveCount(0);
+    await trigger.click();
+    await expect(directory).toBeVisible();
+    await trigger.click();
+    await expect(directory).toHaveCount(0);
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    await expect(directory).toBeVisible();
     await page.evaluate(() => window.unmountTeam());
     await expect(directory).toHaveCount(0);
   } finally { await browser.close(); }

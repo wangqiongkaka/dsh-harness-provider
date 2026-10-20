@@ -1528,6 +1528,12 @@ const styles = `
 ${nativeContextColors}
 .hp-panel{position:absolute;bottom:calc(100% + 8px);z-index:100;box-sizing:border-box;width:264px;padding:12px;border:0;border-radius:12px;background:var(--dsw-specific-menu);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);font-size:12px;line-height:20px;font-weight:400;color:var(--dsw-alias-label-secondary);text-align:left;white-space:normal;cursor:default}
 .hp-panel-head{display:flex;align-items:center;gap:6px}
+.hp-directory-trigger{display:inline-flex;align-items:center;gap:5px;min-height:28px;padding:3px 7px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;white-space:nowrap;cursor:pointer}
+.hp-directory-trigger:hover,.hp-directory-trigger:focus-visible,.hp-directory-trigger[aria-expanded=true]{color:var(--dsw-alias-label-primary)}
+.hp-directory-trigger svg{flex:none;width:14px;height:14px}
+@container (max-width:480px){.hp-directory-label{display:none}}
+.hp-panel.hp-directory-panel{position:fixed;bottom:auto;width:min(420px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow-y:auto}
+.hp-directory-path{margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text}
 .hp-panel-icon{display:inline-flex;color:var(--dsw-alias-label-tertiary)}
 .hp-panel-title{font-weight:500;color:var(--dsw-alias-label-primary)}
 .hp-figure{margin-left:auto;font-weight:500;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
@@ -1738,37 +1744,42 @@ function rowSessionId(row: Element): string | undefined {
   return undefined;
 }
 
-function TeamDirectory({ sessionId, useSessions, loadDirectory, t }: Pick<PropsRuntime<'conversation.session.header.actions'>, 'sessionId' | 'useSessions'> & PropsLocale<'harness'> & {
+function WorkingDirectoryAction({ sessionId, useSessions, loadDirectory, t }: Pick<PropsRuntime<'conversation.session.header.actions'>, 'sessionId' | 'useSessions'> & PropsLocale<'harness'> & {
   loadDirectory: (id: string) => Promise<string | undefined>;
 }) {
-  const anchor = useRef<HTMLSpanElement>(null);
-  const [target, setTarget] = useState<Element | null>(null);
-  const [resolved, setResolved] = useState<{ id: string; target: Element; cwd?: string }>();
+  const { useAnchoredPosition, useDismissOnOutsidePointer } = require('@deepseek-ai/dsh-client-ui-primitives') as typeof import('@deepseek-ai/dsh-client-ui-primitives');
+  const anchor = useRef<HTMLButtonElement>(null), panel = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [resolved, setResolved] = useState<{ id: string; cwd?: string }>();
+  const position = useAnchoredPosition({ open, anchorRef: anchor, panelRef: panel, align: 'end', gap: 8, margin: 16 });
+  useDismissOnOutsidePointer(anchor, open, setOpen, panel);
   const summaryCwd = useSessions(state => {
     const summary = state.byId[sessionId], values = summary?.projectionValues;
     return values && 'workingDirectory' in values && typeof values.workingDirectory === 'string' ? values.workingDirectory : summary?.cwd;
   });
   useEffect(() => {
-    // shortcut: the host has no member-row slot; switch to that slot if one becomes available.
-    const locate = () => setTarget(anchor.current?.closest('[class*="_headerActions"]')?.querySelector('[data-team-action] button[aria-expanded="true"]')
-      ? document.querySelector('[data-team-panel] [class*="_currentTag"]')?.parentElement?.parentElement ?? null : null);
-    locate();
-    const observer = new MutationObserver(locate);
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded'] });
-    return () => observer.disconnect();
-  }, [sessionId]);
+    if (!open) return;
+    const dismiss = (event: KeyboardEvent) => { if (event.key === 'Escape') { setOpen(false); anchor.current?.focus(); } };
+    document.addEventListener('keydown', dismiss);
+    return () => document.removeEventListener('keydown', dismiss);
+  }, [open]);
   useEffect(() => {
-    if (!target) return;
+    if (!open) return;
     let active = true;
     setResolved(undefined);
-    void loadDirectory(sessionId).then(cwd => { if (active) setResolved({ id: sessionId, target, cwd }); }, () => {});
+    void loadDirectory(sessionId).then(cwd => { if (active) setResolved({ id: sessionId, cwd }); }, () => {});
     return () => { active = false; };
-  }, [sessionId, target, loadDirectory, summaryCwd]);
-  const cwd = (resolved?.id === sessionId && resolved.target === target ? resolved.cwd : undefined) ?? summaryCwd;
-  return <><span ref={anchor} hidden />{target && createPortal(<span data-hp-team-directory style={{ display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', alignItems: 'start', columnGap: 4,
-    marginTop: 4, fontSize: 11, lineHeight: '16px', textAlign: 'left', color: 'var(--dsw-alias-label-tertiary)', userSelect: 'text' }}>
-    <span style={{ whiteSpace: 'nowrap' }}>{t('workingDirectory')}：</span><span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{cwd || t('noWorkingDirectory')}</span>
-  </span>, target)}</>;
+  }, [sessionId, open, loadDirectory, summaryCwd]);
+  const cwd = (resolved?.id === sessionId ? resolved.cwd : undefined) ?? summaryCwd;
+  return <div data-hp-directory-action>
+    <button ref={anchor} type="button" className="hp-directory-trigger" aria-label={t('workingDirectory')} aria-haspopup="dialog" aria-expanded={open}
+      onClick={() => setOpen(value => !value)}><FolderIcon /><span className="hp-directory-label">{t('workingDirectory')}</span></button>
+    {open && createPortal(<div ref={panel} className="hp-panel hp-directory-panel" role="dialog" aria-label={t('workingDirectory')}
+      style={position ?? { visibility: 'hidden', left: 0, top: 0 }}>
+      <div className="hp-panel-head">{t('workingDirectory')}</div>
+      <div className="hp-directory-path">{cwd || t('noWorkingDirectory')}</div>
+    </div>, document.body)}
+  </div>;
 }
 
 export async function apply(ctx: Context): Promise<void> {
@@ -2118,7 +2129,7 @@ export async function apply(ctx: Context): Promise<void> {
     scope.effect(() => scope.slots.inject('conversation.session.header.actions', () => scope.slots.register({
       name: 'conversation.session.header.actions', id: 'harness-working-directory', locale: 'harness',
       inject: () => ({ loadDirectory: async (sessionId: string) => (await value(scope.remote.harness.harnesses({ sessionIds: [sessionId] })))[sessionId]?.cwd }),
-    }, TeamDirectory)), 'harness: current team member directory');
+    }, WorkingDirectoryAction)), 'harness: working directory action');
     const workspace = (): UiWorkspace => {
       const service = ctx.get('uiWorkspace') as UiWorkspace | undefined;
       if (service === undefined) throw new Error('uiWorkspace is not mounted');
