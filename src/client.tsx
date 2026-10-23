@@ -79,7 +79,7 @@ const zh = {
   'window.five_hour': '5 小时', 'window.seven_day': '本周', 'window.weekly': '本周', 'window.monthly': '本月', 'window.unknown': '额度',
   'window.5-hour window': '5 小时', 'window.7-day window': '本周', 'window.Opus · 7-day': 'Opus 本周', 'window.Sonnet · 7-day': 'Sonnet 本周',
   'window.OAuth apps · 7-day': 'OAuth 应用本周',
-  subagents: '子代理', subagentsDescription: '查看子代理的运行状态和内容', providedBy: '由 dsh-harness-provider 插件提供',
+  subagents: '子代理', subagentsDescription: '查看子代理的运行状态和内容',
   subagentsEmpty: '当前会话还没有子代理活动。Codex / Claude Code 会话在本次运行中打开后才会显示其子代理。', subagentNoActivity: '暂无内容',
   'subagent.running': '运行中', 'subagent.completed': '已完成', 'subagent.failed': '失败', 'subagent.cancelled': '已取消',
   subagentsRunning: '{count} 个子代理正在运行', subagentStarting: '等待首个动作', subagentSince: '已运行 {time}', subagentTook: '耗时 {time}',
@@ -142,7 +142,7 @@ const en: Record<keyof typeof zh,string> = {
   'window.five_hour':'5-hour', 'window.seven_day':'Weekly', 'window.weekly':'Weekly', 'window.monthly':'Monthly', 'window.unknown':'Quota',
   'window.5-hour window':'5-hour', 'window.7-day window':'Weekly', 'window.Opus · 7-day':'Opus weekly', 'window.Sonnet · 7-day':'Sonnet weekly',
   'window.OAuth apps · 7-day':'OAuth apps weekly',
-  subagents:'Subagents', subagentsDescription:'Status and activity of subagents', providedBy:'Provided by the dsh-harness-provider plugin',
+  subagents:'Subagents', subagentsDescription:'Status and activity of subagents',
   subagentsEmpty:'No subagent activity in this session yet. Codex / Claude Code subagents appear once the session is open in this run.', subagentNoActivity:'Nothing yet',
   'subagent.running':'Running', 'subagent.completed':'Completed', 'subagent.failed':'Failed', 'subagent.cancelled':'Cancelled',
   subagentsRunning:'{count} running', subagentStarting:'Waiting for its first step', subagentSince:'Running for {time}', subagentTook:'Took {time}',
@@ -1312,24 +1312,6 @@ export function HarnessSettingsSection({ useHarnessSettings, form, t }: Settings
   </div>;
 }
 
-// ---- right sidebar guide card: host geometry, with the provider beside the title ----
-type GuideEntryProps = PropsRuntime<'sidebar.right.tab.guide.entry'> & PropsLocale<'harness'>;
-export function GuideEntry({ kind, title, description, useTabInfo, t }: GuideEntryProps) {
-  const { tab } = useTabInfo();
-  return <button type="button" className="hp-guide" data-sidebar-right-guide-entry={kind} onClick={() => tab.actions.openTab(kind, { replaceTab: true })}>
-    <span className="hp-guide-icon"><svg width={description === undefined ? 22 : 26} height={description === undefined ? 22 : 26} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" aria-hidden>
-      <path d="M 8 2.5 L 12.9 5.2 V 10.8 L 8 13.5 L 3.1 10.8 V 5.2 Z" /><path d="M 3.1 5.2 L 8 7.9 L 12.9 5.2 M 8 7.9 V 13.5" strokeLinecap="round" />
-    </svg></span>
-    <span className="hp-guide-text">
-      <span className="hp-guide-row">
-        <span className="hp-guide-title">{title}</span>
-        <span className="hp-guide-line" title={t('providedBy')}>{t('providedBy')}</span>
-      </span>
-      {description !== undefined && <span className="hp-guide-line">{description}</span>}
-    </span>
-  </button>;
-}
-
 // ---- right sidebar tab: Harness subagents, newest first; one poll per session serves the tab body and its chip ----
 type SubagentsTabProps = PropsRuntime<'sidebar.right.pane.tab'> & PropsLocale<'harness'> & { sessionId: string; load(): Promise<Subagents> };
 type SubagentsTitleProps = PropsRuntime<'sidebar.right.pane.tab.title'> & PropsLocale<'harness'> & { sessionId: string; load(): Promise<Subagents> };
@@ -1550,15 +1532,6 @@ ${nativeContextColors}
 .hp-row dd{margin:0;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
 .hp-section{margin-top:12px;padding-top:12px;border-top:.5px solid var(--dsw-alias-border-l2)}
 .hp-foot{margin-top:10px;padding-top:8px;border-top:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-caption);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.hp-guide{display:flex;gap:14px;align-items:center;box-sizing:border-box;width:380px;max-width:100%;min-height:56px;padding:14px 20px;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);border-radius:24px;cursor:pointer}
-.hp-guide:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.hp-guide-icon{display:flex;flex:none;align-items:center;justify-content:center;width:26px;height:26px;color:var(--dsw-alias-label-tertiary)}
-.hp-guide-text{display:flex;flex-direction:column;gap:3px;min-width:0}
-.hp-guide-row{display:flex;align-items:baseline;gap:8px;min-width:0}
-.hp-guide-title{flex:none}
-.hp-guide-title,.hp-guide-line{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;line-height:1.4}
-.hp-guide-title{font-size:14px}
-.hp-guide-line{font-size:13px;color:var(--dsw-alias-label-caption)}
 .hp-sub{display:flex;flex-direction:column;gap:8px;height:100%;box-sizing:border-box;overflow:auto;padding:12px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary)}
 .hp-sub-empty{padding:24px 16px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-tertiary);text-align:center}
 .hp-sub-agent{border-radius:12px;background:var(--dsw-alias-interactive-bg-hover)}
@@ -2165,7 +2138,5 @@ export async function apply(ctx: Context): Promise<void> {
     // The chip carries the same list, so "is one still running?" answers without opening the panel.
     scope.effect(() => scope.slots.inject('sidebar.right.pane.tab.title', () => scope.slots.register({ name: 'sidebar.right.pane.tab.title', key: id, locale: 'harness',
       inject: face }, SubagentsTitle)), 'harness: subagents chip');
-    scope.effect(() => scope.slots.inject('sidebar.right.tab.guide.entry', () => scope.slots.register({ name: 'sidebar.right.tab.guide.entry', key: id, locale: 'harness' },
-      GuideEntry)), 'harness: subagents guide card');
   });
 }

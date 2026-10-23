@@ -101,11 +101,10 @@ test('the subagents chip reads the same session as the panel, so both report a r
     inject: (keys, apply) => { if (keys.includes('sidebarRightTabs')) apply(scope); },
   };
   await module.exports.apply(ctx);
-  assert.deepEqual(injected, ['sidebar.right.pane.tab', 'sidebar.right.pane.tab.title', 'sidebar.right.tab.guide.entry']);
+  assert.deepEqual(injected, ['sidebar.right.pane.tab', 'sidebar.right.pane.tab.title']);
   assert.deepEqual(registrations.map(({ definition }) => [definition.name, definition.key]), [
     ['sidebar.right.pane.tab', 'dsh-harness-provider/subagents'],
     ['sidebar.right.pane.tab.title', 'dsh-harness-provider/subagents'],
-    ['sidebar.right.tab.guide.entry', 'dsh-harness-provider/subagents'],
   ]);
   const [body, chip] = registrations;
   assert.deepEqual(await body.definition.inject('session-1').load(), []);

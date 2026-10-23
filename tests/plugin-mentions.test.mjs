@@ -291,32 +291,22 @@ test('sidebar marks active turns as breathing, completed sessions as static, and
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
 });
 
-test('the subagents guide card names the plugin that provides it and opens the tab in place', async () => {
+test('子代理开始页入口沿用原生卡片，不注册自绘渲染器', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
- const React=require('react'), {renderToStaticMarkup}=require('react-dom/server');
- const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {taskModes,setTaskMode,delegationClaim,discussionClaim};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8'),resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});
  const module={exports:{}};
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}}}});
- const cards=[];
- const slots={inject(_name,register){return register();},register(options,component){if(options.name==='sidebar.right.tab.guide.entry')cards.push({key:options.key,component});return ()=>{};}};
+ const cards=[], tabs=[];
+ const slots={inject(_name,register){return register();},register(options){if(options.name==='sidebar.right.tab.guide.entry')cards.push(options);return ()=>{};}};
  const ctx={
   remote:{async $mount(){return ()=>{};}},locale:{register(){return ()=>{};},bind:()=>key=>key},effect(fn){fn();},
-  inject(keys,apply){if(keys.includes('sidebarRightTabs'))apply({sidebarRightTabs:{register:()=>()=>{}},slots,remote:{harness:{}},effect(fn){fn();}});},
+  inject(keys,apply){if(keys.includes('sidebarRightTabs'))apply({sidebarRightTabs:{register:definition=>{tabs.push(definition);return ()=>{};}},slots,remote:{harness:{}},effect(fn){fn();}});},
  };
  await module.exports.apply(ctx);
- assert.deepEqual(cards.map(card=>card.key),['dsh-harness-provider/subagents'],'only the plugin\'s own tab gets the card');
- const opened=[];
- const t=key=>({providedBy:'由 dsh-harness-provider 插件提供'})[key]??key;
- const props={kind:'harness-subagents',title:'子代理',useTabInfo:()=>({tab:{actions:{openTab:(...args)=>opened.push(args)}}}),t};
- module.exports.setTaskMode('draft',module.exports.delegationClaim({}, {sessionId:'draft'},t));
- const html=renderToStaticMarkup(React.createElement(cards[0].component,props));
- assert.match(html,/子代理/);assert.match(html,/由 dsh-harness-provider 插件提供/);
- assert.match(html,/<span class="hp-guide-row"><span class="hp-guide-title">子代理<\/span><span class="hp-guide-line" title="由 dsh-harness-provider 插件提供">由 dsh-harness-provider 插件提供<\/span><\/span>/);
- assert.match(renderToStaticMarkup(React.createElement(cards[0].component,{...props,description:'查看子代理'})),/<\/span><span class="hp-guide-line">查看子代理<\/span>/,'description occupies its own row below the title and provider');
- assert.match(html,/<svg width="22" height="22"/,'compact cards keep the small icon');
- assert.match(renderToStaticMarkup(React.createElement(cards[0].component,{...props,description:'查看子代理'})),/<svg width="26" height="26"/,'described cards use the host icon size');
- cards[0].component(props).props.onClick();
- assert.deepEqual(JSON.parse(JSON.stringify(opened)),[['harness-subagents',{replaceTab:true}]]);
+ assert.equal(tabs[0].kind,'harness-subagents');
+ assert.equal(tabs[0].guide[0].title(),'subagents');
+ assert.equal(tabs[0].guide[0].description(),'subagentsDescription');
+ assert.deepEqual(cards,[], '交给宿主的默认入口渲染器');
 });
 
 test('the Harness settings page follows Agent presets in Settings, renders the live values, and seeds delegation and discussion defaults', async () => {
