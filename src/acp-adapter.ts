@@ -18,7 +18,7 @@ import {
   type HarnessSessionCapabilities, type HarnessSessionState, type HarnessSkill, type HostApprovalInteraction, type HostChoiceQuestion,
   type HostCommand, type HostEvent, type HostInput, type HostInteraction, type HostInteractionId, type HostItem, type HostItemOf,
   type HostItemOutcome, type HostItemSnapshot, type HostQuestion, type HostQuestionInteraction, type HostTurnId, type HostTurnSnapshot,
-  type HostUsage, type HarnessSubagent, type HarnessSubagentEntry, type InteractionRespondCommand, type JsonValue, type ModelSelectCommand, type NativeSessionRef, type OpenSessionInput,
+  type HostUsage, type HarnessSubagent, type HarnessSubagentEntry, type HarnessBackgroundTask, type InteractionRespondCommand, type JsonValue, type ModelSelectCommand, type NativeSessionRef, type OpenSessionInput,
   type PermissionModeSelectCommand, type ThinkingSelectCommand, type TurnCancelCommand, type TurnOutcome, type TurnStartCommand,
 } from './contracts.js';
 
@@ -82,8 +82,9 @@ const clientCapabilities = (profile: AcpProfile): acp.ClientCapabilities => ({
 const SUBAGENT_LIFECYCLE = new Set(['subagent_spawned', 'subagent_state_update', 'async_task_spawned', 'async_task_progress', 'async_task_state_update']);
 const SUBAGENT_UPDATE = '_dsh/subagent_update';
 type SubagentLifecycle = { sessionUpdate: 'subagent_spawned'; subagentSessionId: string; name?: unknown; task?: unknown } | { sessionUpdate: 'subagent_state_update'; subagentSessionId: string; state: unknown };
-/** AIR async task lifecycle (claude-agent-acp dist/async-tasks.js, codex-acp CodexBackgroundTerminalTasks); only liveness is kept. */
-type AsyncTaskUpdate = { sessionUpdate: 'async_task_spawned' | 'async_task_progress'; asyncTaskId: string } | { sessionUpdate: 'async_task_state_update'; asyncTaskId: string; state: unknown };
+/** AIR async task lifecycle (claude-agent-acp dist/async-tasks.js, codex-acp CodexBackgroundTerminalTasks). */
+type AsyncTaskUpdate = { sessionUpdate: 'async_task_spawned' | 'async_task_progress' | 'async_task_state_update'; asyncTaskId: string;
+  name?: string; toolCallId?: string; outputFilePath?: string; summary?: string; state?: HarnessBackgroundTask['status'] };
 const CLOSE_TIMEOUT_MS = 5_000;
 const TITLE_TIMEOUT_MS = 30_000;
 const DEFAULT_LIMITS: AcpLimits = { requestTimeoutMs: 60_000, loadTimeoutMs: 120_000, toolOutputChars: 64_000, stderr: false, cancelTimeoutMs: 10_000 };
@@ -652,6 +653,9 @@ class AcpSession implements HarnessSession {
   readonly #subagents = new Subagents();
   /** Background tasks (backgrounded shells) still running; they keep going after the turn ends. */
   readonly #backgroundTasks = new Set<string>();
+  readonly #taskDetails = new Map<string, HarnessBackgroundTask>();
+  readonly #taskTools = new Map<string, acp.ToolCallUpdate>();
+  readonly #taskEnds = new Set<string>();
   /** Finished background tasks whose wake-up cycle has not reported its result yet, and when the last one changed. */
   #pendingWakes = 0;
   #wakeAt = 0;
@@ -737,7 +741,7 @@ class AcpSession implements HarnessSession {
       session = new AcpSession(options, process_, sessionId, opened, catalogs, skillsOf(profile, skills));
       session.#rawCommands = skills;
       session.#authChanged(authStatus);
-      for (const { sessionId: owner, update } of replay) if (!session.#trackTask(update) && !session.#routeSubagent(owner, update)) session.#transcript.replay(update);
+      for (const { sessionId: owner, update } of replay) if (!session.#trackTask(owner, update) && !session.#routeSubagent(owner, update)) session.#transcript.replay(update);
       await session.#applyHints(input);
       session.#initialized = true;
       return session;
@@ -768,6 +772,12 @@ class AcpSession implements HarnessSession {
   subagents(): HarnessSubagent[] { return this.#subagents.list(); }
   hasBackgroundTasks(): boolean {
     return this.#backgroundTasks.size > 0 || !!this.#detached || (this.#pendingWakes > 0 && Date.now() - this.#wakeAt < WAKE_GRACE_MS);
+  }
+  async stopBackgroundTask(id: string): Promise<HarnessResult<{ stopped: boolean }>> {
+    const task = this.#taskDetails.get(id);
+    if (!task) return failed('invalidRequest', 'Unknown background task');
+    try { return { ok: true, value: await request(this.#process, '_session/async_task/stop', { sessionId: this.#sessionId, asyncTaskId: id }) }; }
+    catch (cause) { return { ok: false, error: toError(cause, 'Unable to stop background task') }; }
   }
 
   async readSnapshot(): Promise<HarnessResult<{ turns: HostTurnSnapshot[]; state: HarnessSessionState }>> {
@@ -1007,10 +1017,29 @@ class AcpSession implements HarnessSession {
   // ── session/update ────────────────────────────────────────────────────────────────────────────────────────────────
 
   #notify(notification: acp.SessionNotification): void {
-    if (!this.#trackTask(notification.update) && !this.#routeSubagent(notification.sessionId, notification.update)) this.#update(notification.update);
+    if (!this.#trackTask(notification.sessionId, notification.update) && !this.#routeSubagent(notification.sessionId, notification.update)) this.#update(notification.update);
   }
-  /** Takes background-task lifecycle updates (from any session of the tree); they only decide whether the process may be closed. */
-  #trackTask(update: acp.SessionUpdate): boolean {
+  /** Background output also arrives between prompt turns, before the ordinary transcript routing can take it. */
+  #trackTask(sessionId: string, update: acp.SessionUpdate): boolean {
+    if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+      const key = `${sessionId}\0${update.toolCallId}`, previous = this.#taskTools.get(key);
+      if (!previous && !commandOf(update.rawInput)) return false;
+      const call = { ...previous, ...Object.fromEntries(Object.entries(update).filter(([, value]) => value != null)) } as acp.ToolCallUpdate;
+      const normalized = terminalUpdate(update, String(record(previous?.rawOutput).output ?? ''), limitsOf(this.#profile).toolOutputChars);
+      if (normalized.rawOutput !== undefined) call.rawOutput = normalized.rawOutput;
+      if (typeof record(call.rawOutput).aggregatedOutput === 'string') {
+        const { aggregatedOutput, ...rest } = record(call.rawOutput);
+        call.rawOutput = { ...rest, output: truncate(aggregatedOutput as string, limitsOf(this.#profile).toolOutputChars).text };
+      }
+      if (typeof record(call.rawOutput).output === 'string') call.rawOutput = { ...record(call.rawOutput), output: truncate(record(call.rawOutput).output as string, limitsOf(this.#profile).toolOutputChars).text };
+      this.#taskTools.set(key, call);
+      if (this.#taskTools.size > 128) for (const key of this.#taskTools.keys()) {
+        if ([...this.#taskDetails.values()].some(task => this.#backgroundTasks.has(task.id) && `${task.sessionId}\0${task.toolCallId}` === key)) continue;
+        this.#taskTools.delete(key); break;
+      }
+      for (const task of this.#taskDetails.values()) if (task.sessionId === sessionId && task.toolCallId === update.toolCallId) this.#publishTask(task, call);
+      return false;
+    }
     const task = update as unknown as AsyncTaskUpdate;
     if (task.sessionUpdate === 'async_task_spawned') this.#backgroundTasks.add(task.asyncTaskId);
     else if (task.sessionUpdate === 'async_task_state_update') {
@@ -1018,7 +1047,28 @@ class AcpSession implements HarnessSession {
       // An agent that answers finished tasks on its own (Claude Code) is about to be woken; the process must outlive the wait.
       else if (this.#backgroundTasks.delete(task.asyncTaskId) && this.#profile.continuationEnd) { this.#pendingWakes++; this.#wakeAt = Date.now(); }
     } else if (task.sessionUpdate !== 'async_task_progress') return false;
+    const previous = this.#taskDetails.get(task.asyncTaskId);
+    const details: HarnessBackgroundTask = { ...previous, id: task.asyncTaskId, sessionId, name: task.name ?? previous?.name ?? task.asyncTaskId,
+      status: task.state ?? previous?.status ?? 'running',
+      ...(task.toolCallId ? { toolCallId: task.toolCallId } : {}), ...(task.outputFilePath ? { outputFilePath: task.outputFilePath } : {}),
+      ...(task.summary ? { summary: task.summary } : {}) };
+    this.#publishTask(details, details.toolCallId ? this.#taskTools.get(`${sessionId}\0${details.toolCallId}`) : undefined);
     return true;
+  }
+  #publishTask(task: HarnessBackgroundTask, call?: acp.ToolCallUpdate): void {
+    const output = record(call?.rawOutput), command = commandOf(call?.rawInput);
+    const body = typeof output.output === 'string' ? output.output : typeof output.aggregatedOutput === 'string' ? output.aggregatedOutput
+      : typeof call?.rawOutput === 'string' ? call.rawOutput : undefined;
+    const details = { ...task, ...(command ? { command } : {}), ...(body !== undefined ? { output: body } : {}),
+      ...(typeof output.exitCode === 'number' ? { exitCode: output.exitCode } : {}) };
+    this.#taskDetails.set(task.id, details);
+    if (task.status === 'completed' && task.toolCallId && !task.outputFilePath && call?.status !== 'completed' && call?.status !== 'failed') {
+      // Codex publishes the task end before the completed command's output/exit metadata.
+      this.#taskEnds.add(task.id);
+      return;
+    }
+    this.#taskEnds.delete(task.id);
+    this.#emit({ type: 'session.task.changed', task: details });
   }
   /** The main session or one of its Codex subagent sessions; their approvals and questions reach the user alike. */
   #owns(sessionId: string): boolean { return sessionId === this.#sessionId || this.#subagents.has(sessionId); }
@@ -1315,11 +1365,18 @@ class AcpSession implements HarnessSession {
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
+  #flushTaskEnds(): void {
+    for (const id of this.#taskEnds) {
+      this.#emit({ type: 'session.task.changed', task: this.#taskDetails.get(id)! });
+    }
+    this.#taskEnds.clear();
+  }
   #faulted(cause: HarnessError): void {
     if (this.#fault || this.#closing) return;
     this.#fault = { ...cause, code: 'processExited', retryable: true };
     if (this.#active) this.#finish(this.#active, { status: 'failed', error: this.#fault });
     this.#emit({ type: 'session.faulted', error: this.#fault });
+    this.#flushTaskEnds();
     this.#channel.end();
     void this.#process.close().catch(() => {});
     this.#onClosed();
@@ -1337,6 +1394,7 @@ class AcpSession implements HarnessSession {
         if (!this.#fault) await request(this.#process, 'session/close', { sessionId: this.#sessionId }, 2_000).catch(() => {});
       } finally {
         await this.#process.close();
+        this.#flushTaskEnds();
         this.#channel.end();
         this.#onClosed();
       }

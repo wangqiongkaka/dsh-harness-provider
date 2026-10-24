@@ -158,6 +158,11 @@ export interface HarnessSubagent {
 export type HarnessSubagentEntry =
   | { kind: 'message' | 'thought'; text: string }
   | { kind: 'tool'; title: string; status: 'running' | 'completed' | 'failed'; output: string | null };
+/** Native background work, correlated with its originating tool call when the agent supplies one. */
+export interface HarnessBackgroundTask {
+  id: string; sessionId: string; name: string; status: 'running' | 'paused' | 'completed' | 'failed' | 'stopped';
+  command?: string; toolCallId?: string; output?: string; outputFilePath?: string; exitCode?: number; summary?: string;
+}
 export type HostItem =
   | { type: 'agentMessage'; itemId: HostItemId; text: string }
   | { type: 'reasoning'; itemId: HostItemId; text: string }
@@ -180,6 +185,7 @@ export interface HostTurnSnapshot {
 }
 
 export type HostEvent =
+  | { type: 'session.task.changed'; task: HarnessBackgroundTask }
   | { type: 'session.state.changed'; state: HarnessSessionState }
   | { type: 'session.usage.changed'; usage: HostUsage | null; observedForTurnId?: HostTurnId }
   | { type: 'session.faulted'; error: HarnessError }
@@ -215,6 +221,7 @@ export interface HarnessSession {
   subagents?(): HarnessSubagent[];
   /** Whether work outlives the turn — a backgrounded shell, or the agent's own follow-up to one; closing the process would kill it. */
   hasBackgroundTasks?(): boolean;
+  stopBackgroundTask?(id: string): Promise<HarnessResult<{ stopped: boolean }>>;
   execute(command: TurnStartCommand): Promise<HarnessResult<TurnStartAccepted>>;
   execute(command: TurnCancelCommand): Promise<HarnessResult<TurnCancelAccepted>>;
   execute(command: InteractionRespondCommand): Promise<HarnessResult<InteractionRespondAccepted>>;

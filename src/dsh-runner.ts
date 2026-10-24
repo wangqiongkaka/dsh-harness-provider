@@ -18,6 +18,7 @@ import { modelValue } from './acp-adapter.js';
 import { delegationInstructions, type DelegationBridge } from './delegation.js';
 import { branchTranscript } from './branch-context.js';
 import { workingDirectory } from './working-directory.js';
+import { BackgroundJobs } from './background-jobs.js';
 
 export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
@@ -43,16 +44,17 @@ const IDLE_CLOSE_MS = 60_000;
 /** How often the idle reclaimer looks for sessions to close; short idle windows (tests) sweep proportionally faster. */
 const idleSweepMs = (idleCloseMs: number) => Math.min(60_000, Math.max(5, Math.floor(idleCloseMs / 4)));
 /** Drains the native session continuously: usage readings land as they arrive (also between turns), everything else queues for the turn loop. */
-function pump(live: Live, sessionEvent: (event: Extract<import('./contracts.js').HostEvent, { type: 'session.auth.changed' | 'session.account.changed' | 'session.notice' | 'session.continued' }>) => void): void {
+function pump(live: Live, jobs: BackgroundJobs, sessionEvent: (event: Extract<import('./contracts.js').HostEvent, { type: 'session.auth.changed' | 'session.account.changed' | 'session.notice' | 'session.continued' }>) => void): void {
   void (async () => {
     try {
       for await (const value of live.session.outputs) {
+        if (value.kind === 'event' && value.event.type === 'session.task.changed') { jobs.update(value.event.task); continue; }
         if (value.kind === 'event' && value.event.type === 'session.usage.changed') { live.usage = value.event.usage; continue; }
         if (value.kind === 'event' && (value.event.type === 'session.auth.changed' || value.event.type === 'session.account.changed' || value.event.type === 'session.notice' || value.event.type === 'session.continued')) { sessionEvent(value.event); continue; }
         live.queue.push(value);
         live.wake();
       }
-    } finally { live.ended = true; live.wake(); }
+    } finally { jobs.close(); live.ended = true; live.wake(); }
   })();
 }
 /** Persisted across restarts: the context reading for display, and the cumulative counters usageDelta subtracts from. */
@@ -98,6 +100,7 @@ export class DshRunner {
     idleClose: number | (() => number) = IDLE_CLOSE_MS, private readonly branchContextChars: () => number = () => 60_000, private readonly authChanged: (harness: Binding['harness'], status: import('./contracts.js').HarnessAuthStatus) => void = () => {},
     private readonly accountChanged: (harness: Binding['harness'], account: HarnessAccountSnapshot) => void = () => {}) {
     this.idleCloseMs = typeof idleClose === 'function' ? idleClose : () => idleClose;
+    ctx.inject(['jobs'], scope => { scope.jobs.attachController('harness'); });
     // A Harness process holds the native conversation, so it lives as long as the session does; idling that long
     // buys nothing and keeps a CLI process (and its memory) resident, so it is closed and resumed on the next turn.
     // Each sweep schedules the next from the current window, so a changed setting takes effect by the following sweep.
@@ -233,7 +236,7 @@ export class DshRunner {
       live = { session, cwd: binding.cwd, revision: 0, usage: session.initialUsage, queue: [], ended: false, wake: () => {}, activeAt: Date.now(),
         ...(session.initialState.resolvedModelLabel ? { modelLabel: session.initialState.resolvedModelLabel } : {}) };
       const opened = live;
-      pump(opened, event => {
+      pump(opened, new BackgroundJobs(this.ctx, agent, session), event => {
         if (event.type === 'session.auth.changed') this.authChanged(binding.harness, event.authStatus);
         else if (event.type === 'session.account.changed') this.accountChanged(binding.harness, event.account);
         // The adapter's turn is over, yet this turn's tool results may still be queued here: the notice waits for the step to end.

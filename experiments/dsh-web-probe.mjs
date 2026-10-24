@@ -13,12 +13,18 @@ const require=createRequire(import.meta.url);
 const {chromium,expect}=require('@playwright/test');
 const {startResponsesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-codex/tests/responses-fixture.ts')));
 const {startMessagesFixture}=await import(pathToFileURL(join(reference,'packages/subagent/subagent-claude-code/tests/messages-fixture.ts')));
-const codex=await startResponsesFixture([{kind:'complete',text:'Codex native first'},{kind:'complete',text:'Codex native second'},{kind:'complete',text:'Codex native resumed'},{kind:'complete',text:'Codex after rollback'},{kind:'complete',text:'Codex after edit'}]);
+const backgroundProbe=process.env.DSH_BACKGROUND_PROBE === '1';
+const backgroundCommand="sleep 3; printf '后台任务开始\\n'; sleep 5; printf '后台任务完成\\n'";
+const codex=await startResponsesFixture(backgroundProbe ? [
+ {kind:'advertisedFunctionCall',choices:[{name:'exec_command',arguments:{cmd:backgroundCommand,yield_time_ms:1000,max_output_tokens:1000}}]},
+ {kind:'complete',text:'Codex background started'},
+] : [{kind:'complete',text:'Codex native first'},{kind:'complete',text:'Codex native second'},{kind:'complete',text:'Codex native resumed'},{kind:'complete',text:'Codex after rollback'},{kind:'complete',text:'Codex after edit'}]);
 const skillsProbe=process.env.DSH_SKILLS_PROBE === '1';
 const delegationProbe=process.env.DSH_DELEGATION_PROBE === '1';
 const subagentProbe=process.env.DSH_SUBAGENT_PROBE === '1';
 const titlesProbe=process.env.DSH_TITLES_PROBE === '1';
-const claude=await startMessagesFixture(subagentProbe
+const claude=await startMessagesFixture(backgroundProbe
+ ? {kind:'tool-use',toolName:'Bash',input:{description:'运行后台任务',command:backgroundCommand,run_in_background:true},finalText:'Claude background started'} : subagentProbe
  ? {kind:'tool-use',toolName:'Agent',input:{description:'Find fixture files',prompt:'List the fixture files',subagent_type:'general-purpose'},finalText:'Claude native reply'}
  : {kind:'complete',text:'Claude native reply'});
 // DSH's own subagent: the parent calls the subagent tool, the child replies, then the parent finishes.
@@ -98,6 +104,7 @@ async function dismiss(){
   const visible = await button.waitFor({state:'visible',timeout:name==='Continue'?1200:6000}).then(()=>true,error=>{if(error.name==='TimeoutError')return false;throw error;});
   if(visible){await button.click();await delay(300);}
  }
+ if(backgroundProbe && await page.getByText('Get started',{exact:true}).isVisible()) await page.keyboard.press('Escape');
 }
 async function send(text,reply){
  const replies=page.getByText(reply,{exact:false});
@@ -115,7 +122,32 @@ try{
  page.on('pageerror',error=>{logs+='\nBrowser: '+error.message;});
  await page.goto(url);await dismiss();
  const created=await rpc('workspace/create',{path:workspace});
- if(titlesProbe){
+ if(backgroundProbe){
+  for(const [harness,name,reply] of [['codex','Codex','Codex background started'],['claude-code','Claude Code','Claude background started']]){
+   if(harness==='claude-code') await page.getByRole('button').filter({hasText:'New Session'}).first().click();
+   await dismiss();
+   const selector=page.getByLabel('Select Harness',{exact:true});
+   await selector.click();await page.getByRole('menuitemradio',{name,exact:true}).click();
+   await send(`运行 ${name} 后台任务`,reply);
+   const trigger=page.getByRole('button',{name:/background job|后台任务/});
+   await expect(trigger).toHaveCount(1,{timeout:15000});
+   await trigger.click();
+   const panel=page.getByRole('list',{name:/Background jobs|后台任务/});
+   await expect(panel).toBeVisible();
+   const expand=panel.getByRole('button',{name:/Show live output|展开.*实时输出/});
+   await expand.first().click();
+   const output=panel.locator('[data-terminal] [class*="_output"]');
+   await expect(output).toContainText('后台任务开始');
+   await page.screenshot({path:resolve(`.cache/background-${harness}-running.png`)});
+   await expect(panel.getByRole('button',{name:/Finished 1|已结束 1/})).toBeVisible({timeout:30000});
+   await expect(output).toContainText('后台任务开始');
+   await expect(output).toContainText('后台任务完成',{timeout:10000});
+   await page.screenshot({path:resolve(`.cache/background-${harness}-done.png`)});
+   await panel.getByRole('button',{name:/^Clear$|^清空$/}).click();
+   await expect(trigger).toHaveCount(0);
+   console.log(`PASS: ${name} 原生后台任务面板显示状态、命令、输出、耗时并清空已结束任务`);
+  }
+ }else if(titlesProbe){
   await rpc('session/create',{workspaceId:created.workspace.workspaceId,sessionId:'titles-probe'});
   await page.reload();await dismiss();
   for(const [label,harness,firstReply,secondReply] of [['Codex','codex','Codex native first','Codex native second'],['Claude Code','claude-code','Claude native reply','Claude native reply']]){
@@ -363,7 +395,7 @@ try{
  }
  console.log('Native replies came only from local fixture servers; no real model endpoint was used.');
 } catch(error){
- if(page){console.error((await page.locator('body').innerText()).slice(-7000));await page.screenshot({path:resolve('.cache/web-failure.png')});}
+ if(page){console.error((await page.locator('body').innerText()).slice(-7000));await page.screenshot({path:resolve('.cache/web-failure.png')});if(backgroundProbe)await writeFile('.cache/background-failure.html',await page.content());}
  console.error(logs.replace(/token=[\w-]+/g,'token=[redacted]'));throw error;
 } finally {
  await browser?.close();await stop();await Promise.all([codexProxy.close(),claudeProxy.close(),codex.close(),claude.close(),deepseek?.close()]);

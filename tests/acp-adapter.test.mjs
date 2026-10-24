@@ -62,6 +62,11 @@ const app = agent({ name: 'peer' })
   .onRequest('session/set_config_option', async ({ params }) => { if (params.configId === 'model') current.model = params.value; else if (params.configId === 'reasoning_effort') current.effort = params.value; else if (params.configId === 'mode') current.mode = params.value; else if (params.configId === 'collaboration_mode') current.collaboration = params.value; else if (params.configId === 'fast-mode') current.fast = params.value; else process.exit(23); return { configOptions: options() }; })
   .onRequest('session/set_mode', async ({ params }) => { current.mode = params.modeId; await update({ sessionUpdate: 'current_mode_update', currentModeId: params.modeId }); return {}; })
   .onRequest('_session/steering', value => value, async ({ params }) => { steered = params.prompt[0].text; return { outcome: 'injected' }; })
+  .onRequest('_session/async_task/stop', value => value, async ({ params }) => {
+    note({ stopTask: params });
+    await update({ sessionUpdate: 'async_task_state_update', asyncTaskId: params.asyncTaskId, state: 'stopped' });
+    return { stopped: true };
+  })
   .onNotification('session/cancel', () => { cancelled = true; })
   .onRequest('session/prompt', async ({ params, client }) => {
     ctx = client; cancelled = false;
@@ -259,6 +264,25 @@ const app = agent({ name: 'peer' })
     if (text === 'background-done') {
       await update({ sessionUpdate: 'async_task_state_update', asyncTaskId: 'task-1', state: 'completed' });
       await reply('done'); return end();
+    }
+    if (text === 'background-panel') {
+      await update({ sessionUpdate: 'tool_call', toolCallId: 'bg-shell', name: 'Bash', title: '运行测试', kind: 'execute', status: 'in_progress', rawInput: { command: 'npm test', description: '运行测试' }, rawOutput: { aggregatedOutput: '启动\\n' } });
+      await update({ sessionUpdate: 'async_task_spawned', asyncTaskId: 'panel-task', name: 'npm test', taskType: 'shell', toolCallId: 'bg-shell', canStop: true });
+      await reply('started');
+      setTimeout(async () => {
+        // A long-lived task keeps its command/output correlation while other calls fill the recent-shell cache.
+        for (let i = 0; i < 130; i++) await update({ sessionUpdate: 'tool_call', toolCallId: 'other-' + i, title: 'pwd', kind: 'execute', status: 'completed', rawInput: { command: 'pwd' } });
+        await update({ sessionUpdate: 'tool_call_update', toolCallId: 'bg-shell', _meta: { terminal_output_delta: { data: '测试通过\\n' } } });
+        // codex-acp announces the task end before it renders the completed command's exit metadata.
+        await update({ sessionUpdate: 'async_task_state_update', asyncTaskId: 'panel-task', state: 'completed', toolCallId: 'bg-shell' });
+        await update({ sessionUpdate: 'tool_call_update', toolCallId: 'bg-shell', status: 'completed', _meta: { terminal_exit: { exit_code: 0 } } });
+      }, 50);
+      return end();
+    }
+    if (text === 'background-child') {
+      await update({ sessionUpdate: 'subagent_spawned', subagentSessionId: 'child-bg', name: 'explorer', capabilities: {} });
+      await ctx.notify('session/update', { sessionId: 'child-bg', update: { sessionUpdate: 'async_task_spawned', asyncTaskId: 'child-task', name: 'sleep 10', taskType: 'shell', canStop: true } });
+      await reply('started'); return end();
     }
     if (text === 'fail') {
       await update({ sessionUpdate: 'session_info_update', _meta: { codex: { error: { message: 'Reconnecting... 1/5', willRetry: true } } } });
@@ -1049,12 +1073,41 @@ test('background tasks the agent announces keep the session busy until they end,
     assert.equal(session.hasBackgroundTasks(), false);
     value(await session.execute({ type: 'turn.start', turnId: 'host-bg', input: [{ type: 'text', text: 'background' }] }));
     const seen = await until(output, 'turn.completed');
+    assert.equal(events(seen, 'session.task.changed')[0]?.task.name, 'npm run dev');
     assert.deepEqual(events(seen, 'item.completed').map(event => [event.snapshot.item.type, event.snapshot.item.text]), [['agentMessage', 'started']]);
     assert.equal(session.hasBackgroundTasks(), true);
     value(await session.execute({ type: 'turn.start', turnId: 'host-bg-done', input: [{ type: 'text', text: 'background-done' }] }));
     await until(output, 'turn.completed');
     assert.equal(session.hasBackgroundTasks(), false);
     await session.close();
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('background task details and terminal output survive the prompt boundary, and stop targets one native task', { timeout: 20000 }, async () => {
+  const f = await fixture(), adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root }));
+    const output = session.outputs[Symbol.asyncIterator]();
+    value(await session.execute({ type: 'turn.start', turnId: 'panel', input: [{ type: 'text', text: 'background-panel' }] }));
+    const started = events(await until(output, 'turn.completed'), 'session.task.changed');
+    assert.equal(started[0]?.task.command, 'npm test');
+    assert.equal(started[0]?.task.output, '启动\n');
+    let task;
+    do { task = (await until(output, 'session.task.changed')).at(-1).event.task; } while (task.status === 'running');
+    assert.equal(task.status, 'completed');
+    assert.equal(task.output, '启动\n测试通过\n');
+    assert.equal(task.exitCode, 0);
+    value(await session.execute({ type: 'turn.start', turnId: 'stop', input: [{ type: 'text', text: 'background' }] }));
+    await until(output, 'turn.completed');
+    value(await session.stopBackgroundTask('task-1'));
+    assert.equal((await until(output, 'session.task.changed')).at(-1).event.task.status, 'stopped');
+    assert.deepEqual((await f.notes()).find(note => note.stopTask).stopTask, { sessionId: 'native-session', asyncTaskId: 'task-1' });
+    assert.equal(session.hasBackgroundTasks(), false);
+    value(await session.execute({ type: 'turn.start', turnId: 'child', input: [{ type: 'text', text: 'background-child' }] }));
+    await until(output, 'turn.completed');
+    value(await session.stopBackgroundTask('child-task'));
+    await until(output, 'session.task.changed');
+    assert.deepEqual((await f.notes()).filter(note => note.stopTask).at(-1).stopTask, { sessionId: 'native-session', asyncTaskId: 'child-task' });
   } finally { await adapter.close(); await f.close(); }
 });
 

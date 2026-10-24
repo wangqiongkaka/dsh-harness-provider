@@ -2,6 +2,17 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## Codex / Claude Code 原生后台任务面板（2026-10-24）
+
+- 范围：后台任务面板，包含运行中/已结束任务、命令、输出、退出码（有可靠值时）、耗时、单任务停止和清空已结束任务；不包含文件变更汇总。复用宿主 `jobs` 服务和已有面板，不修改宿主及其构建产物。
+- 接入：`AcpSession` 将 AIR `async_task_*` 生命周期与来源工具的终端输出关联，发送独立于轮次的 `session.task.changed`；`DshRunner` 持续消费这些事件，`BackgroundJobs` 按 DSH 会话登记原生任务。后台任务跨轮次保活、Claude Code 的自动跟进机制保持原样；登记层收取终态，阻止 `tool-jobs` 重复唤醒模型。进程退出时结束仍在运行的面板记录。
+- 原生依据：`node_modules/@agentclientprotocol/codex-acp/dist/index.js` 的 `CodexBackgroundTerminalTasks` / `handleNotification` 先发布任务结束，再渲染命令最终输出与退出码，按同一工具 ID 合并后提交终态；两种适配器的 `_session/async_task/stop` 都由根会话持有，子代理任务停止也发往根会话。Claude 事件及日志路径见 `node_modules/@agentclientprotocol/claude-agent-acp/dist/async-tasks.js`。
+- 退出码与输出：Claude 的 `dist/tool-calls/reporters/bash.js` 会给工具调用默认填入 `0/1`，不能把后台启动成功当作进程退出成功；有任务输出文件时，从 CLI 最终 `[exited with code N]` 标记读取真实退出码，缺少可靠值时保留任务状态。日志按宿主输出源拉取，支持文件晚于任务生成、UTF-8 跨读取边界、输出截断与结束前最后一次排空。
+- 已知限制：没有 `jobs` 服务的旧宿主继续原有会话行为，不提供此面板。输出以原生 CLI 的实际事件/日志为准；本地原始 ACP 探针确认 Codex 可能不发布转入后台前已被工具收取的早期输出，不能在面板中补造。原生面板的清空仅隐藏已结束行，任务列表与宿主一样不跨应用重启持久化。
+- 测试：新增任务登记、输出去重、暂停恢复、会话隔离、停止路由、退出码和进程退出用例；适配器测试覆盖任务前输出、跨轮次更新及超过最近命令缓存容量的关联。缺少任务事件、恢复后遗留暂停进度、子代理停止会话 ID 错误及后台退出码误用均已先验证失败再修正。`npm run check` 的类型检查、构建及全部 229 项测试通过。
+- 界面验证：使用桌面 rc.3 自带后台 CLI、本地 Responses/Messages 夹具与无界面 Chromium，运行 `DSH_BACKGROUND_PROBE=1 node experiments/dsh-web-probe.mjs`。真实 Codex / Claude Code 均显示运行中与已结束任务，终端输出区域保留“开始/完成”日志、退出码和耗时，清空后入口隐藏；截图保存为 `.cache/background-{codex,claude-code}-{running,done}.png` 并已人工核对。没有调用真实模型端点；停止与失败条件由真实宿主任务登记层和 ACP 协议夹具验证。
+- 基线：在已有主工作区开发，开始时 `main` 与本地 `origin/main` 均为 `a17be19`，没有合并冲突；当前运行中的插件未重载。
+
 ## 兼容 DSH 0.2.1-rc.3（2026-10-24）
 
 - 问题：DSH 0.2.1-rc.3 的插件兼容检查拒绝本插件 0.2.3——9 个 `@deepseek-ai/dsh-*` peer 范围只到 `0.2.1-rc.2`，宿主提示不兼容并建议卸载重装。0.2.1-rc.2 起宿主按标签源码 `packages/boot/app-boot/src/plugin-compatibility.ts` 的规则，逐个比对带 `engines.dsh` 或 `@deepseek-ai/dsh-*` peer 的插件与运行版本。
