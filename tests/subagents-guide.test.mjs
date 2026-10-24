@@ -36,6 +36,7 @@ window.renderGuide = crowded => {
     own, diagnostic,
   ] : [own, diagnostic];
   root.render(<GuideBody useTabInfo={useTabInfo} useShortcuts={pick => pick([])} useGuideEntries={pick => pick(entries)}
+    useEntryPins={pick => pick([])} useEntryActions={pick => pick(false)} setPinned={() => {}}
     renderSlotChain={(_, __, options) => options.fallback}
     renderSlot={(name, owner, options) => {
       const match = overrides.find(item => item.definition.name === name && item.definition.key === options.entryKey);
@@ -48,7 +49,7 @@ void applied.then(() => window.renderGuide(true));
     alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom': require.resolve('react-dom'), 'react-dom/client': require.resolve('react-dom/client') },
     plugins: [{ name: 'guide-host', setup(builder) {
       builder.onResolve({ filter: /^@deepseek-ai\/dsh-client-ui-primitives$/ }, () => ({ path: 'ui', namespace: 'stub' }));
-      builder.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: 'export const ShortcutKeys = () => null;', loader: 'js' }));
+      builder.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: 'export const Menu = () => null; export const ShortcutKeys = () => null;', loader: 'js' }));
       builder.onLoad({ filter: /GuideBody\.module\.css$/ }, async ({path}) => ({ contents:
         `const style = document.createElement('style'); style.textContent = ${JSON.stringify((await readFile(path, 'utf8')).replace(/:global\(([^)]+)\)/g, '$1').replace(/\.([a-zA-Z][\w-]*)/g, '.native_$1'))}; document.head.append(style); export default new Proxy({}, {get: (_, key) => 'native_' + key});`, loader: 'js' }));
     } }],

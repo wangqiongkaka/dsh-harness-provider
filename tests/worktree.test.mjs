@@ -15,7 +15,7 @@ import Sessions from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
 import Tools from '@deepseek-ai/dsh-tools';
-import Persistence from '@deepseek-ai/dsh-session-persistence-jsonl';
+import Persistence from './session-persistence.mjs';
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local';
 import { HarnessOutputChannel } from '../dist/contracts.js';
 import { HarnessService, inject } from '../dist/dsh.js';

@@ -39,6 +39,8 @@ test('real slash skill source follows Harness selection, invalidates pending cat
   });
   plugin.apply({
    locale:{register(){},bind(){return key=>key;}},slots:{inject(){}},
+   // 0.2.1-rc.3's skill client registers its user-text reference rule through this service.
+   uiConversation:{userText:{register(){}}},
    sessions:{subagentAddress(){},binding(){return {};},async using(id,options,run){return run({binding:{session:{getSnapshot:()=>({openState:'open'})}}});},list:{getSnapshot(){return {byId:{}};}}},
    remote:{skills:{async list(request,signal){return {ok:true,value:await ctx.sessionSkillCatalog.list(request,signal)};}},$on(event,fn){disposers.push(ctx.on(event,fn));}},
    on(){},get(){return {registerSource(value){source=value;return ()=>{};}};},effect(fn){const dispose=fn();if(dispose)disposers.push(dispose);},

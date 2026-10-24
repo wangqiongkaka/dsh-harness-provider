@@ -11,7 +11,7 @@ import Sessions, { Session, SessionId } from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
 import Tools from '@deepseek-ai/dsh-tools';
-import Persistence from '@deepseek-ai/dsh-session-persistence-jsonl';
+import Persistence from './session-persistence.mjs';
 import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence';
 import { HarnessOutputChannel } from '../dist/contracts.js';
 import { Bindings } from '../dist/bindings.js';

@@ -474,16 +474,30 @@ const delegationOptions = new Map<string, DelegationOptions>();
 let settingsForm: ConfigForm<Settings> | undefined;
 const pluginSettings = () => settingsForm?.getSnapshot().value;
 /**
- * The settings form of a page the Host keeps process-local (a remote browser, `mode: 'memory'`): the same reads and
- * revision-fenced writes, through this plugin's own RPC. Writes run one at a time, each fenced by the revision the
+ * Whether the Host keeps this config form process-local. Hosts before browser preferences moved into the Host settings
+ * document mark that form with `mode: 'memory'`; newer Hosts persist preferences for every authenticated browser and
+ * dropped the field, so it is read defensively and an absent field means the Host serves the shared form.
+ */
+const processLocalForm = (form: ConfigForm<Settings>): boolean =>
+  (form.getSnapshot() as { mode?: string }).mode === 'memory';
+/**
+ * A snapshot built by the plugin's own RPC fallback. Older Host types require the `mode` marker, newer ones omit it from
+ * `ConfigFormSnapshot`; the intersection and the cast keep both typechecks happy while the runtime snapshot stays the
+ * plain shape every reader uses (`mode` is only meaningful on a Host form, which `processLocalForm` reads).
+ */
+type LocalSnapshot = ConfigFormSnapshot<Settings> & { mode?: string };
+const localSnapshot = (value: Omit<LocalSnapshot, 'mode'>): LocalSnapshot => value as LocalSnapshot;
+/**
+ * The settings form of a page the Host keeps process-local (a legacy remote browser, `mode: 'memory'`): the same reads
+ * and revision-fenced writes, through this plugin's own RPC. Writes run one at a time, each fenced by the revision the
  * previous one produced; a refused write re-reads the Host and reports false.
  */
 function remoteSettingsForm(api: Pick<Api, 'readSettings' | 'updateSettings'>): ConfigForm<Settings> & { load(): Promise<void> } {
-  let snapshot: ConfigFormSnapshot<Settings> = { status: 'loading', value: undefined, base: undefined, user: undefined, revision: undefined, writable: false, mode: 'memory' };
+  let snapshot: LocalSnapshot = localSnapshot({ status: 'loading', value: undefined, base: undefined, user: undefined, revision: undefined, writable: false });
   const listeners = new Set<() => void>();
   let tail: Promise<unknown> = Promise.resolve();
   const publish = (view: SettingsView) => {
-    snapshot = view ? { status: 'ready', value: view.value as Settings, base: undefined, user: view.user, revision: view.revision, writable: view.writable, mode: 'memory' }
+    snapshot = view ? localSnapshot({ status: 'ready', value: view.value as Settings, base: undefined, user: view.user, revision: view.revision, writable: view.writable })
       : { ...snapshot, status: 'unavailable', writable: false };
     for (const listener of listeners) listener();
   };
@@ -2061,7 +2075,7 @@ export async function apply(ctx: Context): Promise<void> {
   // The Settings nav row, after Agent presets; present only while the Host serves this plugin's configuration.
   ctx.inject(['slots', 'configForms'], scope => {
     const t = ctx.locale.bind('harness'), form = scope.configForms.get<Settings>(SETTINGS_ENTRY);
-    if (form.getSnapshot().mode === 'memory') return;
+    if (processLocalForm(form)) return;
     settingsForm = form;
     scope.effect(() => () => { if (settingsForm === form) settingsForm = undefined; }, 'harness: settings form');
     scope.effect(() => scope.configForms.whileServed([SETTINGS_ENTRY], () => scope.slots.inject('settings.section', () => scope.slots.register({
@@ -2069,10 +2083,11 @@ export async function apply(ctx: Context): Promise<void> {
       inject: () => ({ hooks: { harnessSettings: form }, form }),
     }, HarnessSettingsSection))), 'harness: settings page');
   });
-  // A remote browser (phone through the proxy) gets a process-local Host form that never loads; the same page then
-  // reads and writes this plugin's namespace through the Harness RPC, and the row follows whether the Host serves it.
+  // A legacy remote browser (before the Host persisted browser preferences) gets a process-local Host form that never
+  // loads; the same page then reads and writes this plugin's namespace through the Harness RPC, and the row follows
+  // whether the Host serves it.
   ctx.inject(['slots', 'configForms', 'remote.harness'], scope => {
-    if (scope.configForms.get<Settings>(SETTINGS_ENTRY).getSnapshot().mode !== 'memory') return;
+    if (!processLocalForm(scope.configForms.get<Settings>(SETTINGS_ENTRY))) return;
     const t = ctx.locale.bind('harness'), form = remoteSettingsForm(scope.remote.harness);
     const reload = () => { void form.load().catch(() => {}); };
     settingsForm = form;

@@ -2,6 +2,16 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## 兼容 DSH 0.2.1-rc.3（2026-10-24）
+
+- 问题：DSH 0.2.1-rc.3 的插件兼容检查拒绝本插件 0.2.3——9 个 `@deepseek-ai/dsh-*` peer 范围只到 `0.2.1-rc.2`，宿主提示不兼容并建议卸载重装。0.2.1-rc.2 起宿主按标签源码 `packages/boot/app-boot/src/plugin-compatibility.ts` 的规则，逐个比对带 `engines.dsh` 或 `@deepseek-ai/dsh-*` peer 的插件与运行版本。
+- 决定：把 `0.2.1-rc.3` 加入这 9 个 peer 范围，版本升到 0.2.4；未验证的 `0.2.1-rc.4` 与更早的 alpha 继续拒绝。`@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery` 不在宿主这项检查的范围内，沿用原声明。
+- 客户端：rc.3 的 `ConfigFormSnapshot` 已没有 `mode` 字段（浏览器偏好统一由 Host settings 文档持久化，0.2.1-rc.2 源码即无该字段）。把“进程内表单”的判定改为防御性读取 `mode`：旧宿主仍走插件 RPC 兜底，新宿主走宿主 `configForms`。自建快照的类型用交叉声明兼容仍要求 `mode` 的旧宿主构建类型，运行时不再写该字段。rc.2/rc.3 上该兜底本就不触发，行为与之前一致。
+- 工具链：rc.3 宿主把 React 类型包提到根 `node_modules`（此前在各客户端包内），`scripts/typecheck.mjs` 改为优先根目录、回退旧布局，同一脚本覆盖两种宿主源码树。
+- 测试适配 rc.3：JSONL 会话后端由默认导出类改为 `{ name, apply }` 函数式模块，用 `tests/session-persistence.mjs` 归一化两种形状；技能客户端新增 `ctx.uiConversation.userText` 依赖，补替身；原生开始页的 `GuideBody` 新增 `useEntryPins` / `useEntryActions` / `setPinned` 与 `Menu`，测试补上；远程配置表单快照不再断言 `mode`。
+- 验证：在 `dsh-v0.2.1-rc.3` 标签源码的临时 clone（`pnpm install`、`build:native-system` 使用桌面版自带的 `system.node`、`build:lib`）上运行 `npm run check`，类型检查、构建及全部 225 项测试通过。用 rc.3 的 `evaluatePluginCompatibility` 验证：0.2.4 通过，`0.2.1-rc.4` 仍被拒绝。`.cache/live` 已更新到 0.2.4。
+- 未验证：未重启运行中的 DSH，兼容提示是否消失需重启后确认；未在 rc.3 桌面版里实测 Codex / Claude Code 会话（复用 rc.2 的验证范围）。
+
 ## 宿主说明不再引导 Agent 切换会话目录（2026-10-20）
 
 - 决定：Worktree 只由用户手工创建，并在该目录新开会话进入。宿主说明删除 `directory` 入口的指引，Agent 不再把现有会话切换到 Worktree；入口、目录服务和 Git 侧栏调用保持不变。下一节“显式进入 Worktree 时调用 `directory`”的决定由本节替代。

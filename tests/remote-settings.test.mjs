@@ -44,7 +44,7 @@ test('a memory-mode page (phone through the remote proxy) edits the Harness sett
   assert.notEqual(form, page.hostForm);
   const before = form.getSnapshot();
   assert.equal(form.getSnapshot(), before, 'the snapshot is one reference between changes');
-  assert.deepEqual(JSON.parse(JSON.stringify(before)), { status: 'ready', value: current.value, user: { idleCloseSeconds: 30 }, revision: 3, writable: true, mode: 'memory' });
+  assert.deepEqual(JSON.parse(JSON.stringify(before)), { status: 'ready', value: current.value, user: { idleCloseSeconds: 30 }, revision: 3, writable: true });
   let notified = 0;
   form.subscribe(() => notified++);
   // Two rapid writes: each carries the revision the previous one produced.
