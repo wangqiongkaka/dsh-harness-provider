@@ -1940,7 +1940,7 @@ export async function apply(ctx: Context): Promise<void> {
     function paintEditedTurns(id: string, state: State) {
       if (id !== activeSession) return;
       for (const turn of state.supersededTurns) hiddenTurns.add(turn);
-      hiddenStyle.textContent = [...hiddenTurns].map(turn => `[data-chat-flow] > [data-chat-turn="${turn}"]{display:none!important}`).join('\n');
+      hiddenStyle.textContent = [...hiddenTurns].map(turn => `[data-chat-flow] > [data-chat-turn="${turn}"],[data-chat-flow] > [data-slot="conversation.chat.flow"] > [data-chat-turn="${turn}"]{display:none!important}`).join('\n');
     }
     const editApi: EditInjected = {
       read: id => {
