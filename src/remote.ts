@@ -14,6 +14,8 @@ export const stateSchema = z.object({
   /** Directories outside the registered projects, linked to this session alone. */
   linkedPaths: z.array(z.string()),
   recoveryRequired: z.boolean(),
+  rewindRecoveryToken: z.string().nullable(),
+  rewindableTurns: z.array(z.number().int()),
   /** DSH turns whose native boundary is known, so their prompt can be edited and rerun in place. */
   editableTurns: z.array(z.number().int()),
   /** Turns replaced by a later edit; kept in the event log but hidden from the chat. */
@@ -104,6 +106,9 @@ export const subagentsSchema = z.array(z.object({
 /** `@` menu entries of the session's Harness; empty for DSH sessions and Harnesses without plugins. */
 export const pluginsSchema = z.array(z.object({ name: z.string(), displayName: z.string(), description: z.string().nullable(), mention: z.string() }));
 export const editRequest = address.extend({ seq: z.number().int().nonnegative(), text: z.string().max(1_000_000), requestId: z.string().min(1).max(200) });
+export const rewindRequest = address.extend({ turn: z.number().int().nonnegative() });
+export const confirmRewindRequest = address.extend({ token: z.string().uuid() });
+export const rewindPreviewSchema = z.object({ token: z.string(), paths: z.array(z.string()), conflicts: z.array(z.string()), diff: z.string(), truncated: z.boolean(), turns: z.number().int() });
 export const recoveryRequest = address.extend({ action: z.enum(['check', 'unlock']) });
 export const recoverySchema = stateSchema.extend({ detail: z.string() });
 export const secretAnswerRequest = address.extend({ id: z.string().min(1), answers: z.record(z.string(), z.array(z.string().min(1).max(64_000))), cancelled: z.boolean().optional() });
@@ -124,6 +129,7 @@ export const updateSettingsRequest = z.object({
 const codec = (schema: z.ZodType) => ({ mode: 'strict' as const, typeSymbol: 'dsh-harness-provider#Contract', create: () => schema });
 export const descriptors: InvocationDescriptor[] = [
   ['recover', recoveryRequest, recoverySchema], ['rollback', address, stateSchema], ['edit', editRequest, stateSchema],
+  ['previewRewind', rewindRequest, rewindPreviewSchema], ['confirmRewind', confirmRewindRequest, stateSchema],
   ['secretStatus', address, secretStatusSchema], ['answerSecret', secretAnswerRequest, z.object({ accepted: z.boolean() })],
   ['state', address, stateSchema], ['select', selectRequest, stateSchema],
   ['models', modelsRequest, modelsSchema], ['selectModel', modelRequest, stateSchema],

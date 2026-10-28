@@ -174,7 +174,7 @@ export type HostItem =
   | { type: 'subagentDelegation'; itemId: HostItemId; operation: 'spawn' | 'send'; prompt?: string; subagents: HostSubagentState[] };
 export type HostItemOf<T extends HostItem['type']> = Extract<HostItem, { type: T }>;
 export type HostItemUpdate =
-  | { type: 'text.append'; text: string } | { type: 'output.append'; text: string } | { type: 'output.replace'; output: HostToolOutput }
+  | { type: 'text.append'; text: string } | { type: 'text.replace'; text: string } | { type: 'output.append'; text: string } | { type: 'output.replace'; output: HostToolOutput }
   | { type: 'fileChanges.replace'; changes: HostFileChange[] } | { type: 'subagents.replace'; subagents: HostSubagentState[] };
 export type HostItemOutcome = { status: 'succeeded' } | { status: 'failed'; error: HarnessError } | { status: 'cancelled'; reason?: string };
 export interface HostItemSnapshot { item: HostItem; outcome: HostItemOutcome }

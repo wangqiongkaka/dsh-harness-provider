@@ -7,7 +7,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import type { AvailableCommand } from '@agentclientprotocol/sdk';
+import type { AvailableCommand } from '@agentclientprotocol/sdk/unstable';
 import pkg from '../package.json' with { type: 'json' };
 import type { HarnessAccountSnapshot, HarnessPlugin, HostTurnSnapshot } from './contracts.js';
 import { defaultSettings, feedbackOf, type SettingsSource } from './settings.js';
@@ -164,6 +164,7 @@ export function codexProfile(options: { command?: string; environment: NodeJS.Pr
   const command = () => options.command ?? settings().codexCommand;
   return {
     harnessId: 'codex',
+    protocolVersion: 2,
     showThoughts: false,
     nativeSubagents: true,
     // codex-acp reads no instructions from session/new, but merges CODEX_CONFIG into every thread/start and thread/resume; as
@@ -246,11 +247,12 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
   };
   return {
     harnessId: 'claude-code',
+    protocolVersion: 2,
     spawn: raw => {
       const env = withUserShellEnvironment({ ...raw });
       // The SDK spawns the CLI as CLAUDE_CODE_ENTRYPOINT=sdk-ts, which drops the Artifact tools (and with them /design's
       // canvas) unless CLAUDE_CODE_ARTIFACT is truthy. Default it on; a user-set value still wins.
-      return { command: process.execPath, args: [bundled('claude-agent-acp.mjs')], env: withNodeOnPath({ CLAUDE_CODE_ARTIFACT: '1', ...env, CLAUDE_CODE_EXECUTABLE: executable(env), CLAUDE_AGENT_SDK_CLIENT_APP: `${pkg.name}/${pkg.version}` }) };
+      return { command: process.execPath, args: [bundled('claude-agent-acp.mjs')], env: withNodeOnPath({ CLAUDE_CODE_ARTIFACT: '1', ...env, CLAUDE_AGENT_ACP_PROTOCOL: 'v2', CLAUDE_CODE_EXECUTABLE: executable(env), CLAUDE_AGENT_SDK_CLIENT_APP: `${pkg.name}/${pkg.version}` }) };
     },
     // The same system-prompt append the SDK adapter used; ACP forwards it through the agent's own options channel. Host
     // instructions (delegation) ride along, so they stay out of the user's messages and survive context compaction.

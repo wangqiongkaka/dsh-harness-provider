@@ -43,6 +43,8 @@ import { DelegationBridge, delegationRequest, delegationReadRequest, discussionR
 import { workingDirectory } from './working-directory.js';
 import { createWorktree, mergeWorktree, removeWorktree, worktreeChanged } from './worktree.js';
 import { Config, defaultSettings, settingsOf, type SettingsSource } from './settings.js';
+import { applyRestore, previewRestore, repository, restoreDiff, restorePosition, type RestorePlan } from './checkpoints.js';
+import { confirmRewindRequest, rewindRequest } from './remote.js';
 
 /** DSH commands a Harness session keeps: the row stays DSH's, the work runs on the Harness's own command or mode. */
 const HARNESS_COMMANDS = new Set(['goal', 'plan', 'compact', 'clear']);
@@ -84,7 +86,7 @@ function supersededTurns(events: readonly SessionEvent[]): number[] {
     if (event.type === 'turn/start') starts.push({ seq: event.seq, turn: event.data.turn });
     if (event.type !== 'user/message') continue;
     const source = event.data?.source as { kind?: string; form?: string; summary?: string; rewindFromSeq?: number } | undefined;
-    if (source?.kind !== 'dsh-harness-provider' || source.form !== 'notice' || source.summary !== '消息已编辑' || source.rewindFromSeq === undefined) continue;
+    if (source?.kind !== 'dsh-harness-provider' || source.form !== 'notice' || !['消息已编辑', '文件与对话已恢复'].includes(source.summary ?? '') || source.rewindFromSeq === undefined) continue;
     for (const start of starts) if (start.seq >= source.rewindFromSeq) hidden.add(start.turn);
   }
   return [...hidden];
@@ -158,6 +160,7 @@ export class HarnessService extends TypertRemoteService {
     if (!directory) throw new Error('当前 DSH 不支持切换会话工作目录');
     return this.bindings.serial(source, async () => {
       const binding = await this.bindings.read(source);
+      if (binding?.fileRewind) throw new Error('请先完成文件与对话恢复，再切换工作目录');
       if (binding?.delegation?.discussion) throw new Error('只读讨论会话不能切换工作目录');
       if (this.runner.live.get(source)?.session.hasBackgroundTasks?.()) throw new Error('当前会话有后台任务，请等待任务结束后再切换工作目录');
       const previous = directory.get(agent.session);
@@ -187,6 +190,7 @@ export class HarnessService extends TypertRemoteService {
   private readonly catalogs = new Map<string, { until: number; work: Promise<Ready | { error: string }> }>();
   // ponytail: per-session automatic recovery check; each check loads native history in a new agent process.
   private readonly checks = new Map<string, { until: number; work: Promise<void> }>();
+  private readonly rewindPreviews = new Map<string, { token: string; index: number; identity: string; fromSeq: number; plan: RestorePlan; at: number }>();
   // ponytail: per-Harness+cwd plugin catalog cache for the `@` menu; installs show up within 30s, failures are not kept.
   private readonly pluginCatalogs = new Map<string, { until: number; plugins: Promise<HarnessPlugin[]> }>();
   // ponytail: per-source quota cache; account probes are rate-limited upstream and identical across sessions.
@@ -369,7 +373,7 @@ export class HarnessService extends TypertRemoteService {
         }
         const turnNumber = Number(binding.pending.split(':').at(-1));
         if (binding.pendingNative && Number.isSafeInteger(turnNumber)) binding.turns = [...(binding.turns ?? []).filter(entry => entry.turn !== turnNumber), { turn: turnNumber, key: binding.pendingNative }];
-        delete binding.pending; delete binding.pendingNative;
+        delete binding.pending; delete binding.pendingNative; delete binding.pendingCheckpoint;
         await this.bindings.write(binding);
       }
       if (!binding.pending) void this.bindings.delegated().then(bindings => Promise.allSettled(bindings.filter(child => child.delegation?.parentSessionId === sessionId).map(child => this.notifyDelegation(child.sessionId)))).catch(() => {});
@@ -379,8 +383,17 @@ export class HarnessService extends TypertRemoteService {
 
   /** Moves the native context back to just before `binding.turns[index]` (the last turn when absent); workspace files stay. */
   private async rewind(agent: Awaited<ReturnType<HarnessService['agent']>>, binding: Binding, index?: number) {
-    if (binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先结束当前请求并处理未确认结果');
-    const ref = await this.withSession(binding, async session => {
+    if (binding.pending || binding.fileRewind || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先结束当前请求并处理未确认结果');
+    const ref = await this.forkBefore(binding, index);
+    const live = this.runner.live.get(binding.sessionId);
+    if (live) { await live.session.close(); this.runner.live.delete(binding.sessionId); }
+    if (ref) binding.nativeRef = ref; else delete binding.nativeRef;
+    binding.turns = (binding.turns ?? []).slice(0, index ?? -1);
+    delete binding.usage;
+    await this.bindings.write(binding);
+  }
+  private async forkBefore(binding: Binding, index?: number) {
+    return this.withSession(binding, async session => {
       if (!session.fork || !session.readSnapshot) throw new Error('Harness 未提供历史操作');
       const snapshot = unwrap(await session.readSnapshot());
       if (!snapshot.turns.length) throw new Error('没有可回滚的对话');
@@ -390,18 +403,86 @@ export class HarnessService extends TypertRemoteService {
       const previous = snapshot.turns[native - 1]?.nativeTurnRef.nativeTurnKey;
       return unwrap(await session.fork(previous ?? null));
     });
-    const live = this.runner.live.get(binding.sessionId);
-    if (live) { await live.session.close(); this.runner.live.delete(binding.sessionId); }
-    if (ref) binding.nativeRef = ref; else delete binding.nativeRef;
-    binding.turns = (binding.turns ?? []).slice(0, index ?? -1);
-    delete binding.usage;
-    await this.bindings.write(binding);
   }
-  private async notice(agent: Awaited<ReturnType<HarnessService['agent']>>, summary: string, text: string, rewindFromSeq?: number) {
+  private async notice(agent: Awaited<ReturnType<HarnessService['agent']>>, summary: string, text: string, rewindFromSeq?: number, rewindToken?: string) {
     agent.session.append('user/message', createUserMessage({ source: { kind: 'dsh-harness-provider', form: 'notice', summary,
+      ...(rewindToken === undefined ? {} : { rewindToken }),
       ...(rewindFromSeq === undefined ? {} : { rewindFromSeq }) },
       content: [{ type: 'text', text }] }), { surfaceOp: 'append' });
     await this.ctx.sessions.flush(agent.session);
+  }
+
+  private rewindIdentity(binding: Binding): string { return JSON.stringify([binding.cwd, binding.nativeRef, binding.turns]); }
+  private async fileOperation<T>(sessionId: string, work: (agent: Awaited<ReturnType<HarnessService['agent']>>, binding: Binding) => Promise<T>): Promise<T> {
+    return this.bindings.serial(sessionId, async () => {
+      const agent = await this.agent(sessionId), binding = await this.bindings.read(sessionId);
+      if (!binding) throw new Error('只有 Codex / Claude Code 会话支持文件恢复');
+      const repo = await repository(binding.cwd).catch(() => { throw new Error('当前目录不是 Git 工作区，无法恢复文件'); });
+      return this.bindings.serial(`files:${repo}`, () => work(agent, binding));
+    });
+  }
+  private async rewindIdle(agent: Awaited<ReturnType<HarnessService['agent']>>, binding: Binding): Promise<void> {
+    if (binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先结束当前请求并处理未确认结果');
+    const repo = await repository(binding.cwd);
+    if ([...this.runner.fileTurns.values()].includes(repo)) throw new Error('同一 Git 仓库仍有请求运行，请结束后再恢复');
+    for (const live of this.runner.live.values()) {
+      if (!live.turnId && !live.session.hasBackgroundTasks?.()) continue;
+      if (await repository(live.cwd).catch(() => '') === repo) throw new Error('同一 Git 仓库仍有请求或后台任务运行，请结束后再恢复');
+    }
+  }
+  async previewRewind(raw: unknown) {
+    const { sessionId, turn } = rewindRequest.parse(raw);
+    return this.fileOperation(sessionId, async (agent, binding) => {
+      if (binding.fileRewind) throw new Error('请先完成上次文件与对话恢复');
+      await this.rewindIdle(agent, binding);
+      const index = binding.turns?.findIndex(entry => entry.turn === turn) ?? -1;
+      if (index < 0) throw new Error('该轮的原生边界无法确认');
+      const turns = binding.turns!.slice(index);
+      if (turns.some(entry => !entry.checkpoint)) throw new Error('所选轮次或后续轮次缺少完整文件检查点，无法恢复文件');
+      const token = randomUUID(), plan = await previewRestore(binding.cwd, turns.map(entry => entry.checkpoint!), token);
+      const fromSeq = agent.session.snapshotEvents().find(event => event.type === 'turn/start' && event.data.turn === turn)?.seq;
+      if (fromSeq === undefined) throw new Error('无法确认该轮的会话记录边界');
+      this.rewindPreviews.set(sessionId, { token, index, identity: this.rewindIdentity(binding), fromSeq, plan, at: Date.now() });
+      return { token, paths: plan.paths, conflicts: plan.conflicts, ...(plan.conflicts.length ? { diff: '', truncated: false } : await restoreDiff(plan)), turns: turns.length };
+    });
+  }
+  async confirmRewind(raw: unknown) {
+    const { sessionId, token } = confirmRewindRequest.parse(raw);
+    return this.fileOperation(sessionId, async (agent, binding) => {
+      const noticed = () => agent.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.source.kind === 'dsh-harness-provider' && event.data.source.rewindToken === token);
+      if (!binding.fileRewind && noticed()) return this.view(binding, false, agent.session.snapshotEvents());
+      await this.rewindIdle(agent, binding);
+      if (!binding.fileRewind) {
+        const preview = this.rewindPreviews.get(sessionId);
+        if (!preview || preview.token !== token || Date.now() - preview.at > 300_000 || preview.identity !== this.rewindIdentity(binding)) throw new Error('恢复预览已过期，请重新预览');
+        if (preview.plan.conflicts.length) throw new Error('文件恢复存在冲突，未执行任何恢复');
+        if (await restorePosition(binding.cwd, preview.plan) !== 'before') throw new Error('工作区已变化，请重新预览');
+        const target = await this.forkBefore(binding, preview.index);
+        const live = this.runner.live.get(sessionId);
+        if (live) { await live.session.close(); this.runner.live.delete(sessionId); }
+        if (await restorePosition(binding.cwd, preview.plan) !== 'before') throw new Error('工作区已变化，请重新预览');
+        binding.fileRewind = { token, keep: preview.index, fromSeq: preview.fromSeq, plan: preview.plan, target: target ?? null, applied: false };
+        await this.bindings.write(binding);
+      }
+      const recovery = binding.fileRewind;
+      if (!recovery || recovery.token !== token) throw new Error('恢复标识与待完成操作不一致');
+      if (!recovery.applied) {
+        const position = await restorePosition(binding.cwd, recovery.plan);
+        if (position === 'changed') throw new Error('恢复期间工作区已变化，已暂停；请保留当前文件并核对恢复记录');
+        if (position === 'before') await applyRestore(binding.cwd, recovery.plan);
+        if (recovery.target) binding.nativeRef = recovery.target; else delete binding.nativeRef;
+        binding.turns = (binding.turns ?? []).slice(0, recovery.keep);
+        delete binding.usage;
+        recovery.applied = true;
+        await this.bindings.write(binding);
+      }
+      if (!noticed()) await this.notice(agent, '文件与对话已恢复', '已恢复所选轮次及之后的文件改动和原生对话上下文；不冲突的后续文件修改已保留。', recovery.fromSeq, token);
+      else await this.ctx.sessions.flush(agent.session);
+      delete binding.fileRewind;
+      await this.bindings.write(binding);
+      this.rewindPreviews.delete(sessionId);
+      return this.view(binding, false, agent.session.snapshotEvents());
+    });
   }
 
   async rollback(raw: unknown) {
@@ -1073,7 +1154,7 @@ export class HarnessService extends TypertRemoteService {
       const agent = await this.agent(request.sessionId);
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) throw new Error('请使用 DSH 原生模型选择器');
-      if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending) throw new Error('请等待当前请求结束');
+      if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending || binding.fileRewind) throw new Error('请等待当前请求结束');
       const catalog = await this.catalog(binding);
       if ('error' in catalog) throw new Error(catalog.error);
       const entry = catalog.models.find(model => model.ref.id === request.model);
@@ -1096,7 +1177,7 @@ export class HarnessService extends TypertRemoteService {
       const agent = await this.agent(request.sessionId);
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) throw new Error('请使用 DSH 原生模型选择器');
-      if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending) throw new Error('请等待当前请求结束');
+      if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending || binding.fileRewind) throw new Error('请等待当前请求结束');
       const catalog = await this.catalog(binding);
       if ('error' in catalog) throw new Error(catalog.error);
       const modelId = binding.model?.id ?? catalog.defaultModel?.id;
@@ -1128,7 +1209,7 @@ export class HarnessService extends TypertRemoteService {
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) throw new Error('请使用 DSH 原生权限选择器');
       if (binding.delegation?.discussion) throw new Error('讨论会话权限已锁定，不能切换权限模式');
-      if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending) throw new Error('请等待当前请求结束');
+      if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending || binding.fileRewind) throw new Error('请等待当前请求结束');
       const inspection = await this.inspection(binding);
       if ('error' in inspection) throw new Error(inspection.error);
       if (!inspection.permissionModes?.modes.some(mode => mode.id === request.permission)) throw new Error('这个 Harness 不支持切换权限模式');
@@ -1152,7 +1233,7 @@ export class HarnessService extends TypertRemoteService {
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) throw new Error('关联项目仅支持 Codex / Claude Code 会话');
       if (binding.delegation?.discussion) throw new Error('讨论会话不能关联项目');
-      if (agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length || binding.pending) throw new Error('请等待当前请求结束');
+      if (agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length || binding.pending || binding.fileRewind) throw new Error('请等待当前请求结束');
       // A worktree delegation works in a checkout of its source repository; linking that repository would bypass the merge.
       const own = [binding.cwd, binding.delegation?.worktree?.repo];
       for (const id of request.workspaceIds) if (own.includes(this.workspace(id).path)) throw new Error('不能关联会话自己的项目');
@@ -1203,7 +1284,7 @@ export class HarnessService extends TypertRemoteService {
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) throw new Error('请使用 DSH 原生配置');
       if (binding.delegation?.discussion) throw new Error('讨论会话不能修改 Harness 配置');
-      if (agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length || binding.pending) throw new Error('请等待当前请求结束');
+      if (agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length || binding.pending || binding.fileRewind) throw new Error('请等待当前请求结束');
       const catalog = await this.catalog(binding);
       if ('error' in catalog) throw new Error(catalog.error);
       const option = catalog.configOptions?.find(entry => entry.id === request.configId);
@@ -1232,6 +1313,7 @@ export class HarnessService extends TypertRemoteService {
       await this.bindings.serial(sessionId, async () => {
         const agent = await this.agent(sessionId), binding = await this.bindings.read(sessionId);
         if (!binding) throw new Error('请使用 DSH 原生上下文管理');
+        if (binding.fileRewind) throw new Error('请先完成文件与对话恢复');
         if (binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先结束当前请求并处理未确认结果');
         const live = this.runner.live.get(sessionId);
         if (live) { await live.session.close(); this.runner.live.delete(sessionId); }
@@ -1422,6 +1504,8 @@ export class HarnessService extends TypertRemoteService {
     return { ...(authStatus ? { authStatus } : {}), harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? nativeLocked,
       model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null,
       configs: binding?.configs ?? {}, linked: binding ? linkedWorkspaces(this.ctx, binding).map(workspace => workspace.id as string) : [], linkedPaths: binding?.linkedPaths ?? [], recoveryRequired: !!binding?.pending, editableTurns: binding?.turns?.map(entry => entry.turn) ?? [],
+      rewindRecoveryToken: binding?.fileRewind?.token ?? null,
+      rewindableTurns: binding?.turns?.filter((entry, index, turns) => !!entry.checkpoint && turns.slice(index).every(turn => !!turn.checkpoint)).map(entry => entry.turn) ?? [],
       supersededTurns: supersededTurns(events) };
   }
   /** Whether the session runs on an external Harness, after its remembered Harness selection has been applied. */
@@ -1446,6 +1530,7 @@ export class HarnessService extends TypertRemoteService {
       signal.throwIfAborted();
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) return native.prompt(request, signal);
+      if (binding.fileRewind) throw new RemoteError('gateway/bad-request', '文件与对话恢复尚未完成，请先完成恢复', {});
       if (!request.content.some(part => part.type !== 'text' || part.text.trim())) throw new RemoteError('gateway/bad-request', '请输入文字或上传附件', {});
       const agent = await this.agent(request.sessionId);
       const matches = (message: { source: unknown }) => {
@@ -1488,7 +1573,7 @@ export class HarnessService extends TypertRemoteService {
         if (!binding) return native.fork(request);
         if (binding.delegation?.discussion) throw new Error('讨论会话不能创建分支');
         const agent = await this.agent(request.sessionId);
-        if (binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先等待当前请求结束');
+        if (binding.pending || binding.fileRewind || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先等待当前请求结束或完成恢复');
         if (request.atSeq !== undefined && binding.carry && request.atSeq < binding.carry.throughSeq) {
           // This prefix predates the current Harness, so it has no native turn to fork.
           const child = await native.fork(request);

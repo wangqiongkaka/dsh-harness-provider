@@ -1,14 +1,16 @@
 import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 /**
- * Agent Client Protocol (ACP v1) sessions behind the Host contract. One adapter per agent program; each session owns
+ * Agent Client Protocol sessions behind the Host contract. One adapter per agent program; each session owns
  * one agent process. Codex and Claude Code differ only by the profile in acp-profiles.ts.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
-import { client, ndJsonStream, RequestError, type ClientConnection, type ClientContext } from '@agentclientprotocol/sdk';
-import type * as acp from '@agentclientprotocol/sdk';
+import { StringDecoder } from 'node:string_decoder';
+import { client, ndJsonStream, RequestError, type ClientConnection, type ClientContext } from '@agentclientprotocol/sdk/unstable';
+import { client as clientV2 } from '@agentclientprotocol/sdk/experimental/v2/unstable';
+import type * as acp from '@agentclientprotocol/sdk/unstable';
 import pkg from '../package.json' with { type: 'json' };
 import {
   HarnessOutputChannel, harnessIdSchema, harnessModelRefSchema, harnessPermissionModeIdSchema, harnessThinkingOptionIdSchema,
@@ -26,6 +28,8 @@ import {
 
 export interface AcpProfile {
   harnessId: string;
+  /** Production profiles use v2; v1 remains available for protocol fixtures. */
+  protocolVersion?: 2;
   /** Whether ACP thought chunks should be exposed as DSH reasoning rows. */
   showThoughts?: boolean;
   /**
@@ -131,13 +135,18 @@ const DETACHED_LIMIT = 20_000;
 const WAKE_GRACE_MS = 600_000;
 const turnHash = (input: string) => createHash('sha256').update(input).digest('hex').slice(0, 16);
 const promptText = (blocks: acp.ContentBlock[]) => blocks.flatMap(block => block.type === 'text' ? [block.text] : []).join('');
+const fullMessageText = (content: unknown): string => Array.isArray(content) ? content.map(record).flatMap(part => part.type === 'text' && typeof part.text === 'string' ? [part.text] : []).join('') : '';
+const v2Commands = (commands: unknown[]): unknown[] => commands.map(value => {
+  const command = record(value);
+  return command.type === undefined && typeof command.name === 'string' && typeof command.description === 'string' ? { ...command, type: 'command' } : value;
+});
 
 // ── Catalogs from session/new ───────────────────────────────────────────────────────────────────────────────────────
 
 type Opened = acp.NewSessionResponse | acp.LoadSessionResponse;
 interface Catalogs {
   catalog: HarnessModelCatalog; permissionModes?: HarnessPermissionModeCatalog;
-  modelConfigId?: string; thinkingConfigId?: string; currentModel?: string; currentThinking?: string; currentMode?: string;
+  modelConfigId?: string; thinkingConfigId?: string; modeConfigId?: string; currentModel?: string; currentThinking?: string; currentMode?: string;
   configOptions: Map<string, acp.SessionConfigOption>;
 }
 const recommended = (option: acp.SessionConfigOption): string | undefined => text(record(record(record(option._meta).jetbrains).air).recommendedValue, 512);
@@ -176,7 +185,7 @@ export function catalogsOf(opened: Opened): Catalogs {
       defaultModeId: harnessPermissionModeIdSchema.parse(modes.currentModeId) } } : {}),
     ...(model ? { modelConfigId: model.id, currentModel: model.currentValue } : {}),
     ...(thinking ? { thinkingConfigId: thinking.id, currentThinking: thinking.currentValue } : {}),
-    ...(modes ? { currentMode: modes.currentModeId } : {}), configOptions: new Map(auxiliary.map(option => [option.id, option])),
+    ...(modes ? { currentMode: modes.currentModeId } : {}), ...(mode ? { modeConfigId: mode.id } : {}), configOptions: new Map(auxiliary.map(option => [option.id, option])),
   };
 }
 const capabilitiesOf = (agent: acp.AgentCapabilities | undefined, catalogs: Catalogs): HarnessSessionCapabilities => ({
@@ -261,13 +270,15 @@ interface Handlers {
 /** One agent process and its connection; `initialize` has already succeeded when `connect` resolves. */
 class AcpProcess {
   readonly agent: ClientContext;
+  readonly protocolVersion: 1 | 2;
   /** Default timeout of requests to this agent, read when each request starts. */
   requestTimeoutMs = (): number => DEFAULT_LIMITS.requestTimeoutMs;
   initialized!: acp.InitializeResponse;
   private closing?: Promise<void>;
   private live = true;
-  private constructor(private readonly child: ChildProcess, private readonly connection: ClientConnection, private readonly exited: Promise<void>) {
+  private constructor(private readonly child: ChildProcess, private readonly connection: ClientConnection, private readonly exited: Promise<void>, protocolVersion: 1 | 2) {
     this.agent = connection.agent;
+    this.protocolVersion = protocolVersion;
   }
   static async connect(profile: AcpProfile, environment: NodeJS.ProcessEnv, cwd: string, handlers: Handlers, instructions?: string): Promise<AcpProcess> {
     const { command, args, env } = profile.spawn(environment, instructions);
@@ -277,7 +288,20 @@ class AcpProcess {
     const exited = new Promise<void>(resolve => { child.once('close', () => resolve()); child.once('error', () => resolve()); });
     const wire = ndJsonStream(Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>);
     const stream = { writable: wire.writable, readable: wire.readable.pipeThrough(new TransformStream<acp.AnyMessage, acp.AnyMessage>({ transform(message, controller) {
+      // Bundled adapters predate the required command tag in SDK 2.1's v2 draft.
+      if (profile.protocolVersion === 2) {
+        if ('result' in message && Array.isArray(record(message.result).availableCommands)) message = { ...message, result: { ...record(message.result), availableCommands: v2Commands(record(message.result).availableCommands as unknown[]) } } as acp.AnyMessage;
+        if ('method' in message && message.method === 'session/update') {
+          const params = record(message.params), update = record(params.update);
+          if (update.sessionUpdate === 'available_commands_update' && Array.isArray(update.availableCommands)) message = { ...message, params: { ...params, update: { ...update, availableCommands: v2Commands(update.availableCommands) } } } as acp.AnyMessage;
+        }
+      }
       const update = 'method' in message && message.method === 'session/update' ? record(record(message.params).update).sessionUpdate : undefined;
+      if (profile.protocolVersion === 2 && typeof update === 'string' && ['_subagent_update', '_async_task_spawned', '_async_task_state_update'].includes(update) && 'params' in message) {
+        const params = record(message.params), payload = record(params.update);
+        controller.enqueue({ ...message, method: SUBAGENT_UPDATE, params: { ...params, update: { ...payload, sessionUpdate: update.startsWith('_async_') ? update.slice(1) : update } } } as acp.AnyMessage);
+        return;
+      }
       controller.enqueue(typeof update === 'string' && SUBAGENT_LIFECYCLE.has(update) ? { ...message, method: SUBAGENT_UPDATE } as acp.AnyMessage : message);
     } })) };
     const reader = stream.readable.getReader();
@@ -295,12 +319,34 @@ class AcpProcess {
       .onNotification('_auth/status_update', params => params, ({ params }) => handlers.authStatus?.(record(params).authStatus))
       .onRequest('session/request_permission', ({ params, signal }) => handlers.permission(params, signal))
       .onRequest('elicitation/create', ({ params, signal }) => handlers.elicitation(params, signal));
-    const process_ = new AcpProcess(child, app.connect({ ...stream, readable }), exited);
+    const v2 = profile.protocolVersion === 2;
+    const appV2 = clientV2({ name: pkg.name })
+      .onNotification('session/update', ({ params }) => handlers.update(params as unknown as acp.SessionNotification))
+      .onNotification(SUBAGENT_UPDATE, params => params as acp.SessionNotification, ({ params }) => handlers.update(params))
+      .onNotification('elicitation/complete', ({ params }) => handlers.elicitationComplete(params as unknown as acp.CompleteElicitationNotification))
+      .onNotification('_auth/status_update', params => params, ({ params }) => handlers.authStatus?.(record(params).authStatus))
+      .onRequest('session/request_permission', async ({ params, signal }) => {
+        const subject = record(params.subject);
+        const toolCall = subject.type === 'tool_call' ? record(subject.toolCall) : subject.type === 'command'
+          ? { toolCallId: text(subject.toolCallId, 200) ?? randomUUID(), rawInput: { command: subject.command, cwd: subject.cwd } }
+          : { toolCallId: randomUUID() };
+        const options = params.options.filter(option => ['allow_once', 'allow_always', 'reject_once', 'reject_always'].includes(option.kind));
+        if (!options.length) return { outcome: { outcome: 'cancelled' } };
+        const meta = { ...record(params._meta), permission: { title: params.title, ...(params.description ? { description: params.description } : {}) } };
+        return await handlers.permission({ sessionId: params.sessionId, toolCall: { ...toolCall, toolCallId: text(toolCall.toolCallId, 200) ?? randomUUID() }, options, _meta: meta } as acp.RequestPermissionRequest, signal) as never;
+      })
+      .onRequest('elicitation/create', async ({ params, signal }) => await handlers.elicitation(params as unknown as acp.CreateElicitationRequest, signal) as never);
+    const connection = v2 ? appV2.connect({ ...stream, readable } as never) as unknown as ClientConnection : app.connect({ ...stream, readable });
+    const process_ = new AcpProcess(child, connection, exited, v2 ? 2 : 1);
     process_.requestTimeoutMs = () => limitsOf(profile).requestTimeoutMs;
     void Promise.race([process_.connection.closed, exited]).then(() => { if (process_.live) { process_.live = false; handlers.fault(new Error(`${profile.harnessId} agent exited`)); } });
     try {
-      process_.initialized = await request<acp.InitializeResponse>(process_, 'initialize', { protocolVersion: 1, clientCapabilities: clientCapabilities(profile),
-        clientInfo: { name: pkg.name, version: pkg.version, title: 'DSH Harness Plugin' } });
+      const info = { name: pkg.name, version: pkg.version, title: 'DSH Harness Plugin' };
+      if (v2) {
+        const response = await request<{ protocolVersion: number; capabilities?: { session?: { fork?: unknown } }; _meta?: Record<string, unknown> }>(process_, 'initialize', { protocolVersion: 2, info, capabilities: clientCapabilities(profile) });
+        if (response.protocolVersion !== 2) throw new Error('ACP v2 协商失败');
+        process_.initialized = { protocolVersion: 1, agentCapabilities: { sessionCapabilities: { ...(response.capabilities?.session?.fork ? { fork: {} } : {}) } }, ...(response._meta ? { _meta: response._meta } : {}) };
+      } else process_.initialized = await request<acp.InitializeResponse>(process_, 'initialize', { protocolVersion: 1, clientCapabilities: clientCapabilities(profile), clientInfo: info });
       return process_;
     } catch (cause) { await process_.close(); throw cause; }
   }
@@ -321,8 +367,24 @@ class AcpProcess {
 const IDLE_HANDLERS: Handlers = {
   update: () => {}, permission: async () => ({ outcome: { outcome: 'cancelled' } }), elicitation: async () => ({ action: 'cancel' }), elicitationComplete: () => {}, fault: () => {},
 };
-function request<T = unknown>(process_: AcpProcess, method: string, params: unknown, timeoutMs = process_.requestTimeoutMs()): Promise<T> {
-  return process_.agent.request<T>(method, params, { cancellationSignal: AbortSignal.timeout(timeoutMs) });
+function v2Options(value: unknown): acp.SessionConfigOption[] {
+  if (!Array.isArray(value)) throw new Error('ACP v2 配置项格式无效');
+  return value.map(value => {
+    const option = record(value);
+    if (typeof option.configId !== 'string') throw new Error('ACP v2 配置项缺少标识');
+    const options = Array.isArray(option.options) ? option.options.map(value => {
+      const entry = record(value);
+      return typeof entry.groupId === 'string' ? { ...entry, group: entry.groupId } : entry;
+    }) : option.options;
+    return { ...option, id: option.configId, ...(options !== undefined ? { options } : {}) } as unknown as acp.SessionConfigOption;
+  });
+}
+async function request<T = unknown>(process_: AcpProcess, method: string, params: unknown, timeoutMs = process_.requestTimeoutMs()): Promise<T> {
+  const input = process_.protocolVersion === 2 && method === 'session/set_config_option' && typeof record(params).value === 'string'
+    ? { ...record(params), type: 'id' } : params;
+  const result = await process_.agent.request<T>(method, input, { cancellationSignal: AbortSignal.timeout(timeoutMs) });
+  if (process_.protocolVersion === 2 && Array.isArray(record(result).configOptions)) return { ...record(result), configOptions: v2Options(record(result).configOptions) } as T;
+  return result;
 }
 async function waitFor<T>(work: () => T | undefined, timeoutMs: number): Promise<T | undefined> {
   const deadline = Date.now() + timeoutMs;
@@ -347,6 +409,7 @@ class Transcript {
   readonly turns: TranscriptTurn[] = [];
   constructor(private readonly outputLimit: () => number = () => DEFAULT_LIMITS.toolOutputChars) {}
   private agentMessageId?: string;
+  private readonly agentMessages = new Map<string, HostItemOf<'agentMessage'>>();
   /** Prompt hash plus its occurrence: stable for a finished turn, and the same for a replayed history. */
   key(turn: TranscriptTurn): string {
     const index = this.turns.indexOf(turn);
@@ -356,11 +419,21 @@ class Transcript {
     const turn: TranscriptTurn = { hash: turnHash(input), input, items: [], hasOutput: false, ...(userMessageId ? { userMessageId } : {}) };
     this.turns.push(turn);
     this.agentMessageId = undefined;
+    this.agentMessages.clear();
     return turn;
   }
   /** Replayed updates rebuild turns; a user chunk with a new message id opens the next one. */
   replay(update: acp.SessionUpdate): void {
     const last = this.turns.at(-1);
+    const v2 = record(update);
+    if (v2.sessionUpdate === 'user_message' && typeof v2.messageId === 'string') {
+      if (last?.userMessageId === v2.messageId && v2.content === undefined) return;
+      const content = fullMessageText(v2.content);
+      if (last?.userMessageId === v2.messageId) { last.input = content; last.hash = turnHash(content); }
+      else if (last && INTERRUPTION_MARKER.test(content.trim())) last.interrupted = true;
+      else this.begin(content, v2.messageId);
+      return;
+    }
     if (update.sessionUpdate === 'user_message_chunk') {
       const chunk = update.content.type === 'text' ? update.content.text : '';
       if (last && update.messageId && last.userMessageId === update.messageId) { last.input += chunk; last.hash = turnHash(last.input); return; }
@@ -369,6 +442,19 @@ class Transcript {
       return;
     }
     if (!last) return;
+    if (v2.sessionUpdate === 'agent_message' && typeof v2.messageId === 'string') {
+      let item = this.agentMessages.get(v2.messageId);
+      if (!item) {
+        item = { type: 'agentMessage', itemId: newItemId(), text: '' };
+        this.agentMessages.set(v2.messageId, item);
+        last.items.push({ item, outcome: { status: 'succeeded' } });
+      }
+      if (v2.content !== undefined) item.text = fullMessageText(v2.content);
+      this.agentMessageId = v2.messageId;
+      last.lastAgentMessageId = v2.messageId;
+      last.hasOutput = true;
+      return;
+    }
     const notice = noticeOf(update);
     if (notice) {
       if (update.sessionUpdate === 'session_info_update' && sessionFailure(update._meta)?.severity === 'error') last.failure = notice.title;
@@ -377,7 +463,11 @@ class Transcript {
     if (update.sessionUpdate === 'agent_message_chunk' && update.content.type === 'text') {
       const previous = last.items.at(-1);
       if (previous?.item.type === 'agentMessage' && update.messageId && this.agentMessageId === update.messageId) previous.item.text += update.content.text;
-      else last.items.push({ item: { type: 'agentMessage', itemId: newItemId(), text: update.content.text }, outcome: { status: 'succeeded' } });
+      else {
+        const item: HostItemOf<'agentMessage'> = { type: 'agentMessage', itemId: newItemId(), text: update.content.text };
+        last.items.push({ item, outcome: { status: 'succeeded' } });
+        if (update.messageId) this.agentMessages.set(update.messageId, item);
+      }
       this.agentMessageId = update.messageId ?? undefined;
       last.hasOutput = true;
       if (update.messageId) last.lastAgentMessageId = update.messageId;
@@ -415,7 +505,7 @@ class Transcript {
         const call = turn.tools?.get(snapshot.item.itemId)?.call;
         const diffs = call?.content?.filter(part => part.type === 'diff') ?? [];
         return call?.kind === 'edit' && !dshTool(call) && diffs.length
-          ? diffs.map((diff, index) => ({ item: diffTool(`${call.toolCallId}#${index}`, diff), outcome: snapshot.outcome })) : [snapshot];
+          ? diffs.map((diff, index) => ({ item: diffItem(`${call.toolCallId}#${index}`, diff), outcome: snapshot.outcome })) : [snapshot];
       }),
       outcome: (turn.userMessageId ? native?.get(turn.userMessageId) : undefined) ?? inferredOutcome(turn),
     }));
@@ -492,7 +582,7 @@ function toolItem(call: acp.ToolCall | acp.ToolCallUpdate): HostItemOf<'commandE
  */
 function dshTool(call: acp.ToolCall | acp.ToolCallUpdate): { toolName: string; arguments: JsonValue } | undefined {
   const input = record(call.rawInput);
-  const diff = call.content?.find(part => part.type === 'diff');
+  const diff = call.content?.find(part => part.type === 'diff' && !Array.isArray(record(part).changes));
   const row = (toolName: string, args: Record<string, unknown>) => ({ toolName, arguments: jsonOf(args) });
   switch (call.name) {
     case 'Read': return text(input.file_path) ? row('read', { file_path: input.file_path, offset: input.offset, limit: input.limit }) : undefined;
@@ -625,12 +715,29 @@ const stamp = (): string => new Date().toISOString();
 const diffTool = (itemId: string, diff: acp.Diff): HostItemOf<'toolExecution'> => ({ type: 'toolExecution', itemId: hostItemIdSchema.parse(itemId), namespace: 'edit',
   ...(typeof diff.oldText === 'string' ? { toolName: 'edit', arguments: { file_path: diff.path, old_string: diff.oldText, new_string: diff.newText } }
     : { toolName: 'write', arguments: { file_path: diff.path, content: diff.newText } }) });
+function diffItem(itemId: string, diff: acp.Diff): HostItem {
+  const raw = record(diff);
+  if (!Array.isArray(raw.changes)) return diffTool(itemId, diff);
+  const patch = record(raw.patch), unifiedDiff = patch.format === 'git_patch' && typeof patch.text === 'string' ? patch.text : '';
+  const changes: import('./contracts.js').HostFileChange[] = [];
+  const validPath = (value: unknown): value is string => typeof value === 'string' && value.length <= 4096 && isAbsolute(value) && !value.includes('\0');
+  for (const value of raw.changes) {
+    const change = record(value), path = change.path;
+    if (!validPath(path) || !['add', 'delete', 'modify', 'move', 'copy'].includes(String(change.operation)) || ((change.operation === 'move' || change.operation === 'copy') && !validPath(change.oldPath)) || (raw.patch && patch.format !== 'git_patch')) {
+      return { type: 'toolExecution', itemId: hostItemIdSchema.parse(itemId), namespace: 'edit', toolName: 'file_diff', arguments: jsonOf(raw) };
+    }
+    if (change.operation === 'move' && typeof change.oldPath === 'string') changes.push({ path: change.oldPath, kind: 'delete', unifiedDiff });
+    changes.push({ path, kind: change.operation === 'add' || change.operation === 'copy' || change.operation === 'move' ? 'add' : change.operation === 'delete' ? 'delete' : 'update', unifiedDiff });
+  }
+  return { type: 'fileChange', itemId: hostItemIdSchema.parse(itemId), changes };
+}
 
 // ── Session ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 type Pending = { interaction: HostInteraction; settle(response: acp.RequestPermissionResponse | acp.CreateElicitationResponse): void; kind: 'permission' | 'form' | 'url'; form?: Form; elicitationId?: string };
 interface ActiveTurn {
   hostId: HostTurnId; transcript: TranscriptTurn; cancelled: boolean;
+  v2MessageId?: string; v2SeenMessages?: Set<string>; v2Idle?: Record<string, unknown>;
   /** No prompt of the user's: the turn shows a cycle the agent ran on its own, and ends with it. */
   continuation?: true;
   message?: HostItemOf<'agentMessage'>; messageId?: string;
@@ -642,6 +749,7 @@ interface ActiveTurn {
   done: PromiseWithResolvers<void>;
 }
 interface SessionOptions { profile: AcpProfile; environment: NodeJS.ProcessEnv; input: OpenSessionInput; onClosed(): void }
+type V2Terminal = { decoder: StringDecoder; output: string; exitCode?: number | null; toolCallId?: string };
 
 class AcpSession implements HarnessSession {
   readonly harnessId: HarnessId;
@@ -656,6 +764,7 @@ class AcpSession implements HarnessSession {
   readonly #taskDetails = new Map<string, HarnessBackgroundTask>();
   readonly #taskTools = new Map<string, acp.ToolCallUpdate>();
   readonly #taskEnds = new Set<string>();
+  readonly #v2Terminals = new Map<string, V2Terminal>();
   /** Finished background tasks whose wake-up cycle has not reported its result yet, and when the last one changed. */
   #pendingWakes = 0;
   #wakeAt = 0;
@@ -678,6 +787,7 @@ class AcpSession implements HarnessSession {
   #rawCommands: acp.AvailableCommand[] = [];
   #titlePending: boolean;
   #titling = false;
+  #v2Title?: { seen: Set<string>; id?: string; idle: boolean; done: PromiseWithResolvers<void> };
   #active: ActiveTurn | null = null;
   /** What the agent wrote between turns, kept for the turn that shows it; `ended` once that cycle's result arrived. */
   #detached: { updates: acp.SessionUpdate[]; ended: boolean; adopted: PromiseWithResolvers<void> } | null = null;
@@ -734,14 +844,16 @@ class AcpSession implements HarnessSession {
         sessionId = created.sessionId; opened = created;
       } else {
         sessionId = input.nativeRef.nativeSessionId;
-        opened = await request<acp.LoadSessionResponse>(process_, 'session/load', { sessionId, cwd: input.cwd, mcpServers: [], ...roots, ...(meta ? { _meta: meta } : {}) }, limitsOf(profile).loadTimeoutMs);
+        opened = await request<acp.LoadSessionResponse>(process_, process_.protocolVersion === 2 ? 'session/resume' : 'session/load', { sessionId, cwd: input.cwd, mcpServers: [], ...roots,
+          ...(process_.protocolVersion === 2 ? { replayFrom: { type: 'start' } } : {}), ...(meta ? { _meta: meta } : {}) }, limitsOf(profile).loadTimeoutMs);
       }
       const catalogs = catalogsOf(opened);
-      const skills = (await waitFor(() => commands, 3_000)) ?? [];
+      const responseCommands = record(opened).availableCommands;
+      const skills = (Array.isArray(responseCommands) ? responseCommands as acp.AvailableCommand[] : await waitFor(() => commands, 3_000)) ?? [];
       session = new AcpSession(options, process_, sessionId, opened, catalogs, skillsOf(profile, skills));
       session.#rawCommands = skills;
       session.#authChanged(authStatus);
-      for (const { sessionId: owner, update } of replay) if (!session.#trackTask(owner, update) && !session.#routeSubagent(owner, update)) session.#transcript.replay(update);
+      for (const notification of replay) for (const { sessionId: owner, update } of session.#terminalEvents(notification)) if (!session.#trackTask(owner, update) && !session.#routeSubagent(owner, update)) session.#transcript.replay(update);
       await session.#applyHints(input);
       session.#initialized = true;
       return session;
@@ -890,6 +1002,11 @@ class AcpSession implements HarnessSession {
     this.#configChanged(response.configOptions);
   }
   async #setMode(modeId: string): Promise<void> {
+    if (this.#process.protocolVersion === 2) {
+      if (!this.#catalogs.modeConfigId) throw new Error('ACP v2 未提供权限模式配置');
+      await this.#setConfig(this.#catalogs.modeConfigId, modeId);
+      return;
+    }
     await request(this.#process, 'session/set_mode', { sessionId: this.#sessionId, modeId });
     this.#modeChanged(modeId);
   }
@@ -947,7 +1064,20 @@ class AcpSession implements HarnessSession {
       const title = text(lead?.type === 'text' ? lead.text.split('\n').find(line => line.trim()) : undefined, 60);
       // A local command that hangs must not hold the turn; the timeout cancels the request on the agent.
       // The command's own output ("Session renamed to: …") arrives before any turn exists; it is no follow-up of the agent's.
-      if (title) { this.#titling = true; await request(this.#process, 'session/prompt', { sessionId: this.#sessionId, prompt: [{ type: 'text', text: this.#profile.titleCommand!(title) }] }, TITLE_TIMEOUT_MS).catch(() => {}); this.#titling = false; }
+      if (title) {
+        this.#titling = true;
+        try {
+          if (this.#process.protocolVersion === 2) {
+            const state: { seen: Set<string>; id?: string; idle: boolean; done: PromiseWithResolvers<void> } = { seen: new Set(), idle: false, done: Promise.withResolvers<void>() };
+            this.#v2Title = state;
+            const response = await request<{ messageId: string }>(this.#process, 'session/prompt', { sessionId: this.#sessionId, prompt: [{ type: 'text', text: this.#profile.titleCommand!(title) }] }, TITLE_TIMEOUT_MS);
+            state.id = response.messageId;
+            if (state.id && state.seen.has(state.id) && state.idle) state.done.resolve();
+            await Promise.race([state.done.promise, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('ACP v2 命名轮次未结束')), TITLE_TIMEOUT_MS).unref())]);
+          } else await request(this.#process, 'session/prompt', { sessionId: this.#sessionId, prompt: [{ type: 'text', text: this.#profile.titleCommand!(title) }] }, TITLE_TIMEOUT_MS).catch(() => {});
+        } catch (cause) { await this.close(); throw cause; }
+        finally { this.#v2Title = undefined; this.#titling = false; }
+      }
     }
     const transcript = this.#transcript.begin(promptText(blocks));
     const active: ActiveTurn = { hostId: command.turnId, transcript, cancelled: false, tools: new Map(), announced: new Map(), compaction: new Map(), interactions: new Map(), done: Promise.withResolvers() };
@@ -956,7 +1086,13 @@ class AcpSession implements HarnessSession {
     // A prompt sent before the Host opened a turn for the agent's own follow-up shows that follow-up first.
     this.#adoptDetached();
     this.#process.agent.request<acp.PromptResponse>('session/prompt', { sessionId: this.#sessionId, prompt: blocks })
-      .then(response => this.#finishPrompt(active, response), cause => {
+      .then(response => {
+        if (this.#process.protocolVersion === 1) this.#finishPrompt(active, response);
+        else {
+          active.v2MessageId = text(record(response).messageId, 200);
+          if (active.v2MessageId && active.v2SeenMessages?.has(active.v2MessageId) && active.v2Idle) this.#finishV2(active, active.v2Idle);
+        }
+      }, cause => {
         const failure = toError(cause, 'Turn failed');
         if (failure.code === 'authenticationRequired') this.#authChanged({ kind: 'none', label: '未登录' });
         this.#finish(active, active.cancelled ? { status: 'cancelled', reason: 'Cancelled by user' } : { status: 'failed', error: failure });
@@ -983,6 +1119,18 @@ class AcpSession implements HarnessSession {
     detached?.adopted.resolve();
   }
   #turnRef(key: string) { return { harnessId: this.harnessId, nativeSessionId: this.#sessionId, nativeTurnKey: key, formatVersion: 1 as const }; }
+
+  #finishV2(active: ActiveTurn, update: Record<string, unknown>): void {
+    const reason = update.stopReason;
+    if (reason === 'error') {
+      const failure = record(update.error);
+      const code = failure.code === -32000 ? 'authenticationRequired' : 'nativeFailure';
+      if (code === 'authenticationRequired') this.#authChanged({ kind: 'none', label: '未登录' });
+      this.#finish(active, { status: 'failed', error: error(code, text(failure.message, 1000) ?? 'ACP v2 轮次失败', code === 'authenticationRequired') });
+    } else if (typeof reason !== 'string' || !['end_turn', 'max_tokens', 'max_turn_requests', 'refusal', 'cancelled'].includes(reason)) {
+      this.#finish(active, { status: 'failed', error: error('internalError', 'ACP v2 未报告可确认的轮次结果', true) });
+    } else this.#finishPrompt(active, { stopReason: reason, ...(update.usage ? { usage: update.usage } : {}), ...(update._meta ? { _meta: update._meta } : {}) } as acp.PromptResponse);
+  }
 
   #finishPrompt(active: ActiveTurn, response: acp.PromptResponse): void {
     if (response.usage) {
@@ -1016,7 +1164,83 @@ class AcpSession implements HarnessSession {
 
   // ── session/update ────────────────────────────────────────────────────────────────────────────────────────────────
 
+  #terminalEvents(notification: acp.SessionNotification): acp.SessionNotification[] {
+    if (this.#process.protocolVersion !== 2) return [notification];
+    const update = record(notification.update), terminalId = text(update.terminalId, 200);
+    const makeUpdate = (terminal: V2Terminal): acp.SessionNotification | undefined => terminal.toolCallId ? {
+      sessionId: notification.sessionId,
+      update: { sessionUpdate: 'tool_call_update', toolCallId: terminal.toolCallId, rawOutput: { output: terminal.output, ...(terminal.exitCode !== undefined ? { exitCode: terminal.exitCode } : {}) } },
+    } : undefined;
+    if ((update.sessionUpdate === 'terminal_update' || update.sessionUpdate === 'terminal_output_chunk') && terminalId) {
+      const data = update.sessionUpdate === 'terminal_update' ? record(update.output).data : update.data;
+      if (typeof data === 'string' && !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/.test(data)) {
+        this.#faulted(error('internalError', 'Invalid ACP terminal output'));
+        return [];
+      }
+      const key = `${notification.sessionId}\0${terminalId}`;
+      const terminal = this.#v2Terminals.get(key) ?? { decoder: new StringDecoder('utf8'), output: '' };
+      this.#v2Terminals.set(key, terminal);
+      if (update.sessionUpdate === 'terminal_update' && 'output' in update) {
+        terminal.decoder = new StringDecoder('utf8'); terminal.output = '';
+        const data = record(update.output).data;
+        if (typeof data === 'string') terminal.output = terminal.decoder.write(Buffer.from(data, 'base64'));
+      } else if (update.sessionUpdate === 'terminal_output_chunk' && typeof update.data === 'string') terminal.output += terminal.decoder.write(Buffer.from(update.data, 'base64'));
+      if (update.sessionUpdate === 'terminal_update' && 'exitStatus' in update) {
+        terminal.exitCode = update.exitStatus === null ? undefined : typeof record(update.exitStatus).exitCode === 'number' ? record(update.exitStatus).exitCode as number : null;
+        if (update.exitStatus !== null) terminal.output += terminal.decoder.end();
+      }
+      terminal.output = truncate(terminal.output, limitsOf(this.#profile).toolOutputChars + 1).text;
+      const synthetic = makeUpdate(terminal);
+      return synthetic ? [synthetic] : [];
+    }
+    if (update.sessionUpdate === 'tool_call_update' && typeof update.toolCallId === 'string' && Array.isArray(update.content)) {
+      const related: acp.SessionNotification[] = [];
+      for (const value of update.content) {
+        const part = record(value);
+        if (part.type !== 'terminal' || typeof part.terminalId !== 'string') continue;
+        const key = `${notification.sessionId}\0${part.terminalId}`;
+        const terminal = this.#v2Terminals.get(key) ?? { decoder: new StringDecoder('utf8'), output: '' };
+        terminal.toolCallId = update.toolCallId; this.#v2Terminals.set(key, terminal);
+        const synthetic = makeUpdate(terminal);
+        if (synthetic) related.push(synthetic);
+      }
+      if ((update.status === 'completed' || update.status === 'failed') && related.length) {
+        const terminalOutput = record(related.at(-1)?.update).rawOutput;
+        return [{ ...notification, update: { ...notification.update, rawOutput: { ...record(update.rawOutput), ...record(terminalOutput) } } as acp.SessionUpdate }];
+      }
+      return [notification, ...related];
+    }
+    return [notification];
+  }
+
   #notify(notification: acp.SessionNotification): void {
+    for (const event of this.#terminalEvents(notification)) this.#notifyEvent(event);
+  }
+  #notifyEvent(notification: acp.SessionNotification): void {
+    if (this.#process.protocolVersion === 2 && notification.sessionId === this.#sessionId) {
+      const update = record(notification.update), active = this.#active;
+      const title = this.#v2Title;
+      if (title && (update.sessionUpdate === 'user_message' || update.sessionUpdate === 'user_message_chunk') && typeof update.messageId === 'string') { title.seen.add(update.messageId); title.idle = false; return; }
+      if (title && update.sessionUpdate === 'state_update' && update.state === 'idle' && title.seen.size) {
+        title.idle = true;
+        if (title.id && title.seen.has(title.id)) title.done.resolve();
+        return;
+      }
+      if (update.sessionUpdate === 'config_option_update') {
+        this.#configChanged(v2Options(update.configOptions));
+        return;
+      }
+      if (active && (update.sessionUpdate === 'user_message' || update.sessionUpdate === 'user_message_chunk') && typeof update.messageId === 'string') {
+        (active.v2SeenMessages ??= new Set()).add(update.messageId);
+        active.v2Idle = undefined;
+        return;
+      }
+      if (active && update.sessionUpdate === 'state_update' && update.state === 'idle' && active.v2SeenMessages?.size) {
+        active.v2Idle = update;
+        if (active.v2MessageId && active.v2SeenMessages.has(active.v2MessageId)) this.#finishV2(active, active.v2Idle);
+        return;
+      }
+    }
     if (!this.#trackTask(notification.sessionId, notification.update) && !this.#routeSubagent(notification.sessionId, notification.update)) this.#update(notification.update);
   }
   /** Background output also arrives between prompt turns, before the ordinary transcript routing can take it. */
@@ -1077,6 +1301,22 @@ class AcpSession implements HarnessSession {
    * streams each under its own id; Claude Code tags a subagent's events with its Agent call, which itself stays in the main transcript.
    */
   #routeSubagent(sessionId: string, update: acp.SessionUpdate): boolean {
+    const v2 = record(update);
+    if (this.#process.protocolVersion === 2 && v2.sessionUpdate === '_subagent_update' && typeof v2.subagentSessionId === 'string') {
+      this.#subagents.upsert(v2.subagentSessionId, { name: text(v2.name, 200), task: text(v2.task, 4000), ...(sessionId !== this.#sessionId ? { parentId: sessionId } : {}) });
+      if (v2.state === 'completed' || v2.state === 'failed' || v2.state === 'cancelled') this.#subagents.finish(v2.subagentSessionId, v2.state);
+      return true;
+    }
+    if (this.#process.protocolVersion === 2 && v2.sessionUpdate === 'subagent_update' && typeof v2.sessionId === 'string') {
+      this.#subagents.upsert(v2.sessionId, { name: text(v2.title, 200), task: text(v2.description, 4000), ...(sessionId !== this.#sessionId ? { parentId: sessionId } : {}) });
+      const state = record(v2.state);
+      if (state.state === 'idle') {
+        if (state.stopReason === 'cancelled') this.#subagents.finish(v2.sessionId, 'cancelled');
+        else if (state.stopReason === 'error' || state.stopReason === 'refusal') this.#subagents.finish(v2.sessionId, 'failed');
+        else if (state.stopReason === 'end_turn' || state.stopReason === 'max_tokens' || state.stopReason === 'max_turn_requests') this.#subagents.finish(v2.sessionId, 'completed');
+      }
+      return true;
+    }
     const lifecycle = update as unknown as SubagentLifecycle;
     if (lifecycle.sessionUpdate === 'subagent_spawned') {
       this.#subagents.upsert(lifecycle.subagentSessionId, { name: text(lifecycle.name, 200), task: text(lifecycle.task, 4000), ...(sessionId !== this.#sessionId ? { parentId: sessionId } : {}) });
@@ -1130,7 +1370,7 @@ class AcpSession implements HarnessSession {
       // The agent writes between turns when a finished background task wakes it; the Host opens a turn that takes this over.
       if (!this.#profile.continuationEnd || this.#titling) return;
       if (!this.#detached) {
-        if (!['agent_message_chunk', 'agent_thought_chunk', 'tool_call'].includes(update.sessionUpdate)) return;
+        if (!['agent_message', 'agent_thought', 'agent_message_chunk', 'agent_thought_chunk', 'tool_call', 'tool_call_update'].includes(update.sessionUpdate)) return;
         this.#detached = { updates: [], ended: false, adopted: Promise.withResolvers() };
         this.#emit({ type: 'session.continued' });
       }
@@ -1139,8 +1379,21 @@ class AcpSession implements HarnessSession {
       this.#detached.ended = false;
       return;
     }
-    active.transcript.hasOutput ||= ['agent_message_chunk', 'tool_call'].includes(update.sessionUpdate);
+    active.transcript.hasOutput ||= ['agent_message', 'agent_message_chunk', 'tool_call', 'tool_call_update'].includes(update.sessionUpdate);
     const { hostId: turnId } = active;
+    const full = record(update);
+    if (this.#process.protocolVersion === 2 && (full.sessionUpdate === 'agent_message' || full.sessionUpdate === 'agent_thought')) {
+      const thought = full.sessionUpdate === 'agent_thought';
+      if (thought && this.#profile.showThoughts === false) return;
+      this.#update({ sessionUpdate: thought ? 'agent_thought_chunk' : 'agent_message_chunk', messageId: full.messageId as string,
+        content: { type: 'text', text: '' } } as acp.SessionUpdate);
+      const item = thought ? active.thought : active.message;
+      if (item && full.content !== undefined) {
+        item.text = fullMessageText(full.content);
+        this.#emit({ type: 'item.updated', turnId, itemId: item.itemId, update: { type: 'text.replace', text: item.text } });
+      }
+      return;
+    }
     switch (update.sessionUpdate) {
       case 'agent_message_chunk': {
         if (update.content.type !== 'text') return;
@@ -1188,7 +1441,7 @@ class AcpSession implements HarnessSession {
           if (ended && merged.kind === 'edit' && edits.length && !dshTool(merged)) {
             active.announced.delete(update.toolCallId);
             const outcome: HostItemOutcome = update.status === 'completed' ? { status: 'succeeded' } : { status: 'failed', error: error('nativeFailure', 'File edit failed') };
-            edits.forEach((diff, index) => this.#emitDone(active, diffTool(`${toolCallId}#${index}`, diff), outcome));
+            edits.forEach((diff, index) => this.#emitDone(active, diffItem(`${toolCallId}#${index}`, diff), outcome));
             return;
           }
           // Claude streams Bash input one field at a time; wait for its required description before creating the DSH row.
@@ -1231,7 +1484,7 @@ class AcpSession implements HarnessSession {
           this.#emit({ type: 'item.completed', turnId, snapshot });
           // Claude Code's Edit/Write row already shows its change; any other call's diffs become edit rows of their own.
           if (!fileRow(item)) {
-            diffs.forEach((diff, index) => this.#emitDone(active, diffTool(`${toolCallId}#${index}`, diff), outcome));
+            diffs.forEach((diff, index) => this.#emitDone(active, diffItem(`${toolCallId}#${index}`, diff), outcome));
           }
         }
         return;
@@ -1490,6 +1743,7 @@ export class AcpAdapter implements HarnessAdapter {
       update: notification => { if (notification.update.sessionUpdate === 'available_commands_update') commands.value = notification.update.availableCommands; } });
     try {
       const opened = await request<acp.NewSessionResponse>(process_, 'session/new', { cwd, mcpServers: [], ...(this.#options.profile.sessionMeta?.('create') ? { _meta: this.#options.profile.sessionMeta('create') } : {}) });
+      if (commands.value === undefined && Array.isArray(record(opened).availableCommands)) commands.value = record(opened).availableCommands as acp.AvailableCommand[];
       try { return await work(process_, opened, commands); }
       finally { await request(process_, 'session/close', { sessionId: opened.sessionId }, 2_000).catch(() => {}); }
     } finally { await process_.close(); }

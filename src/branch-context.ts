@@ -14,7 +14,7 @@ export function branchTranscript(events: readonly SessionEvent[], throughSeq: nu
   for (const event of events) {
     if (event.seq >= throughSeq) break;
     if (event.type === 'user/message' && event.data.source.kind === 'dsh-harness-provider'
-      && (event.data.source.summary === '对话已回滚' || event.data.source.summary === '消息已编辑')) {
+      && ['对话已回滚', '消息已编辑', '文件与对话已恢复'].includes(event.data.source.summary)) {
       const fromSeq = event.data.source.rewindFromSeq;
       // Older notices have no boundary; dropping the earlier record avoids reviving an undone request.
       entries = typeof fromSeq === 'number' ? entries.filter(entry => entry.seq < fromSeq) : [];

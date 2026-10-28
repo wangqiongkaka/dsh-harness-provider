@@ -24,6 +24,32 @@ import { DelegationBridge } from '../dist/delegation.js';
 import { DshOutput } from '../dist/dsh-output.js';
 import { HarnessService } from '../dist/dsh.js';
 
+test('正文替换重建实时流，后续追加和最终记录保持一致', async () => {
+ const ctx = new Context(), frames = [];
+ try {
+  for (const plugin of [Llm, Sessions, Projections, Prompt, Tools, Agents]) await ctx.plugin(plugin);
+  await ctx.plugin(Loop, { agents: [] });
+  const { agent } = await ctx.agents.create({ sessionId: SessionId('replace-text'), meta: { cwd: tmpdir() } });
+  ctx.on('agent/assistant-stream', ({ frame }) => frames.push(frame));
+  agent.session.append('turn/start', { turn: 1 }); agent.session.append('step/start', { turn: 1, step: 1 });
+  let revision = 0;
+  const output = new DshOutput(ctx, agent, { turn: 1, step: 1 }, () => ++revision, () => ({ provider: 'fixture', model: 'fixture' }));
+  const item = { type: 'agentMessage', itemId: 'message', text: '旧文本' };
+  output.start(item);
+  output.update(item.itemId, { type: 'text.replace', text: '新文本' });
+  output.update(item.itemId, { type: 'text.append', text: '追加' });
+  await output.complete({ item: { ...item, text: '新文本追加' }, outcome: { status: 'succeeded' } });
+  await output.finish();
+  assert.equal(frames.filter(frame => frame.type === 'start').length, 2);
+  assert.equal(frames.filter(frame => frame.type === 'end' && frame.outcome.kind === 'abandoned').length, 1);
+  const message = agent.session.snapshotEvents().find(event => event.type === 'assistant/message');
+  assert.equal(message.data.message.content[0].text, '新文本追加');
+  const chunks = message.data.stream.flatMap(record => record.type === 'chunk' ? [record.chunk] : record.type === 'text-chunks' ? record.texts ?? [] : []);
+  assert.equal(JSON.stringify(message.data.stream).includes('旧文本'), false);
+  assert.ok(chunks.length);
+ } finally { await ctx.fiber.dispose(); }
+});
+
 function fakeAdapter(log,native) {
  const sessions=[];
  return {

@@ -21,6 +21,7 @@ import type { UiWorkspace } from '@deepseek-ai/dsh-client-ui-workspace/client';
 import { AgentBoard, agentsEn, agentsZh, type AgentBoardInjected } from './agent-board-view.js';
 import { contribution, SETTINGS_ENTRY, type stateSchema, type modelsSchema, type usageSchema, type quotaSchema, type secretStatusSchema, type subagentsSchema, type pluginsSchema, type settingsViewSchema, type updateSettingsRequest, type workspacesSchema, type directoriesSchema } from './remote.js';
 import type { z } from 'zod';
+import type { rewindPreviewSchema } from './remote.js';
 
 type State = z.infer<typeof stateSchema>;
 type Models = z.infer<typeof modelsSchema>;
@@ -32,6 +33,7 @@ type Plugin = z.infer<typeof pluginsSchema>[number];
 type SettingsView = z.infer<typeof settingsViewSchema>;
 type Workspaces = z.infer<typeof workspacesSchema>;
 type Directories = z.infer<typeof directoriesSchema>;
+type RewindPreview = z.infer<typeof rewindPreviewSchema>;
 /** A row of the linked-projects panel: a registered project, or (`custom`) a directory picked for this session alone. */
 type Project = Workspaces[number] & { linked: boolean; custom?: true };
 type Api = {
@@ -57,6 +59,8 @@ type Api = {
   readSettings(request: Record<string, never>): Promise<RemoteResult<SettingsView>>;
   updateSettings(request: z.input<typeof updateSettingsRequest>): Promise<RemoteResult<SettingsView>>;
   edit(request: {sessionId: string; seq: number; text: string; requestId: string}): Promise<RemoteResult<State>>;
+  previewRewind(request: {sessionId: string; turn: number}): Promise<RemoteResult<RewindPreview>>;
+  confirmRewind(request: {sessionId: string; token: string}): Promise<RemoteResult<State>>;
   delegateFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; reportBack: boolean; worktree: boolean; picks: Picks; workspaceId?: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{sessionId?: string; harness: State['harness']; accepted: true}>>;
   startDiscussionFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
 };
@@ -86,6 +90,9 @@ const zh = {
   'time.seconds': '{seconds} 秒', 'time.minutes': '{minutes} 分 {seconds} 秒', 'time.hours': '{hours} 小时 {minutes} 分', 'time.ago': '{time}前',
   plugins: '插件',
   edit: '编辑', editCancel: '取消', editSend: '发送',
+  rewind: '恢复文件与对话', rewindConfirm: '确认恢复', rewindScope: '恢复到本轮开始前，并撤销之后的对话。仅处理当前 Git 仓库中已跟踪和未忽略的文件，不包含关联项目。',
+  rewindConcurrent: '同一轮期间的手动修改或其他会话修改也可能包含在内；请核对下方差异。后续不冲突的修改会保留。',
+  rewindConflicts: '存在冲突，未执行恢复：', rewindDiff: '查看文件差异', rewindTruncated: '差异过长，预览已截断', rewindEmpty: '没有需要恢复的文件，将仅恢复对话', rewindResume: '继续完成文件与对话恢复',
   clear: '清理', clearDescription: '清理上下文',
   delegate: '委派', delegateMode: '委派模式', delegateDescription: '创建独立会话执行任务', delegateTask: '当前处于委派模式：描述任务，将交给所选 Harness 在新的独立会话中执行；输入 / 可先用当前会话的 skill（如交接）', delegateCreated: '已创建委派会话', delegatePrepared: '正在当前会话执行 skill，完成后自动创建委派会话', commands: '指令',
   reportBack: '完成后回传到当前会话', reportBackOff: '结果仅保留在新会话，不唤醒当前会话', delegateExit: '退出委派模式',
@@ -149,6 +156,9 @@ const en: Record<keyof typeof zh,string> = {
   'time.seconds':'{seconds}s', 'time.minutes':'{minutes}m {seconds}s', 'time.hours':'{hours}h {minutes}m', 'time.ago':'{time} ago',
   plugins:'Plugins',
   edit:'Edit', editCancel:'Cancel', editSend:'Send',
+  rewind: 'Restore files and conversation', rewindConfirm: 'Confirm restore', rewindScope: 'Restore to before this turn and undo later conversation. Covers tracked and non-ignored files in this Git repository; linked projects are excluded.',
+  rewindConcurrent: 'Manual edits or edits from other sessions during the turn may be included. Review the diff below. Later changes that do not conflict are preserved.',
+  rewindConflicts: 'Conflicts found; nothing has been restored:', rewindDiff: 'View file diff', rewindTruncated: 'The diff preview was truncated', rewindEmpty: 'No files need restoring; only the conversation will be restored', rewindResume: 'Finish restoring files and conversation',
   clear:'Clear', clearDescription:'Clear context',
   delegate:'Delegate', delegateMode:'Delegation mode', delegateDescription:'Create an independent session for this task', delegateTask:'Delegation mode: describe the task for the selected Harness to run in a new session; type / to run one of this session\'s skills (such as a hand-off) first', delegateCreated:'Delegation session created', delegatePrepared:'Running the skill in this session; the delegation starts when it finishes', commands:'Commands',
   reportBack:'Report back to this session when complete', reportBackOff:'Keep the result in the new session without waking this one', delegateExit:'Exit delegation mode',
@@ -207,6 +217,7 @@ async function value<T>(promise: Promise<RemoteResult<T>>): Promise<T> {
 }
 interface Injected {
   recover(id: string, action: 'check' | 'unlock'): Promise<State & {detail: string}>;
+  confirmRewind(id: string, token: string): Promise<State>;
   secretStatus(id: string): Promise<SecretStatus>;
   answerSecret(id: string, question: string, answers: Record<string,string[]>, cancelled?: boolean): Promise<{accepted: boolean}>;
   read(id: string): Promise<State>;
@@ -1035,7 +1046,7 @@ export function SecretPanel({ sessionId, read, answer }: { sessionId: string; re
 
 // ---- left slot: Harness chip + quota chip ----
 const names: Record<State['harness'], string> = { dsh: '', codex: 'Codex', 'claude-code': 'Claude Code' };
-export function HarnessSelect({ sessionId, useSessions, read, select, quota, viewing, modelProvider, changed, secretStatus, answerSecret, recover, t }: LeftProps) {
+export function HarnessSelect({ sessionId, useSessions, read, select, quota, viewing, modelProvider, changed, secretStatus, answerSecret, recover, confirmRewind, t }: LeftProps) {
   const [state,setState] = useState<State>();
   const [error,setError] = useState<string>();
   const [busy,setBusy] = useState(false);
@@ -1086,6 +1097,10 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
     {authStatus && !authStatus.account?.plan && <span className="hp-chip-label" role="status" title={authStatus.detail ?? authStatus.account?.email}>{authStatus.label}</span>}
     <QuotaChip quota={quotaView} t={t} />
     {current !== 'dsh' && state?.recoveryRequired && !summary?.running && <SessionRecovery key={`recovery:${sessionId}`} sessionId={sessionId} recover={recover} running={!!summary?.running} onChange={setState} />}
+    {state?.rewindRecoveryToken && !summary?.running && <button type="button" className="hp-chip" disabled={busy} onClick={() => {
+      setBusy(true); setError(undefined);
+      void confirmRewind(sessionId, state.rewindRecoveryToken!).then(setState, cause => setError(cause instanceof Error ? cause.message : String(cause))).finally(() => setBusy(false));
+    }}>{t('rewindResume')}</button>}
     <SecretPanel key={sessionId} sessionId={sessionId} read={secretStatus} answer={answerSecret} />
     {error && <span role="alert" className="hp-alert">{error}</span>}
     {state?.recoveryRequired && !summary?.running && <span role="status" className="hp-alert">{t('recovery')}</span>}
@@ -1579,6 +1594,15 @@ ${nativeContextColors}
 .hp-user-editable>div>div:last-child{padding-right:calc(36px + var(--dsh-content-font-delta,0px))}
 .hp-edit-action{position:absolute;right:0;bottom:0;display:inline-flex;align-items:center;justify-content:center;width:calc(28px + var(--dsh-content-font-delta,0px));height:calc(28px + var(--dsh-content-font-delta,0px));padding:6px;border:none;border-radius:28px;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer}
 .hp-edit-action:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary)}
+.hp-user-actions{position:absolute;right:0;bottom:0;display:flex;gap:2px}
+.hp-user-actions .hp-edit-action{position:static}
+.hp-user-editable:has(.hp-rewind-action)>div>div:last-child{padding-right:calc(66px + var(--dsh-content-font-delta,0px))}
+.hp-rewind{box-sizing:border-box;margin:12px 0 0 auto;padding:16px;width:min(100%,620px);border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-specific-bubble);font-size:13px;line-height:1.6}
+.hp-rewind p{margin:8px 0;color:var(--dsw-alias-label-secondary)}
+.hp-rewind ul{padding-left:20px;max-height:150px;overflow:auto;overflow-wrap:anywhere}
+.hp-rewind pre{max-height:240px;overflow:auto;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.hp-rewind summary{cursor:pointer}
+.hp-rewind .hp-edit-bar{margin-top:12px}
 @media (hover:hover){
 [data-chat-flow-kind='user']:has(~ :is([data-chat-flow-kind='user'],[data-chat-flow-kind='steering'])) .hp-edit-action{opacity:0;transition:opacity 80ms ease}
 [data-chat-flow-kind='user']:has(~ :is([data-chat-flow-kind='user'],[data-chat-flow-kind='steering'])):is(:hover,:focus-within) .hp-edit-action{opacity:1}
@@ -1648,17 +1672,20 @@ const Pencil = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none"
 interface EditInjected {
   read(id: string): Promise<State>;
   edit(id: string, seq: number, text: string, requestId: string): Promise<State>;
+  previewRewind(id: string, turn: number): Promise<RewindPreview>;
+  confirmRewind(id: string, token: string): Promise<State>;
   /** The user renderer this one shadows (the host's bubble). */
   host(): ComponentType<ChatNodeViewProps<'user'>> | undefined;
   ht: T;
 }
 export function EditableUserMessage(props: ChatNodeViewProps<'user'> & InjectFace<EditInjected>) {
-  const { sessionId, useSessions, node, read, edit, host, ht } = props;
+  const { sessionId, useSessions, node, read, edit, previewRewind, confirmRewind, host, ht } = props;
   const Host = host();
   const running = !!useSessions(s => s.byId[sessionId]?.running);
   const [state, setState] = useState<State>();
   const [draft, setDraft] = useState<string>();
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const [preview, setPreview] = useState<RewindPreview>();
   const requestId = useRef('');
   useEffect(() => {
     let live = true;
@@ -1669,7 +1696,22 @@ export function EditableUserMessage(props: ChatNodeViewProps<'user'> & InjectFac
   const text = content.flatMap(part => part.type === 'text' ? [part.text] : []).join('');
   const attached = content.some(part => part.type !== 'text');
   const turn = node.location.kind === 'turn' || node.location.kind === 'step' ? node.location.turn.turn : undefined;
-  const editable = !running && !!state && !state.recoveryRequired && turn !== undefined && state.editableTurns.includes(turn);
+  const editable = !running && !!state && !state.recoveryRequired && !state.rewindRecoveryToken && turn !== undefined && state.editableTurns.includes(turn);
+  const rewindable = editable && state.rewindableTurns?.includes(turn!);
+  async function loadPreview() {
+    if (busy || turn === undefined) return;
+    setBusy(true); setError('');
+    try { setPreview(await previewRewind(sessionId, turn)); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  }
+  async function restore() {
+    if (!preview || busy || preview.conflicts.length) return;
+    setBusy(true); setError('');
+    try { setState(await confirmRewind(sessionId, preview.token)); setPreview(undefined); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  }
   async function submit() {
     if (draft === undefined || busy || (!draft.trim() && !attached)) return;
     setBusy(true); setError('');
@@ -1692,8 +1734,21 @@ export function EditableUserMessage(props: ChatNodeViewProps<'user'> & InjectFac
   </div>;
   return <div className={editable ? 'hp-user hp-user-editable' : 'hp-user'}>
     {Host && <Host {...props} />}
-    {editable && <button type="button" className="hp-edit-action" aria-label={ht('edit')} title={ht('edit')}
-      onClick={() => { requestId.current = crypto.randomUUID(); setError(''); setDraft(text); }}><Pencil /></button>}
+    {editable && !preview && <div className="hp-user-actions">
+      {rewindable && <button type="button" className="hp-edit-action hp-rewind-action" disabled={busy} aria-label={ht('rewind')} title={ht('rewind')} onClick={() => void loadPreview()}>↶</button>}
+      <button type="button" className="hp-edit-action" disabled={busy} aria-label={ht('edit')} title={ht('edit')}
+        onClick={() => { requestId.current = crypto.randomUUID(); setError(''); setDraft(text); }}><Pencil /></button>
+    </div>}
+    {preview && <section className="hp-rewind" role="region" aria-label={ht('rewind')} aria-busy={busy} onKeyDown={event => { if (event.key === 'Escape' && !busy) setPreview(undefined); }}>
+      <strong>{ht('rewind')}</strong><p>{ht('rewindScope')}</p><p>{ht('rewindConcurrent')}</p>
+      {preview.conflicts.length ? <div role="alert"><p>{ht('rewindConflicts')}</p><ul>{preview.conflicts.map(path => <li key={path}>{path}</li>)}</ul></div>
+        : preview.paths.length ? <ul>{preview.paths.map(path => <li key={path}>{path}</li>)}</ul> : <p>{ht('rewindEmpty')}</p>}
+      {preview.diff && <details><summary>{ht('rewindDiff')}</summary><pre>{preview.diff}</pre></details>}
+      {preview.truncated && <p role="status">{ht('rewindTruncated')}</p>}
+      <div className="hp-edit-bar"><button type="button" autoFocus disabled={busy} onClick={() => setPreview(undefined)}>{ht('editCancel')}</button>
+        <button type="button" className="hp-edit-send" disabled={busy || running || !!preview.conflicts.length} onClick={() => void restore()}>{ht('rewindConfirm')}</button></div>
+    </section>}
+    {error && <p className="hp-edit-error" role="alert">{error}</p>}
   </div>;
 }
 
@@ -1853,6 +1908,7 @@ export async function apply(ctx: Context): Promise<void> {
     scope.on('command/executed', (_sessionId, name) => { if (name === 'plan') for (const listener of listeners) listener(); });
     const api: Injected = {
       recover:(sessionId,action)=>value(scope.remote.harness.recover({sessionId,action})),
+      confirmRewind:(sessionId,token)=>value(scope.remote.harness.confirmRewind({sessionId,token})),
       secretStatus:id=>value(scope.remote.harness.secretStatus({sessionId:id})),
       answerSecret:(sessionId,id,answers,cancelled)=>value(scope.remote.harness.answerSecret({sessionId,id,answers,cancelled})),
       read:id=>value(scope.remote.harness.state({sessionId:id})),
@@ -1893,6 +1949,9 @@ export async function apply(ctx: Context): Promise<void> {
         return read;
       },
       edit: (sessionId, seq, text, requestId) => value(scope.remote.harness.edit({ sessionId, seq, text, requestId }))
+        .then(state => { paintEditedTurns(sessionId, state); return state; }),
+      previewRewind: (sessionId, turn) => value(scope.remote.harness.previewRewind({ sessionId, turn })),
+      confirmRewind: (sessionId, token) => value(scope.remote.harness.confirmRewind({ sessionId, token }))
         .then(state => { paintEditedTurns(sessionId, state); return state; }),
       host: () => scope.slots.entries('conversation.chat.node').filter(entry => entry.options.key === 'user' && entry.component !== EditableUserMessage)
         .sort((a, b) => (a.options.priority ?? 0) - (b.options.priority ?? 0))[0]?.component as ComponentType<ChatNodeViewProps<'user'>> | undefined,

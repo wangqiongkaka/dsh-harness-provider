@@ -29,7 +29,21 @@ const quietBypassNotice = {
     pluginBuild.onLoad({ filter: /claude-agent-acp[\\/]dist[\\/]acp-agent\.js$/ }, async ({ path }) => {
       const source = await readFile(path, 'utf8'), seam = 'const REPLAY_HIDDEN_COMMANDS = new Set([\n';
       if (source.split(seam).length !== 2) throw new Error('claude-agent-acp local command replay seam changed');
-      return { contents: source.replace(seam, seam + '    "/rename",\n'), loader: 'js' };
+      return { contents: source.replace(seam, seam + '    "/rename",\n') + '\nexport { parseSteerRequest };\n', loader: 'js' };
+    });
+    // Expose Claude's existing steering extension on its v2 connection too.
+    pluginBuild.onLoad({ filter: /claude-agent-acp[\\/]dist[\\/]v2[\\/]agent\.js$/ }, async ({ path }) => {
+      let source = await readFile(path, 'utf8');
+      const imported = 'import { ClaudeAcpAgent } from "../acp-agent.js";';
+      const seam = '        .onNotification(v2.methods.agent.session.cancel, ({ params }) => agent.cancel(params));';
+      if (source.split(imported).length !== 2 || source.split(seam).length !== 2) throw new Error('claude-agent-acp v2 steering seam changed');
+      source = source.replace(imported, 'import { ClaudeAcpAgent, parseSteerRequest } from "../acp-agent.js";');
+      return { contents: source.replace(seam, '        .onRequest("_session/steering", { parse: parseSteerRequest }, ({ params }) => agent.steer(params))\n' + seam), loader: 'js' };
+    });
+    pluginBuild.onLoad({ filter: /claude-agent-acp[\\/]dist[\\/]v2[\\/]initialize\.js$/ }, async ({ path }) => {
+      const source = await readFile(path, 'utf8'), seam = 'const UNSERVED_EXTENSION_KEYS = ["steering"];';
+      if (source.split(seam).length !== 2) throw new Error('claude-agent-acp v2 steering capability seam changed');
+      return { contents: source.replace(seam, 'const UNSERVED_EXTENSION_KEYS = [];'), loader: 'js' };
     });
     pluginBuild.onLoad({ filter: /claude-agent-sdk[\\/]sdk\.mjs$/ }, async ({ path }) => {
       const source = await readFile(path, 'utf8');
@@ -41,7 +55,7 @@ const quietBypassNotice = {
   },
 };
 await build({
-  entryPoints: ['src/media.ts', 'src/secret-questions.ts', 'src/dsh-output.ts', 'src/contracts.ts', 'src/codex-rpc.ts', 'src/acp-adapter.ts', 'src/acp-profiles.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts', 'src/worktree.ts', 'src/settings.ts', 'src/branch-context.ts', 'src/background-jobs.ts'],
+  entryPoints: ['src/checkpoints.ts', 'src/media.ts', 'src/secret-questions.ts', 'src/dsh-output.ts', 'src/contracts.ts', 'src/codex-rpc.ts', 'src/acp-adapter.ts', 'src/acp-profiles.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts', 'src/worktree.ts', 'src/settings.ts', 'src/branch-context.ts', 'src/background-jobs.ts'],
   external: ['@deepseek-ai/*'],
   outdir: 'dist',
   bundle: true,

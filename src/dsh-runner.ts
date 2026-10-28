@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import type { Context } from '@deepseek-ai/cordis';
 import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent';
@@ -19,6 +20,7 @@ import { delegationInstructions, type DelegationBridge } from './delegation.js';
 import { branchTranscript } from './branch-context.js';
 import { workingDirectory } from './working-directory.js';
 import { BackgroundJobs } from './background-jobs.js';
+import { checkpoint, repository, type Checkpoint } from './checkpoints.js';
 
 export function unwrap<T>(result: HarnessResult<T>): T {
   if (!result.ok) throw new Error(result.error.message);
@@ -89,6 +91,7 @@ async function take(live: Live): Promise<HarnessOutput | undefined> {
 }
 export class DshRunner {
   readonly live = new Map<string, Live>();
+  readonly fileTurns = new Map<string, string>();
   /** Subagents of sessions whose process was reclaimed, so the card keeps showing them until the session resumes. */
   readonly retainedSubagents = new Map<string, HarnessSubagent[]>();
   /** When a client last reported each session on screen. */
@@ -184,6 +187,19 @@ export class DshRunner {
   }
 
   async run(payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, binding: Binding): Promise<void> {
+    const directory = workingDirectory(payload.agent);
+    const cwd = !binding.delegation?.worktree && directory ? directory.get(payload.agent.session) : binding.cwd;
+    const repo = await repository(cwd).catch(() => undefined);
+    if (repo) await this.bindings.serial(`files:${repo}`, async () => {
+      binding = await this.bindings.read(binding.sessionId) ?? binding;
+      if (binding.fileRewind) throw new Error('文件与对话恢复尚未完成，请先完成恢复。');
+      this.fileTurns.set(binding.sessionId, repo);
+    });
+    try { await this.runTurn(payload, binding); }
+    finally { this.fileTurns.delete(binding.sessionId); }
+  }
+
+  private async runTurn(payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, binding: Binding): Promise<void> {
     const { agent, messages, turn, step, signal } = payload;
     signal.throwIfAborted();
     const worktree = binding.delegation?.worktree;
@@ -193,6 +209,7 @@ export class DshRunner {
     if (directory && !worktree) binding.cwd = directory.get(agent.session);
     if (binding.cwd !== agent.session.header.cwd && !worktree && !directory) throw new Error('Harness workspace identity mismatch');
     if (binding.pending) throw new Error('上次 Harness 请求的结果尚未确认；为避免重复执行，本会话暂停发送。');
+    if (binding.fileRewind) throw new Error('文件与对话恢复尚未完成，请先完成恢复。');
     const continuation = messages.length > 0 && messages.every(isContinuation);
     const input = await harnessInput(this.ctx, messages.filter(message => !isContinuation(message)), signal);
     if (!input.length && !continuation) throw new Error('Harness prompt is empty');
@@ -276,6 +293,8 @@ export class DshRunner {
       model: current.modelLabel ?? (binding.model ?? current.session.initialState.effectiveModel ? modelValue((binding.model ?? current.session.initialState.effectiveModel)!) : 'unreported'),
     }));
     const usageBefore = current.usage;
+    let before: Checkpoint | undefined;
+    const checkpointId = randomUUID();
     let submitted = false;
     let cancelWork: Promise<void> | undefined;
     let interactionError: unknown;
@@ -294,7 +313,14 @@ export class DshRunner {
       await this.ctx.sessions.flush(agent.session);
       signal.throwIfAborted();
       // Nothing is sent for a continuation, so no result can be left unconfirmed.
-      if (!continuation) { binding.pending = turnId; await this.saveBinding(binding); }
+      if (!continuation) {
+        if (!discussion && !current.session.hasBackgroundTasks?.()) {
+          try { before = await checkpoint(current.cwd, `${checkpointId}:before`); }
+          catch { /* A missing checkpoint leaves this turn unavailable for file rewind. */ }
+        }
+        if (before) binding.pendingCheckpoint = before; else delete binding.pendingCheckpoint;
+        binding.pending = turnId; await this.saveBinding(binding);
+      }
       signal.throwIfAborted();
       submitted = true;
       current.turnId = turnId; current.continuation = continuation; current.steerError = undefined; current.steerMessages = [];
@@ -338,8 +364,14 @@ export class DshRunner {
             await this.ctx.sessions.flush(agent.session);
             const uncertain = event.outcome.status === 'failed' && ['processExited', 'protocolError', 'internalError'].includes(event.outcome.error.code);
             if (current.usage) binding.usage = Object.fromEntries(USAGE_KEYS.flatMap(key => current.usage![key] !== undefined ? [[key, current.usage![key]]] : []));
-            if (event.nativeTurnRef) binding.turns = [...(binding.turns ?? []).filter(entry => entry.turn !== turn), { turn, key: event.nativeTurnRef.nativeTurnKey }];
-            if (!uncertain) { delete binding.pending; delete binding.pendingNative; }
+            let after: Checkpoint | undefined;
+            if (before && !uncertain && !current.session.hasBackgroundTasks?.()) {
+              try { after = await checkpoint(current.cwd, `${checkpointId}:after`); }
+              catch { /* Keep the dialogue result even when file capture fails. */ }
+            }
+            if (event.nativeTurnRef) binding.turns = [...(binding.turns ?? []).filter(entry => entry.turn !== turn), { turn, key: event.nativeTurnRef.nativeTurnKey,
+              ...(before && after && before.repo === after.repo ? { checkpoint: { before, after } } : {}) }];
+            if (!uncertain) { delete binding.pending; delete binding.pendingNative; delete binding.pendingCheckpoint; }
             await this.saveBinding(binding);
             completed = true;
             if (event.outcome.status === 'failed') throw new Error(event.outcome.error.message);
@@ -354,7 +386,7 @@ export class DshRunner {
     } catch (error) {
       // A projection/storage/transport failure must not leave native tools running.
       if (binding.pending && !submitted) {
-        delete binding.pending; await this.saveBinding(binding);
+        delete binding.pending; delete binding.pendingCheckpoint; await this.saveBinding(binding);
       } else if (binding.pending || discussion || continuation) {
         cancel();
         await cancelWork;

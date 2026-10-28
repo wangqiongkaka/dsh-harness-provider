@@ -15,7 +15,7 @@ import type { HostItem, HostItemSnapshot, HostItemUpdate } from './contracts.js'
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** Harness lifecycle and delegation notices recorded in the session. */
-    'dsh-harness-provider': { kind: 'dsh-harness-provider'; form: 'notice'; summary: string; rewindFromSeq?: number };
+    'dsh-harness-provider': { kind: 'dsh-harness-provider'; form: 'notice'; summary: string; rewindFromSeq?: number; rewindToken?: string };
   }
 }
 
@@ -70,7 +70,16 @@ export class DshOutput {
     const entry = this.active.get(id);
     if (!entry) throw new Error('Harness updated an unknown item');
     const item = entry.item;
-    if (update.type === 'text.append' && (item.type === 'agentMessage' || item.type === 'reasoning')) {
+    if (update.type === 'text.replace' && (item.type === 'agentMessage' || item.type === 'reasoning')) {
+      item.text = update.text;
+      if (!this.waitingItems.some(pending => pending.item.itemId === id)) {
+        this.emit({ type: 'end', attemptId: entry.attemptId, revision: this.revision(), index: entry.index, outcome: { kind: 'abandoned' } });
+        entry.attemptId = LlmAttemptId(`harness:${randomUUID()}`); entry.index = 0; entry.stream = new AssistantStreamAccumulator();
+        this.emit({ type: 'start', attemptId: entry.attemptId, revision: this.revision(), ...entry.position });
+        this.push(id, { type: 'block-start', index: 0, blockType: item.type === 'reasoning' ? 'reasoning' : 'text' });
+        if (item.text) this.push(id, { type: item.type === 'reasoning' ? 'reasoning-delta' : 'text-delta', index: 0, text: item.text });
+      }
+    } else if (update.type === 'text.append' && (item.type === 'agentMessage' || item.type === 'reasoning')) {
       item.text += update.text;
       if (!this.waitingItems.some(pending => pending.item.itemId === id)) {
         this.push(id, { type: item.type === 'reasoning' ? 'reasoning-delta' : 'text-delta', index: 0, text: update.text });

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { execFileSync } from 'node:child_process';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,7 +23,7 @@ import { DshRunner } from '../dist/dsh-runner.js';
 // session/load can replay it, and every host answer it receives is checked before the turn ends.
 // The peer runs from the session's cwd, so the SDK is addressed by absolute URL.
 const peer = `
-import { agent, ndJsonStream, RequestError } from '${import.meta.resolve('@agentclientprotocol/sdk')}';
+import { agent, ndJsonStream, RequestError } from '${import.meta.resolve('@agentclientprotocol/sdk/unstable')}';
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 const history = process.env.PEER_HISTORY;
@@ -73,6 +74,7 @@ const app = agent({ name: 'peer' })
     const raw = params.prompt.filter(b => b.type === 'text').map(b => b.text).join('');
     note({ prompt: raw });
     const text = raw.replace('[HOST]', '');
+    if (text === 'checkpoint-edit') writeFileSync('tracked.txt', 'after');
     const image = params.prompt.find(b => b.type === 'image');
     // Claude Code answers the local command with a line of its own, before any turn of the user's exists.
     if (text.startsWith('/rename ')) { await update({ sessionUpdate: 'agent_message_chunk', messageId: 'rename', content: { type: 'text', text: 'Session renamed to: ' + text.slice(8) } }); return { stopReason: 'end_turn' }; }
@@ -326,7 +328,8 @@ test('bundled Claude hides marker-only rename history and preserves literal prom
   const source = await readFile('dist/claude-agent-acp.mjs', 'utf8');
   const start = source.indexOf('var LOCAL_ONLY_COMMANDS ='), end = source.indexOf('function isSyntheticLoginMessage', start);
   assert.ok(start >= 0 && end > start, 'Claude replay parser seam must exist in the shipped bundle');
-  const strip = runInNewContext(source.slice(start, end) + '\nstripLocalCommandMetadata');
+  const marker = source.slice(source.indexOf('var TASK_NOTIFICATION_TAG ='), source.indexOf('function taskNotificationsOf'));
+  const strip = runInNewContext(marker + source.slice(start, end) + '\nstripLocalCommandMetadata');
   const rename = '<command-name>/rename</command-name><command-message>rename</command-message><command-args>first</command-args>';
   assert.equal(strip(rename), null);
   assert.equal(strip('/rename first'), '/rename first');
@@ -340,9 +343,12 @@ test('Codex 2 tool contract preserves terminal deltas, exit codes, search result
   const source = await readFile('node_modules/@agentclientprotocol/codex-acp/dist/index.js', 'utf8');
   const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
   const upstream = runInNewContext([
-    section('// src/CommandUtils.ts', '// src/tool-calls/reporters/SandboxPermissionReporter.ts'),
+    section('// src/CommandUtils.ts', '// src/AcpV2SessionUpdate.ts'),
+    section('// src/AirExtension.ts', '// src/permissions/metadata.ts'),
+    section('// src/tool-calls/AcpToolCallRenderer.ts', '// src/ToolCallName.ts'),
+    section('// src/ToolCallName.ts', '// src/tool-calls/reporters/SandboxPermissionReporter.ts'),
     section('// src/tool-calls/reporters/ToolStatus.ts', '// src/ContextCompactionMeta.ts'),
-    section('// src/tool-calls/ClientCapabilities.ts', '// src/tool-calls/reporters/McpStartupReporter.ts'),
+    section('// src/tool-calls/ClientCapabilities.ts', '// src/tool-calls/reporters/PlanReviewReporter.ts'),
     '({ CommandReporter, AcpToolCallRenderer, ClientCapabilities })',
   ].join('\n'));
   const f = await fixture();
@@ -416,6 +422,30 @@ test('AIR custom answers associate arbitrary question ids, preserve selections a
     question_0: { type: 'string', enum: ['A'] }, question_0_custom: { type: 'string' },
   } });
   assert.deepEqual(formContent(form, { question_0: ['自定义'] }), { question_0_custom: '自定义' });
+});
+
+for (const harness of ['codex', 'claude-code']) test('轮次保存 Git 前后检查点：' + harness, { timeout: 20000 }, async () => {
+  const f = await fixture(), ctx = new Context();
+  const git = (...args) => execFileSync('git', ['-C', f.root, ...args], { stdio: 'ignore', env: { ...process.env, GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' } });
+  git('init'); await writeFile(join(f.root, 'tracked.txt'), 'before'); git('add', 'tracked.txt'); git('commit', '-m', 'initial');
+  const adapter = new AcpAdapter({ profile: { ...f.profile, harnessId: harness }, environment: {} });
+  const bindings = new Bindings(join(f.root, 'bindings'));
+  try {
+    for (const plugin of [Llm, Sessions, Projections, Prompt, Tools, Agents]) await ctx.plugin(plugin);
+    const runner = new DshRunner(ctx, bindings, { [harness]: adapter });
+    ctx.on('agent/pre-step', async payload => { await runner.run(payload, await bindings.read(payload.agent.id)); return { kind: 'enter', messages: [] }; });
+    await ctx.plugin(Loop, { agents: [] });
+    const { agent } = await ctx.agents.create({ sessionId: 'checkpoint-' + harness, meta: { cwd: f.root } });
+    await bindings.write({ version: 1, sessionId: agent.id, harness, cwd: f.root, locked: true });
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'checkpoint-edit' }], source: { kind: 'user' } }));
+    await agent.whenIdle();
+    assert.equal(agent.session.snapshotEvents().filter(event => event.type === 'turn/end').at(-1).data.reason.kind, 'completed');
+    const saved = (await bindings.read(agent.id)).turns[0].checkpoint;
+    assert.ok(saved?.before && saved?.after);
+    git('gc', '--prune=now');
+    assert.equal(execFileSync('git', ['-C', f.root, 'show', `${saved.before.commit}:tracked.txt`], { encoding: 'utf8' }), 'before');
+    assert.equal(execFileSync('git', ['-C', f.root, 'show', `${saved.after.commit}:tracked.txt`], { encoding: 'utf8' }), 'after');
+  } finally { await ctx.fiber.dispose(); await adapter.close(); await f.close(); }
 });
 
 test('discussion create and resume do not replay pre-open permission states after applying model and thinking hints', { timeout: 20000 }, async () => {

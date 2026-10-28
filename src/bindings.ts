@@ -11,6 +11,7 @@ const delegationSchema = z.object({ parentSessionId: z.string(), requestHash: z.
   worktree: z.object({ repo: z.string(), path: z.string(), base: z.string(), removed: z.boolean().optional() }).strict().optional(),
 }).strict();
 type Delegation = z.infer<typeof delegationSchema>;
+const checkpointSchema = z.object({ repo: z.string().min(1), commit: z.string().regex(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/) }).strict();
 const bindingSchema = z.object({
   version: z.literal(1), sessionId: z.string().min(1), harness: harnessChoice,
   cwd: z.string().min(1), locked: z.boolean(),
@@ -24,7 +25,12 @@ const bindingSchema = z.object({
     inputTokens: z.number().optional(), cachedInputTokens: z.number().optional(), cacheWriteInputTokens: z.number().optional(), outputTokens: z.number().optional() }).optional(),
   pending: z.string().optional(),
   pendingNative: z.string().optional(),
-  turns: z.array(z.object({ turn: z.number().int(), key: z.string() })).optional(),
+  pendingCheckpoint: checkpointSchema.optional(),
+  fileRewind: z.object({ token: z.string(), keep: z.number().int().nonnegative(), fromSeq: z.number().int().nonnegative(),
+    target: nativeSessionRefSchema.nullable(), applied: z.boolean(),
+    plan: z.object({ repo: z.string(), current: z.string(), merged: z.string(), paths: z.array(z.string()), conflicts: z.array(z.string()) }).strict(),
+  }).strict().optional(),
+  turns: z.array(z.object({ turn: z.number().int(), key: z.string(), checkpoint: z.object({ before: checkpointSchema, after: checkpointSchema }).strict().optional() })).optional(),
   delegation: delegationSchema.optional(),
   /**
    * A branch switched to this Harness from its source's: the DSH history before `throughSeq` goes to the Harness as a

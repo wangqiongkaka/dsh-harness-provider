@@ -2,11 +2,11 @@
 
 本插件打包以下依赖：
 
-- Zod 4.4.3，以及 Claude ACP 使用的 Zod 4.6.5（MIT）。
-- `@agentclientprotocol/sdk` 1.5.1（Apache-2.0）。
-- `@agentclientprotocol/codex-acp` 2.1.0（Apache-2.0）。
-- `@agentclientprotocol/claude-agent-acp` 0.84.0（Apache-2.0）。
-- Anthropic Claude Agent SDK 0.3.284，用于 Claude ACP 和账户额度探测；适用 Anthropic 自有条款，不适用本项目 MIT 许可证。
+- Zod 4.4.3，以及 Claude ACP 使用的 Zod 4.6.7（MIT）。
+- `@agentclientprotocol/sdk` 2.1.0，以及适配器使用的 2.0.2（Apache-2.0）。
+- `@agentclientprotocol/codex-acp` 2.3.0（Apache-2.0）。
+- `@agentclientprotocol/claude-agent-acp` 0.98.0（Apache-2.0）。
+- Anthropic Claude Agent SDK 0.3.284 和 0.3.310，用于账户额度探测和 Claude ACP；适用 Anthropic 自有条款，不适用本项目 MIT 许可证。
 
 Host–Harness 契约改编自 codexhost（MIT，Copyright 2026 BytePioneer-AI）。原始许可证和 SDK README 位于 `dist/licenses/`。
 
