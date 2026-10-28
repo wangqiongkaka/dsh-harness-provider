@@ -8,7 +8,7 @@
 - 适配配置项标识、权限模式、权限请求、完整消息替换、终端 Base64/UTF-8 分片、文件差异和子代理；Claude 的 `_session/steering` 通过插件打包层接入已有实现。命令列表兼容两个上游适配器未提供 `type: command` 的旧格式，避免 SDK 2.1 过滤技能。没有修改宿主或 node_modules 源码。
 - 上游依据：`node_modules/@agentclientprotocol/claude-agent-acp/dist/v2/{prompt,session,session-update,permission,tool-call}.js`；`node_modules/@agentclientprotocol/codex-acp/dist/index.js` 的 `toV2SessionUpdates`、`toV2AvailableCommands`、`startReplayMessage`、`promptV2`；SDK `dist/v2/unstable/schema/zod.gen.js`。宿主文本替换复用现有流的 abandoned/start 事件，最终仅保存一条消息。
 - 独立「恢复文件与对话」入口位于用户消息旁。发送前及确认结束后记录 Git 快照；预览按轮次逆序三方恢复，展示文件列表、补丁和冲突。确认时复核工作区与对话身份，先准备原生分叉，再应用文件并切换绑定；冲突不执行恢复，不冲突的后续修改保留。编辑和仅回滚对话不恢复文件。
-- 本地 Git 引用保护持久快照免于垃圾回收，暂存区不变；覆盖二进制、增删、符号链接和特殊文件名。仓库锁协调恢复与新轮次开始，阻止同仓库运行中请求/后台任务与恢复并行。确认过程先持久化恢复记录，中断后可继续完成；未完成时阻止新请求、分支和目录切换，重复确认不重复执行。
+- 快照保存到 Git 公共目录内的独立库 `dsh-checkpoints.git`，保留引用只存在于该库，不进入项目提交图；无父提交且固定元数据，相同文件树复用快照和保留引用。首次使用时先迁移旧快照再移除项目中的旧引用，保留旧哈希和待完成预览；独立库引用保护快照免于垃圾回收。暂存区不变，覆盖二进制、增删、符号链接和特殊文件名。仓库锁协调恢复与新轮次开始，阻止同仓库运行中请求/后台任务与恢复并行。确认过程先持久化恢复记录，中断后可继续完成；未完成时阻止新请求、分支和目录切换，重复确认不重复执行。
 - 范围：仅当前 Git 仓库的已跟踪和未忽略文件，不含关联项目；旧历史或缺失完整检查点的轮次不提供文件恢复。同轮期间的外部修改不能与代理修改区分，预览中明确说明。检查点会占用本地 Git 对象空间；恢复期间文件再次变化时保留文件并暂停。
 - 实际验证：真实 Codex / Claude CLI 配合本地 Responses/Messages 夹具运行 `node experiments/acp-native-probe.mjs`，通过目录与技能读取、多轮、指定边界分叉、技能调用、跨进程恢复和 Claude 运行中追加。未请求真实模型端点。恢复服务、持久检查点、冲突、预览失效、存储中断重试和幂等由临时 Git 仓库测试覆盖。桌面和 390px 窄屏预览经无头 Chromium 验证并核对截图：`.cache/rewind-preview-web.png`、`.cache/rewind-preview-mobile-web.png`。
 

@@ -443,8 +443,10 @@ for (const harness of ['codex', 'claude-code']) test('轮次保存 Git 前后检
     const saved = (await bindings.read(agent.id)).turns[0].checkpoint;
     assert.ok(saved?.before && saved?.after);
     git('gc', '--prune=now');
-    assert.equal(execFileSync('git', ['-C', f.root, 'show', `${saved.before.commit}:tracked.txt`], { encoding: 'utf8' }), 'before');
-    assert.equal(execFileSync('git', ['-C', f.root, 'show', `${saved.after.commit}:tracked.txt`], { encoding: 'utf8' }), 'after');
+    const store = join(f.root, '.git', 'dsh-checkpoints.git');
+    assert.equal(execFileSync('git', ['--git-dir', store, 'show', `${saved.before.commit}:tracked.txt`], { encoding: 'utf8' }), 'before');
+    assert.equal(execFileSync('git', ['--git-dir', store, 'show', `${saved.after.commit}:tracked.txt`], { encoding: 'utf8' }), 'after');
+    assert.equal(execFileSync('git', ['-C', f.root, 'for-each-ref', 'refs/dsh/checkpoints/'], { encoding: 'utf8' }), '');
   } finally { await ctx.fiber.dispose(); await adapter.close(); await f.close(); }
 });
 
