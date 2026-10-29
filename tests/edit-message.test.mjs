@@ -34,6 +34,9 @@ window.renderEditor('zh');`, resolveDir: resolve('src'), loader: 'tsx' }, bundle
     await page.route('http://localhost/**', route => route.fulfill({ contentType: 'text/html', body: `<style>:root{--dsw-alias-label-primary:#f8f8fa;--dsw-alias-label-secondary:#b4b4b8;--dsw-alias-border-l2:#404044;--dsw-alias-border-l3:#666;--dsw-specific-bubble:#29292c}body{margin:40px;background:#1b1b1b;color:#f8f8fa;font:16px sans-serif}</style><div id="root"></div>` }));
     await page.goto('http://localhost/');
     await page.addScriptTag({ content: bundle.outputFiles[0].text });
+    await expect(page.getByRole('button', { name: '恢复文件与对话', exact: true }).locator('svg')).toHaveCount(1);
+    await mkdir('.cache', { recursive: true });
+    await page.screenshot({ path: resolve('.cache/rewind-icon-web.png') });
     await page.getByRole('button', { name: '恢复文件与对话', exact: true }).click();
     await expect(page.getByRole('region', { name: '恢复文件与对话' })).toBeVisible();
     await expect(page.getByRole('region', { name: '恢复文件与对话' })).toContainText('src/app.ts');

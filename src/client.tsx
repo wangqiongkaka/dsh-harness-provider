@@ -1735,7 +1735,7 @@ export function EditableUserMessage(props: ChatNodeViewProps<'user'> & InjectFac
   return <div className={editable ? 'hp-user hp-user-editable' : 'hp-user'}>
     {Host && <Host {...props} />}
     {editable && !preview && <div className="hp-user-actions">
-      {rewindable && <button type="button" className="hp-edit-action hp-rewind-action" disabled={busy} aria-label={ht('rewind')} title={ht('rewind')} onClick={() => void loadPreview()}>↶</button>}
+      {rewindable && <button type="button" className="hp-edit-action hp-rewind-action" disabled={busy} aria-label={ht('rewind')} title={ht('rewind')} onClick={() => void loadPreview()}><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M5.5 3.5l-3 3 3 3M2.5 6.5h6a4 4 0 010 8H7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg></button>}
       <button type="button" className="hp-edit-action" disabled={busy} aria-label={ht('edit')} title={ht('edit')}
         onClick={() => { requestId.current = crypto.randomUUID(); setError(''); setDraft(text); }}><Pencil /></button>
     </div>}
