@@ -8,16 +8,18 @@ test('plugin peers accept the supported Web Profile runtime', async () => {
   assert.equal(evaluatePluginCompatibility(manifest, {}, '0.1.7-rc.2'), undefined);
 });
 
-test('plugin peers accept DSH 0.2.0-rc.1, rc.2, 0.2.1-rc.2 and 0.2.1-rc.3 but not untested releases', async () => {
+test('plugin peers accept DSH 0.2.0-rc.1, rc.2, 0.2.1-rc.2 and 0.2.1-rc.3 and rc.5 but not untested releases', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(evaluatePluginCompatibility(manifest, {}, '0.2.0-rc.1'), undefined);
   assert.equal(evaluatePluginCompatibility(manifest, {}, '0.2.0-rc.2'), undefined);
   assert.equal(evaluatePluginCompatibility(manifest, {}, '0.2.1-rc.2'), undefined);
   assert.equal(evaluatePluginCompatibility(manifest, {}, '0.2.1-rc.3'), undefined);
+  assert.equal(evaluatePluginCompatibility(manifest, {}, '0.2.1-rc.5'), undefined);
   assert.ok(evaluatePluginCompatibility(manifest, {}, '0.2.0-rc.3'));
   assert.ok(evaluatePluginCompatibility(manifest, {}, '0.2.1-alpha.1'));
   assert.ok(evaluatePluginCompatibility(manifest, {}, '0.2.1-rc.1'));
   assert.ok(evaluatePluginCompatibility(manifest, {}, '0.2.1-rc.4'));
+  assert.ok(evaluatePluginCompatibility(manifest, {}, '0.2.1-rc.6'));
 });
 
 // DSH routes a linked plugin's imports to its own packages only for names the plugin declares as peers.

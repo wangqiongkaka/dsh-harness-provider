@@ -30,7 +30,7 @@
 ## 前置条件
 
 - Node.js 22 或更高版本。
-- 使用 DSH 0.1.7-rc.2 的 Web Profile，或 DSH 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.2 / 0.2.1-rc.3 桌面版。本插件按这些版本的消息来源、工具结果、预设注册表和实时配置接口构建与验证。
+- 使用 DSH 0.1.7-rc.2 的 Web Profile，或 DSH 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.2 / 0.2.1-rc.3 / 0.2.1-rc.5 桌面版。本插件按这些版本的消息来源、工具结果、预设注册表和实时配置接口构建；rc.5 已核对相对 rc.3 的宿主源码变更，尚未在该版本上完整运行测试。
 - 已安装并完成登录或环境配置的 [Codex CLI](https://developers.openai.com/codex/cli/) 或 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)。
 
 ## 安装
