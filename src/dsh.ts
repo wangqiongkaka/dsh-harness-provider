@@ -11,7 +11,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { brandString } from '@deepseek-ai/dsh-brand';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-typert-registry';
-import type { HarnessAdapter, HarnessAuthStatus, HarnessInspection } from './contracts.js';
+import type { HarnessAdapter, HarnessAuthStatus, HarnessInspection, ManagedSession } from './contracts.js';
 import type {} from '@deepseek-ai/dsh-session-projection';
 import type {} from '@deepseek-ai/dsh-settings';
 import type {} from '@deepseek-ai/dsh-credentials';
@@ -151,6 +151,38 @@ export function nativeSubagent(child: { id: string; parentId: string | null; lab
 }
 
 export class HarnessService extends TypertRemoteService {
+  /** Bind a plugin-owned session without changing the user's remembered Harness or model. */
+  async manageSession(sessionId: string, options: { owner: string; harness: 'dsh' | Binding['harness']; context?: ManagedSession['context'] }): Promise<void> {
+    if (!options.owner || (options.harness !== 'dsh' && !options.context)) throw new Error('受控会话需要管理方和上下文');
+    await this.bindings.serial(sessionId, async () => {
+      const agent = await this.agent(sessionId), current = await this.bindings.read(sessionId);
+      const owner = await this.bindings.managedOwner(sessionId);
+      if (owner && owner !== options.owner) throw new Error('受控会话的管理方不匹配');
+      if (options.harness === 'dsh') {
+        if (current && (current.managedBy || current.nativeRef || !this.unstarted(agent))) throw new Error('受控主会话必须使用 DSH 原生 Harness');
+        if (owner === options.owner && !current) return;
+        await this.bindings.writeNativeSelection(sessionId, options.owner);
+        return;
+      }
+      if (current && (current.managedBy !== options.owner || current.harness !== options.harness)) throw new Error('受控会话的管理方或 Harness 不匹配');
+      if (!current && !this.unstarted(agent)) throw new Error('已有对话不能转为受控会话');
+      const binding = current ?? await this.bind(agent, sessionId, options.harness,
+        { permission: harnessPermissionModeIdSchema.parse(FULL_ACCESS[options.harness]) });
+      binding.managedBy = options.owner;
+      binding.locked = true;
+      await this.bindings.write(binding);
+      this.runner.managed.set(sessionId, { owner: options.owner, context: options.context! });
+    });
+  }
+
+  /** Revoke a plugin's live context and close its native process, retaining the binding for safe recovery. */
+  async releaseManagedSession(sessionId: string, owner: string): Promise<void> {
+    if (this.runner.managed.get(sessionId)?.owner !== owner) return;
+    this.runner.managed.delete(sessionId);
+    const live = this.runner.live.get(sessionId);
+    if (live) { await live.session.close(); this.runner.live.delete(sessionId); }
+  }
+
   async changeWorkingDirectory(source: string, input: unknown) {
     const { path } = directoryRequest.parse(input);
     const target = await realpath(path);
@@ -560,6 +592,7 @@ export class HarnessService extends TypertRemoteService {
     const { sessionId } = address.parse(raw);
     const agent = await this.agent(sessionId); // Same authorization/ownership rules as native Session commands.
     const binding = await this.bindings.read(sessionId);
+    if (!binding && await this.bindings.managedOwner(sessionId)) return this.view(undefined, true, agent.session.snapshotEvents());
     if (binding?.pending && agent.status !== 'running' && !agent.inbox.nextTurn.length && !agent.inbox.nextStep.length) {
       await this.autoCheck(sessionId);
       return this.view(await this.bindings.read(sessionId), false, agent.session.snapshotEvents());
@@ -1000,6 +1033,7 @@ export class HarnessService extends TypertRemoteService {
     return this.bindings.serial(request.sessionId, async () => {
       const agent = await this.agent(request.sessionId);
       const current = await this.bindings.read(request.sessionId);
+      if (await this.bindings.managedOwner(request.sessionId)) throw new Error('受控会话的 Harness 由工单管理方决定');
       if (await this.bindings.readDelegated(request.sessionId) || current?.locked || !this.unstarted(agent)) throw new Error('开始对话后不能切换 Harness，请新建会话或从消息新建分支');
       const defaults = await this.bindings.readDefaults();
       await this.bindings.writeDefaults({ ...defaults, harness: request.harness });

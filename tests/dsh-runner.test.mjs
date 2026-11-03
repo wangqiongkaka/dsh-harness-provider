@@ -705,3 +705,35 @@ test('当前轮切换目录不会被完成事件写回，下一轮从新目录�
   await adapter.close();
  } finally {await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
 });
+
+
+test('受控工单的系统说明、环境和工具在冷恢复时重建，不进入用户正文', {timeout:10000}, async()=>{
+ const root=await mkdtemp(join(tmpdir(),'dsh-managed-context-')),ctx=new Context(),native={turns:0};
+ const bindings=new Bindings(join(root,'bindings')),id=SessionId('managed-context');
+ try{
+  for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
+  await ctx.plugin(Persistence,{root:join(root,'sessions'),compression:'none'});
+  const opened=[],adapter=fakeAdapter(opened,native),runner=new DshRunner(ctx,bindings,{codex:adapter});
+  let revision=1;
+  const mcpServers=[{type:'http',name:'worker',url:'http://127.0.0.1:1234/mcp',headers:[{name:'Authorization',value:'Bearer test-only'}]}];
+  runner.managed.set(id,{owner:'superagent',context:async()=>({instructions:`工单说明 ${revision}`,environment:{WORKER_ID:'one'},mcpServers})});
+  ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
+  await ctx.plugin(Loop,{agents:[]});
+  await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true,managedBy:'superagent'});
+  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const prompt=async text=>{agent.followup(createUserMessage({content:[{type:'text',text}],source:{kind:'user'}}));await agent.whenIdle();};
+  await prompt('first');
+  assert.equal(opened[0].instructions,'工单说明 1');
+  assert.deepEqual(opened[0].mcpServers,mcpServers);
+  assert.equal(opened[0].environment.WORKER_ID,'one');
+  assert.deepEqual(native.inputs[0],[{type:'text',text:'first'}]);
+  // A changed context closes the idle native process and resumes its original native session.
+  revision=2; await prompt('second');
+  assert.equal(opened[1].kind,'resume');
+  assert.equal(opened[1].instructions,'工单说明 2');
+  assert.deepEqual(opened[1].mcpServers,mcpServers);
+  assert.deepEqual(native.inputs[1],[{type:'text',text:'second'}]);
+  assert.equal(JSON.stringify(await bindings.read(id)).includes('test-only'),false);
+  await adapter.close();
+ }finally{await ctx.fiber.dispose();await rm(root,{recursive:true,force:true});}
+});

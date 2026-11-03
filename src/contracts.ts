@@ -74,6 +74,17 @@ export interface HostUsage {
   contextWindowTokens?: number; contextUsedTokens?: number;
 }
 
+/** Tools and instructions supplied by the plugin that owns an automated session; never persisted with credentials. */
+export interface ManagedSessionContext {
+  instructions: string;
+  environment?: Record<string, string | undefined>;
+  mcpServers: Array<{ type: 'http'; name: string; url: string; headers: Array<{ name: string; value: string }> }>;
+}
+export interface ManagedSession {
+  owner: string;
+  context: () => Promise<ManagedSessionContext>;
+}
+
 interface SessionHints {
   discussion?: true;
   cwd: string; environment?: Record<string, string | undefined>;
@@ -85,6 +96,7 @@ interface SessionHints {
   usage?: HostUsage;
   /** Host capability text for the model: the agent's own instruction channel when it has one, otherwise the end of every prompt. */
   instructions?: string;
+  mcpServers?: ManagedSessionContext['mcpServers'];
 }
 export type OpenSessionInput = (SessionHints & { kind: 'create' }) | (SessionHints & { kind: 'resume'; nativeRef: NativeSessionRef });
 

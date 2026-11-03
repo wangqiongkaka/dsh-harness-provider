@@ -49,7 +49,7 @@ const app = agent({ name: 'peer' })
   .onRequest('session/load', async ({ params, client }) => {
     ctx = client;
     if (params.sessionId !== sessionId) process.exit(22);
-    note({ load: { additionalDirectories: params.additionalDirectories ?? null } });
+    note({ load: { additionalDirectories: params.additionalDirectories ?? null, mcpServers: params.mcpServers } });
     for (const entry of load()) {
       await update({ sessionUpdate: 'user_message_chunk', messageId: entry.userId, content: { type: 'text', text: entry.input } });
       for (const replayed of entry.updates ?? []) await update(replayed);
@@ -1374,4 +1374,20 @@ test('a final hook diff never rewrites an Edit or Write row, and a status-only c
     const resumed = value(await adapter.open({ kind: 'resume', cwd: f.root, nativeRef: session.initialState.nativeRef }));
     check(value(await resumed.readSnapshot()).turns[0].items.map(entry => entry.item));
   } finally { await adapter.close(); await f.close(); }
+});
+
+
+test('工单 MCP 配置通过实际 ACP 请求传给创建和恢复，普通会话仍为空', {timeout:15000}, async()=>{
+ const f=await fixture();
+ const servers=[{type:'http',name:'dsh-superagent',url:'http://127.0.0.1:1234/mcp',headers:[{name:'Authorization',value:'Bearer test-only'}]}];
+ const adapter=new AcpAdapter({profile:f.profile,environment:{}});
+ try{
+  const first=value(await adapter.open({kind:'create',cwd:f.root,mcpServers:servers}));
+  const ref=first.initialState.nativeRef;await first.close();
+  const second=value(await adapter.open({kind:'resume',cwd:f.root,nativeRef:ref,mcpServers:servers}));await second.close();
+  const plain=value(await adapter.open({kind:'create',cwd:f.root}));await plain.close();
+  const notes=await f.notes();
+  assert.deepEqual(notes.filter(note=>note.new).map(note=>note.new.mcpServers),[servers,[]]);
+  assert.deepEqual(notes.find(note=>note.load).load.mcpServers,servers);
+ }finally{await adapter.close();await f.close();}
 });

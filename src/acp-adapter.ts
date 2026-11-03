@@ -840,11 +840,11 @@ class AcpSession implements HarnessSession {
       const roots = input.additionalDirectories?.length ? { additionalDirectories: input.additionalDirectories } : {};
       let opened: Opened;
       if (input.kind === 'create') {
-        const created = await request<acp.NewSessionResponse>(process_, 'session/new', { cwd: input.cwd, mcpServers: [], ...roots, ...(meta ? { _meta: meta } : {}) });
+        const created = await request<acp.NewSessionResponse>(process_, 'session/new', { cwd: input.cwd, mcpServers: input.mcpServers ?? [], ...roots, ...(meta ? { _meta: meta } : {}) });
         sessionId = created.sessionId; opened = created;
       } else {
         sessionId = input.nativeRef.nativeSessionId;
-        opened = await request<acp.LoadSessionResponse>(process_, process_.protocolVersion === 2 ? 'session/resume' : 'session/load', { sessionId, cwd: input.cwd, mcpServers: [], ...roots,
+        opened = await request<acp.LoadSessionResponse>(process_, process_.protocolVersion === 2 ? 'session/resume' : 'session/load', { sessionId, cwd: input.cwd, mcpServers: input.mcpServers ?? [], ...roots,
           ...(process_.protocolVersion === 2 ? { replayFrom: { type: 'start' } } : {}), ...(meta ? { _meta: meta } : {}) }, limitsOf(profile).loadTimeoutMs);
       }
       const catalogs = catalogsOf(opened);

@@ -204,7 +204,15 @@ DSH Host
         └── claude-agent-acp   → 本机 Claude Code CLI
 ```
 
-两个 Harness 共用同一个 ACP 适配层，差异集中在 `src/acp-profiles.ts`。插件不向 Agent 声明文件系统或终端能力，也不传入 MCP 服务器；工具始终由各 CLI 在自己的权限策略下执行。
+两个 Harness 共用同一个 ACP 适配层，差异集中在 `src/acp-profiles.ts`。插件不向 Agent 声明文件系统或终端能力；工具由各 CLI 在自己的权限策略下执行。普通会话不额外传入 MCP 服务器。
+
+### 供插件管理的工单会话
+
+`ctx.harness.manageSession(sessionId, { owner, harness, context })` 绑定已有的 DSH 会话，不创建委派会话，也不修改用户记忆的 Harness、模型或推理强度。`harness: 'dsh'` 固定主会话使用原生执行；外部工单使用 `codex` 或 `claude-code`，沿用最近可用的模型和推理选择，并以完全权限执行。该接口仅供可信插件调用，没有开放远程或模型工具入口。
+
+外部工单的 `context()` 返回 `{ instructions, environment?, mcpServers }`。系统说明通过原生系统／开发者通道传入，HTTP MCP 配置通过 ACP 创建及恢复请求传入，不混入用户正文。说明或连接配置变化时，下一轮关闭空闲进程并恢复原生会话；仍有后台任务时明确暂停，避免更新上下文时杀死任务。
+
+绑定只持久化 `managedBy` 管理方标识；说明、环境和 MCP 凭据只在内存中。重启后，管理方须重新调用 `manageSession`，否则会话拒绝运行。结束派工时调用 `releaseManagedSession(sessionId, owner)` 撤销接入并关闭原生进程，持久化绑定保留以供后续恢复。
 
 Harness 的工具仍可并行执行，DSH 中的工具记录按启动顺序逐项登记和结算；后一项等待前一项结算后才显示，保证每项调用都有完整的日志关联，并保留冷恢复和轮次用量统计。原生模型的额度查询按提供商注册的配置行与字段路径读取当前配置，支持自定义配置行名。
 

@@ -15,6 +15,8 @@ const checkpointSchema = z.object({ repo: z.string().min(1), commit: z.string().
 const bindingSchema = z.object({
   version: z.literal(1), sessionId: z.string().min(1), harness: harnessChoice,
   cwd: z.string().min(1), locked: z.boolean(),
+  /** Automated sessions cannot run until their owning plugin restores its live context and tools. */
+  managedBy: z.string().min(1).optional(),
   model: harnessModelRefSchema.optional(), thinking: harnessThinkingOptionIdSchema.optional(), permission: harnessPermissionModeIdSchema.optional(),
   /** Permission mode `/plan` left; leaving plan mode returns to it. */
   beforePlan: harnessPermissionModeIdSchema.optional(),
@@ -50,6 +52,7 @@ const nativeDelegationSchema = z.object({
 /** An explicit native choice must survive a reopen without becoming an external Harness binding. */
 const nativeSelectionSchema = z.object({
   version: z.literal(1), sessionId: z.string().min(1), harness: z.literal('dsh'), locked: z.literal(false), delegation: z.never().optional(),
+  managedBy: z.string().min(1).optional(),
 }).strict();
 const storedBindingSchema = z.union([bindingSchema, nativeDelegationSchema, nativeSelectionSchema]);
 type StoredBinding = z.infer<typeof storedBindingSchema>;
@@ -89,8 +92,12 @@ export class Bindings {
     return (await this.stored(id))?.harness === 'dsh';
   }
   /** Callers hold serial(sessionId), just as for an external Harness choice. */
-  async writeNativeSelection(sessionId: string): Promise<void> {
-    await this.save(this.path(sessionId), nativeSelectionSchema.parse({ version: 1, sessionId, harness: 'dsh', locked: false }));
+  async managedOwner(id: string): Promise<string | undefined> {
+    const stored = await this.stored(id);
+    return stored && 'managedBy' in stored ? stored.managedBy : undefined;
+  }
+  async writeNativeSelection(sessionId: string, managedBy?: string): Promise<void> {
+    await this.save(this.path(sessionId), nativeSelectionSchema.parse({ version: 1, sessionId, harness: 'dsh', locked: false, managedBy }));
   }
   /** Callers that can race with native delegation creation must hold serial(sessionId). */
   async write(binding: Binding): Promise<void> {

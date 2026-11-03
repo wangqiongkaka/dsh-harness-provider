@@ -9,7 +9,7 @@ import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-workspace';
 import type {} from '@deepseek-ai/dsh-agent-default-model';
 import type {} from '@deepseek-ai/dsh-session-title';
-import type { HarnessAccountSnapshot, HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostItemOf, HostUsage } from './contracts.js';
+import type { HarnessAccountSnapshot, HarnessAdapter, HarnessSession, HarnessResult, HarnessOutput, HarnessSubagent, HostInteraction, HostInteractionResponse, HarnessSessionState, HostItemOf, HostUsage, ManagedSession } from './contracts.js';
 import { hostTurnIdSchema } from './contracts.js';
 import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { SecretQuestions } from './secret-questions.js';
@@ -37,7 +37,7 @@ export function linkedDirectories(ctx: Context, binding: Pick<Binding, 'cwd' | '
   // A directory deleted since it was picked is left out: the agent would be handed a workspace root that does not exist.
   return [...projects, ...(binding.linkedPaths ?? []).filter(path => !taken.has(path) && existsSync(path)).map(path => ({ title: basename(path), path }))];
 }
-type Live = { session: HarnessSession; cwd: string; revision: number; usage: HostUsage | null; modelLabel?: string; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; held?: HostItemOf<'notice'>[]; turnId?: import('./contracts.js').HostTurnId; continuation?: boolean; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
+type Live = { session: HarnessSession; cwd: string; revision: number; usage: HostUsage | null; managedKey?: string; modelLabel?: string; queue: HarnessOutput[]; ended: boolean; wake: () => void; activeAt: number; held?: HostItemOf<'notice'>[]; turnId?: import('./contracts.js').HostTurnId; continuation?: boolean; ready?: Promise<unknown>; steering?: Promise<void>; steerError?: unknown; steerMessages?: UserMessage[] };
 /**
  * How long an external Harness session may sit idle — no turn, and off screen — before its process is closed; the next
  * turn resumes it from its binding. Clients report a shown session every 15 seconds, well inside this window.
@@ -91,6 +91,7 @@ async function take(live: Live): Promise<HarnessOutput | undefined> {
 }
 export class DshRunner {
   readonly live = new Map<string, Live>();
+  readonly managed = new Map<string, ManagedSession>();
   readonly fileTurns = new Map<string, string>();
   /** Subagents of sessions whose process was reclaimed, so the card keeps showing them until the session resumes. */
   readonly retainedSubagents = new Map<string, HarnessSubagent[]>();
@@ -187,6 +188,7 @@ export class DshRunner {
   }
 
   async run(payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, binding: Binding): Promise<void> {
+    if (binding.managedBy && this.managed.get(binding.sessionId)?.owner !== binding.managedBy) throw new Error('工单管理接口尚未恢复，受控会话暂停执行');
     const directory = workingDirectory(payload.agent);
     const cwd = !binding.delegation?.worktree && directory ? directory.get(payload.agent.session) : binding.cwd;
     const repo = await repository(cwd).catch(() => undefined);
@@ -202,6 +204,8 @@ export class DshRunner {
   private async runTurn(payload: { agent: Agent; messages: UserMessage[]; turn: number; step: number; signal: AbortSignal }, binding: Binding): Promise<void> {
     const { agent, messages, turn, step, signal } = payload;
     signal.throwIfAborted();
+    const managed = binding.managedBy ? await this.managed.get(agent.id)!.context() : undefined;
+    const managedKey = managed ? JSON.stringify(managed) : undefined;
     const worktree = binding.delegation?.worktree;
     if (worktree?.removed) throw new Error('该委派会话的独立 worktree 已合并或删除，无法继续对话；如需继续，请在来源会话重新委派。');
     // A worktree delegation keeps its DSH session in the source workspace while the Harness works in the checkout.
@@ -219,6 +223,10 @@ export class DshRunner {
     let live = this.live.get(agent.id);
     // A session the adapter closed on its own (a wedged native turn) is reopened like a reclaimed one.
     if (live?.ended) { this.live.delete(agent.id); live = undefined; }
+    if (live && managedKey !== live.managedKey) {
+      if (live.session.hasBackgroundTasks?.()) throw new Error('工单上下文已更新，请等待后台任务结束后继续');
+      await live.session.close(); this.live.delete(agent.id); live = undefined;
+    }
     if (live && live.cwd !== binding.cwd) {
       if (live.session.hasBackgroundTasks?.()) throw new Error('当前会话有后台任务，请等待任务结束后再恢复新工作目录');
       await live.session.close();
@@ -240,7 +248,8 @@ export class DshRunner {
       // Named for the model as well: the directories alone do not say which project each one is.
       const linked = discussion ? [] : linkedDirectories(this.ctx, binding);
       const linkedNote = linked.length ? `\n\n[DSH 关联项目]\n本会话除工作目录外还关联了以下项目，可按当前权限直接访问其目录：\n${linked.map(workspace => `- ${workspace.title}：${workspace.path}`).join('\n')}\n[/DSH 关联项目]` : '';
-      const hints = { ...(discussion ? { discussion, instructions: '当前是只读讨论会话。只分析和提出建议；不能修改文件、执行有副作用的操作、创建子会话或请求用户授权。' }
+      const hints = { ...(managed ? { ...managed, instructions: managed.instructions + carried + linkedNote }
+        : discussion ? { discussion, instructions: '当前是只读讨论会话。只分析和提出建议；不能修改文件、执行有副作用的操作、创建子会话或请求用户授权。' }
         : delegation ? { environment: { ...process.env, ...await delegation.environment(agent.id) }, instructions: delegationInstructions() + carried + linkedNote }
         : carried || linkedNote ? { instructions: carried + linkedNote } : {}),
         ...(linked.length ? { additionalDirectories: linked.map(workspace => workspace.path) } : {}),
@@ -250,7 +259,7 @@ export class DshRunner {
       const session = unwrap(await this.adapters[binding.harness].open(binding.nativeRef
         ? { kind: 'resume', cwd: binding.cwd, nativeRef: binding.nativeRef, ...hints }
         : { kind: 'create', cwd: binding.cwd, ...hints }));
-      live = { session, cwd: binding.cwd, revision: 0, usage: session.initialUsage, queue: [], ended: false, wake: () => {}, activeAt: Date.now(),
+      live = { session, cwd: binding.cwd, revision: 0, usage: session.initialUsage, managedKey, queue: [], ended: false, wake: () => {}, activeAt: Date.now(),
         ...(session.initialState.resolvedModelLabel ? { modelLabel: session.initialState.resolvedModelLabel } : {}) };
       const opened = live;
       pump(opened, new BackgroundJobs(this.ctx, agent, session), event => {
