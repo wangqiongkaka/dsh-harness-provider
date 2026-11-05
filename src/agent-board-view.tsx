@@ -518,8 +518,8 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
 
   const all = [...rows, ...resident]
   const counts = { pending: 0, running: 0, done: 0, resident: 0 }
+  // The done tile counts unread completions (agentRows); its list also keeps read ones.
   for (const row of all) counts[row.state] += 1
-  counts.done = completed.length
   const shown = filter === 'done' ? completed : all.filter(row => row.state === filter)
 
   return createPortal(

@@ -210,11 +210,13 @@ test('completed sessions are mixed by task end rather than unread status, rename
   const titles = () => [...host().querySelectorAll('.hp-agents-title')].map(row => row.textContent);
   expect(titles()).toEqual(['空闲', '完成了']);
   expect(host().querySelectorAll('.hp-agents-group')).toHaveLength(1);
-  expect(host().querySelector('.hp-agents-tile[data-state="done"]').textContent).toBe('agents.done2');
+  // The tile counts unread completions only; the list keeps read ones too.
+  expect(host().querySelector('.hp-agents-tile[data-state="done"]').textContent).toBe('agents.done1');
   const read = new Map(statuses);
   read.set('done', { running: false, completionUnread: false });
   render({ ...sessions, byId: { ...sessions.byId, done: { ...sessions.byId.done, displayTitle: '改名', updatedAt: 9999 } } }, {}, read);
   expect(titles()).toEqual(['空闲', '改名']);
+  expect(host().querySelector('.hp-agents-tile[data-state="done"]').textContent).toBe('agents.done0');
   remount();
   render(sessions, {}, read);
   click(host().querySelector('.hp-agents-tile[data-state="done"]'));
