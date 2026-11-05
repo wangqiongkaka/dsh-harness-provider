@@ -2213,6 +2213,11 @@ export async function apply(ctx: Context): Promise<void> {
     };
     scope.effect(() => scope.slots.inject('shell.overlay', () => scope.slots.register({ name: 'shell.overlay', id: 'harness-agents', locale: 'harness',
       inject: (): AgentBoardInjected => ({
+        refreshCompletion: async sessionId => {
+          const sessions = ctx.get('sessions');
+          if (!sessions) throw new Error('sessions is not mounted');
+          await sessions.refreshProjections(sessionId);
+        },
         openSession: sessionId => { (ctx.get('uiWorkspace') as UiWorkspace | undefined)?.openSession(sessionId); },
         pinSession: sessionId => workspace().pinSession(sessionId),
         unpinSession: sessionId => workspace().unpinSession(sessionId),

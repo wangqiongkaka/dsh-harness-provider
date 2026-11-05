@@ -41,6 +41,7 @@ import { QueuedTurns } from './queued-turns.js';
 import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, linkRequest, directoriesRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest, SETTINGS_ENTRY, updateSettingsRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest, renameRequest, directoryRequest } from './delegation.js';
+import { completionProjection } from './completion-projection.js';
 import { workingDirectory } from './working-directory.js';
 import { createWorktree, mergeWorktree, removeWorktree, worktreeChanged } from './worktree.js';
 import { Config, defaultSettings, settingsOf, type SettingsSource } from './settings.js';
@@ -58,6 +59,7 @@ declare module '@deepseek-ai/cordis' { interface Context { harness: HarnessServi
 
 /** Standalone DSH entry: no replacement of the original client/plugin row. The Loader hands over `Config`-parsed options. */
 export async function apply(ctx: Context, config: ReturnType<typeof Config> = Config({})): Promise<void> {
+  ctx.inject(['sessionProjections'], scope => { scope.sessionProjections.register(completionProjection); });
   const settings = settingsOf(config);
   const environment = { ...process.env };
   const adapters = {

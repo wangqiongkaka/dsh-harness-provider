@@ -1,6 +1,6 @@
 /**
  * The sidebar's Agent card right after New Session, with selectable status tiles and inline
- * Session details, including recent completion history. A row opens its Session; its trailing "…"
+ * Session details, ordered by durable task completion times. A row opens its Session; its trailing "…"
  * button opens the sidebar row's actions (pin, rename, fork, archive, copy ID). The host's own row
  * menu is a slot only its Workspace browser may render, so these call the same host operations.
  *
@@ -22,8 +22,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import {
-  AGENT_STATES, agentRows, completionHistory, historyRows, residentRows,
-  type AgentRow, type AgentState, type CompletionRecord, type HarnessMark,
+  AGENT_STATES, agentRows, completedRows, residentRows,
+  type AgentRow, type AgentState, type HarnessMark,
 } from './agent-board.js'
 
 /**
@@ -45,13 +45,15 @@ export const agentsZh = {
   'agents.running': '运行中',
   'agents.done': '已完成',
   'agents.resident': '未释放',
-  'agents.history': '历史会话',
+  'agents.completionsLoading': '正在读取任务完成记录…',
+  'agents.completionsError': '任务完成记录读取失败，请重试',
+  'agents.completionsRetry': '重试',
   'agents.pending.approval': '等待审批',
   'agents.pending.plan-review': '计划待审',
   'agents.pending.question': '等待回答',
   'agents.empty.pending': '暂无待确认的 Agent',
   'agents.empty.running': '暂无运行中的 Agent',
-  'agents.empty.done': '暂无已完成会话或历史记录',
+  'agents.empty.done': '暂无已完成会话',
   'agents.empty.resident': '暂无未释放进程的会话',
   'agents.menu.more': '“{title}”的更多操作',
   'agents.menu.pin': '置顶会话',
@@ -86,13 +88,15 @@ export const agentsEn: Record<keyof typeof agentsZh, string> = {
   'agents.running': 'Running',
   'agents.done': 'Finished',
   'agents.resident': 'Resident',
-  'agents.history': 'Session history',
+  'agents.completionsLoading': 'Loading task completion records…',
+  'agents.completionsError': 'Could not load completion records. Please retry.',
+  'agents.completionsRetry': 'Retry',
   'agents.pending.approval': 'Waiting for approval',
   'agents.pending.plan-review': 'Plan awaiting review',
   'agents.pending.question': 'Waiting for answer',
   'agents.empty.pending': 'No agents waiting',
   'agents.empty.running': 'No agents running',
-  'agents.empty.done': 'No completed sessions or history',
+  'agents.empty.done': 'No completed sessions',
   'agents.empty.resident': 'No idle sessions holding a process',
   'agents.menu.more': 'More actions for “{title}”',
   'agents.menu.pin': 'Pin session',
@@ -125,21 +129,10 @@ type AgentKey = keyof typeof agentsZh
 /** New Session in the sidebar column: the card takes the seat right after it. */
 const ANCHOR = '[class*="_sidebarCol"] button[class*="_newSession"]'
 
-// Kept from dsh-remote-control, so the history a page saved before the move still shows.
-const HISTORY_KEY = 'dsh-remote-control.agent-history.v1'
-
-function savedHistory(): CompletionRecord<SessionId>[] {
-  try {
-    const value: unknown = JSON.parse(localStorage.getItem(HISTORY_KEY) ?? '[]')
-    if (!Array.isArray(value)) return []
-    return value.filter((entry): entry is CompletionRecord<SessionId> =>
-      typeof entry?.id === 'string' && typeof entry.completedAt === 'number' && Number.isFinite(entry.completedAt))
-  } catch { return [] }
-}
-
 /** Host commands passed through the slot injection face. */
 export interface AgentBoardInjected {
   openSession: (sessionId: SessionId) => void
+  refreshCompletion: (sessionId: SessionId) => Promise<void>
   /** Each Session's harness (dsh, codex, claude-code…) and liveness; empty where harness-provider is absent. */
   harnesses: (sessionIds: SessionId[]) => Promise<Readonly<Record<string, HarnessMark>>>
   pinSession: (sessionId: SessionId) => Promise<void>
@@ -462,27 +455,34 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
   }), [sessions, workspaces.archivedSessionIds])
   const statuses = useSessionStatus(value => value)
   const rows = useMemo(() => agentRows(list, statuses), [list, statuses])
-  const [history, setHistory] = useState(savedHistory)
-  const previous = useRef<typeof statuses>()
-  useEffect(() => {
-    if (list.phase !== 'ready' || workspaces.phase !== 'ready') { previous.current = undefined; return }
-    const before = previous.current
-    previous.current = statuses
-    setHistory(current => {
-      const next = completionHistory(list, statuses, before, current)
-      return next.length === current.length && next.every((entry, index) =>
-        entry.id === current[index]?.id && entry.completedAt === current[index]?.completedAt) ? current : next
-    })
-  }, [list, statuses, workspaces.phase])
-  useEffect(() => {
-    try { localStorage.setItem(HISTORY_KEY, JSON.stringify(history)) } catch { /* Storage may be disabled. */ }
-  }, [history])
-  const completed = useMemo(() => historyRows(list, statuses, history), [list, statuses, history])
+  const completed = useMemo(() => completedRows(list, statuses), [list, statuses])
   const candidates = useMemo(() => host === null ? []
     : list.ids.filter(id => list.byId[id]?.blank === false && list.byId[id]?.origin !== 'subagent'), [host, list])
   const marks = useMarks(candidates, props.harnesses)
   const resident = useMemo(() => residentRows(list, statuses, marks), [list, statuses, marks])
   const [filter, setFilter] = useState<AgentState>('running')
+  const [completionLoading, setCompletionLoading] = useState(false)
+  const [completionError, setCompletionError] = useState(false)
+  const [completionAttempt, retryCompletions] = useState(0)
+  const completionIds = JSON.stringify(candidates)
+  const refreshCompletion = props.refreshCompletion
+  useEffect(() => {
+    if (list.phase !== 'ready' || workspaces.phase !== 'ready') return
+    let active = true
+    const missing = candidates.filter(id => list.byId[id].projectionValues?.harnessTaskCompletedAt === undefined)
+    setCompletionError(false)
+    setCompletionLoading(missing.length > 0)
+    void (async () => {
+      // Cold projection reads do not load agents; read sequentially to bound startup work.
+      for (const id of missing) {
+        if (!active) return
+        await refreshCompletion(id)
+      }
+    })().catch(() => { if (active) setCompletionError(true) })
+      .finally(() => { if (active) setCompletionLoading(false) })
+    return () => { active = false }
+  }, [completionIds, completionAttempt, refreshCompletion, list.phase, workspaces.phase])
+
   const [dialog, setDialog] = useState<ActionDialog | null>(null)
   const [toast, setToast] = useState<{ text: string; seq: number } | null>(null)
   if (host === null) return null
@@ -519,8 +519,8 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
   const all = [...rows, ...resident]
   const counts = { pending: 0, running: 0, done: 0, resident: 0 }
   for (const row of all) counts[row.state] += 1
-  const shown = all.filter(row => row.state === filter)
-  const showHistory = filter === 'done' && completed.length > 0
+  counts.done = completed.length
+  const shown = filter === 'done' ? completed : all.filter(row => row.state === filter)
 
   return createPortal(
     <>
@@ -534,17 +534,15 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
           ))}
         </div>
         <div className="hp-agents-list" role="region" aria-label={t(`agents.${filter}`)}>
-          {shown.length === 0 && !showHistory && <p className="hp-agents-empty">{t(`agents.empty.${filter}`)}</p>}
+          {filter === 'done' && completionLoading && <p role="status">{t('agents.completionsLoading')}</p>}
+          {filter === 'done' && completionError && <div role="alert">{t('agents.completionsError')}
+            <button type="button" onClick={() => { retryCompletions(value => value + 1) }}>{t('agents.completionsRetry')}</button>
+          </div>}
+          {shown.length === 0 && !(filter === 'done' && (completionLoading || completionError)) && <p className="hp-agents-empty">{t(`agents.empty.${filter}`)}</p>}
           {shown.length > 0 && (
             <section className="hp-agents-group">
               <h3><StateDot state={DOT[filter]} size={filter === 'running' ? 12 : 10} />{t(`agents.${filter}`)}</h3>
               <div>{shown.map(row => <Row key={row.id} row={row} mark={marks.get(row.id)} pinned={pinned.has(row.id)} now={now} t={t} open={openSession} act={act} />)}</div>
-            </section>
-          )}
-          {showHistory && (
-            <section className="hp-agents-group hp-agents-history">
-              <h3><StateDot state="done" size={10} />{t('agents.history')}</h3>
-              <div>{completed.map(row => <Row key={row.id} row={row} mark={marks.get(row.id)} pinned={pinned.has(row.id)} now={now} t={t} open={openSession} act={act} />)}</div>
             </section>
           )}
         </div>

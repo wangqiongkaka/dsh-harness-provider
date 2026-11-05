@@ -11,6 +11,8 @@
  * whose native process this plugin still keeps alive.
  */
 
+import type {} from './completion-projection.js'
+
 /** Board groups, in the order the board shows them. */
 export const AGENT_STATES = ['pending', 'running', 'done', 'resident'] as const
 
@@ -27,6 +29,7 @@ interface SummaryFacts {
   running: boolean
   blank: boolean
   updatedAt: number
+  projectionValues?: { harnessTaskCompletedAt?: number | null }
   origin?: 'subagent' | undefined
 }
 
@@ -55,12 +58,6 @@ export interface AgentRow<Id extends string = string> {
   updatedAt: number
   state: AgentState
   pending?: PendingKind
-}
-
-/** One recently completed Session, kept after its unread reminder is cleared. */
-export interface CompletionRecord<Id extends string = string> {
-  id: Id
-  completedAt: number
 }
 
 function pendingKind(kind: string | undefined): PendingKind | undefined {
@@ -101,41 +98,19 @@ export function agentRows<Id extends string>(
     || b.updatedAt - a.updatedAt)
 }
 
-/** Keep actual completions newest first, including those already being viewed. */
-export function completionHistory<Id extends string>(
+/** One list of read and unread completions, ordered only by durable task-end timestamps. */
+export function completedRows<Id extends string>(
   list: { readonly ids: readonly Id[]; readonly byId: Readonly<Record<Id, SummaryFacts>> },
   statuses: ReadonlyMap<Id, StatusFacts>,
-  previous: ReadonlyMap<Id, StatusFacts> | undefined,
-  history: readonly CompletionRecord<Id>[],
-): CompletionRecord<Id>[] {
-  const entries = new Map(history.filter(entry => list.ids.includes(entry.id)).map(entry => [entry.id, entry]))
-  for (const id of list.ids) {
-    const summary = list.byId[id]
-    if (summary.origin === 'subagent' || summary.blank) continue
-    const current = statuses.get(id)
-    if (current === undefined || pendingKind(current.pendingInteraction?.kind) !== undefined) continue
-    const before = previous?.get(id)
-    if ((before?.running === true && current.running === false)
-      || (current.completionUnread && before?.completionUnread !== true)) {
-      entries.set(id, { id, completedAt: summary.updatedAt })
-    }
-  }
-  return [...entries.values()].sort((a, b) => b.completedAt - a.completedAt)
-}
-
-/** Read completed rows stay separate from the live unread-completion group. */
-export function historyRows<Id extends string>(
-  list: { readonly ids: readonly Id[]; readonly byId: Readonly<Record<Id, SummaryFacts>> },
-  statuses: ReadonlyMap<Id, StatusFacts>,
-  history: readonly CompletionRecord<Id>[],
 ): AgentRow<Id>[] {
-  return history.flatMap(({ id, completedAt }) => {
+  return list.ids.flatMap(id => {
     const summary = list.byId[id]
     const status = statuses.get(id)
-    if (!list.ids.includes(id) || summary === undefined || summary.origin === 'subagent' || summary.blank
-      || status?.completionUnread || status?.pendingInteraction || (status?.running ?? summary.running)) return []
+    const completedAt = summary.projectionValues?.harnessTaskCompletedAt
+    if (summary.origin === 'subagent' || summary.blank || status?.pendingInteraction
+      || (status?.running ?? summary.running) || typeof completedAt !== 'number' || !Number.isFinite(completedAt)) return []
     return [{ id, title: summary.displayTitle, workspace: basename(summary.cwd), updatedAt: completedAt, state: 'done' as const }]
-  })
+  }).sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
 }
 
 /**

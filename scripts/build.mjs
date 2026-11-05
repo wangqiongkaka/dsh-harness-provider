@@ -55,7 +55,7 @@ const quietBypassNotice = {
   },
 };
 await build({
-  entryPoints: ['src/checkpoints.ts', 'src/media.ts', 'src/secret-questions.ts', 'src/dsh-output.ts', 'src/contracts.ts', 'src/codex-rpc.ts', 'src/acp-adapter.ts', 'src/acp-profiles.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts', 'src/worktree.ts', 'src/settings.ts', 'src/branch-context.ts', 'src/background-jobs.ts'],
+  entryPoints: ['src/completion-projection.ts', 'src/agent-board.ts', 'src/checkpoints.ts', 'src/media.ts', 'src/secret-questions.ts', 'src/dsh-output.ts', 'src/contracts.ts', 'src/codex-rpc.ts', 'src/acp-adapter.ts', 'src/acp-profiles.ts', 'src/dsh.ts', 'src/dsh-runner.ts', 'src/bindings.ts', 'src/native-quota.ts', 'src/delegation.ts', 'src/worktree.ts', 'src/settings.ts', 'src/branch-context.ts', 'src/background-jobs.ts'],
   external: ['@deepseek-ai/*'],
   outdir: 'dist',
   bundle: true,
@@ -83,6 +83,12 @@ await build({
   external: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
   banner: { js: 'window.__ModuleLoader__.load({id:"dsh-harness-provider",factory:(require)=>{var module={exports:{}};var exports=module.exports;' },
   footer: { js: 'return module.exports;}});' },
+});
+
+await build({
+  entryPoints: ['src/agent-board-view.tsx'], outfile: 'dist/agent-board-view.js', bundle: true,
+  platform: 'browser', format: 'esm', target: 'es2022', jsx: 'automatic',
+  external: ['react', 'react/jsx-runtime', 'react-dom', '@deepseek-ai/dsh-client-ui-primitives'],
 });
 
 await mkdir('dist/licenses', { recursive: true });

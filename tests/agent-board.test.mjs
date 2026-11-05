@@ -7,10 +7,7 @@ import { chromium } from '@playwright/test';
 
 // ---- the card's rows: pure picks out of the Session list and the unified Session status ----
 
-const board = async () => {
-  const bundle = await build({ entryPoints: ['src/agent-board.ts'], bundle: true, write: false, platform: 'node', format: 'esm' });
-  return import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
-};
+const board = () => import('../dist/agent-board.js');
 const summary = (title, updatedAt, extra = {}) => ({ displayTitle: title, cwd: '/Users/me/dsh-remote-control', running: false, blank: false, updatedAt, ...extra });
 const status = (extra = {}) => ({ running: undefined, pendingInteraction: undefined, completionUnread: false, ...extra });
 
@@ -43,24 +40,6 @@ test('the agent card names the workspace by the last directory segment', async (
   const { agentRows } = await board();
   const byId = { posix: summary('p', 3, { running: true, cwd: '/a/b/proj/' }), windows: summary('w', 2, { running: true, cwd: 'C:\\work\\win-proj' }), none: { displayTitle: 'n', running: true, blank: false, updatedAt: 1 } };
   assert.deepEqual(agentRows({ ids: ['posix', 'windows', 'none'], byId }, new Map()).map(row => row.workspace), ['proj', 'win-proj', '']);
-});
-
-test('the agent card retains all completions newest first after their unread reminders clear', async () => {
-  const { completionHistory } = await board();
-  const byId = Object.fromEntries(Array.from({ length: 7 }, (_, index) => [`s${index + 1}`, summary(`s${index + 1}`, index + 1)]));
-  const list = { ids: Object.keys(byId), byId };
-  const unread = new Map(list.ids.map(id => [id, status({ running: false, completionUnread: id !== 's7' })]));
-  const history = completionHistory(list, unread, undefined, []);
-  assert.deepEqual(history.map(entry => entry.id), ['s6', 's5', 's4', 's3', 's2', 's1']);
-  const read = new Map(list.ids.map(id => [id, status({ running: false })]));
-  assert.deepEqual(completionHistory(list, read, unread, history), history);
-  const running = new Map(read);
-  running.set('s7', status({ running: true }));
-  assert.deepEqual(completionHistory(list, new Map(read), running, history).map(entry => entry.id), ['s7', 's6', 's5', 's4', 's3', 's2', 's1']);
-  const awaiting = new Map(read);
-  awaiting.set('s7', status({ running: false, pendingInteraction: { kind: 'approval' } }));
-  assert.deepEqual(completionHistory(list, awaiting, running, history), history);
-  assert.ok(!completionHistory({ ...list, ids: list.ids.filter(id => id !== 's6') }, read, undefined, history).map(entry => entry.id).includes('s6'));
 });
 
 test('the agent card lists idle external Harness Sessions whose native process is still alive, newest first', async () => {
@@ -104,8 +83,8 @@ const list = {
   byId: {
     ask: { displayTitle: '等回答', cwd: '/w/dsh-remote-control', running: false, blank: false, updatedAt: 3 },
     run: { displayTitle: '运行中', cwd: '/w/dsh-remote-control-01', running: true, blank: false, updatedAt: 2 },
-    done: { displayTitle: '完成了', cwd: '/w/dsh-remote-control', running: false, blank: false, updatedAt: 1 },
-    idle: { displayTitle: '空闲', cwd: '/w/x', running: false, blank: false, updatedAt: 9 },
+    done: { projectionValues: { harnessTaskCompletedAt: 1 }, displayTitle: '完成了', cwd: '/w/dsh-remote-control', running: false, blank: false, updatedAt: 1 },
+    idle: { projectionValues: { harnessTaskCompletedAt: null }, displayTitle: '空闲', cwd: '/w/x', running: false, blank: false, updatedAt: 9 },
   },
 };
 const statuses = new Map([
@@ -114,6 +93,9 @@ const statuses = new Map([
 ]);
 const workspaces = { phase: 'ready', archivedSessionIds: [], pinnedSessionIds: [] };
 const opened = [], asked = [], calls = [], fail = {};
+const refreshed = [];
+let completionLoader = async id => { refreshed.push(id); };
+const refreshCompletion = id => completionLoader(id);
 const mount = document.createElement('div');
 document.body.append(mount);
 let root = createRoot(mount);
@@ -129,11 +111,12 @@ function column() {
 function render(sessions = list, marks = {}, snapshot = statuses, workspaceSnapshot = workspaces) {
   act(() => {
     root.render(createElement(AgentBoard, {
-      t: (key, params) => params?.n === undefined ? key : key + ':' + params.n,
+      t: (key, params) => window.previewCopy ? (window.Board.agentsZh[key] ?? key).replace('{n}', params?.n ?? '') : params?.n === undefined ? key : key + ':' + params.n,
       useSessions: select => select(sessions),
       useSessionStatus: select => select(snapshot),
       useWorkspaces: select => select(workspaceSnapshot),
       openSession: id => { opened.push(id); },
+      refreshCompletion,
       ...Object.fromEntries(['pinSession', 'unpinSession', 'renameSession', 'forkSession', 'archiveSession'].map(name =>
         [name, async (...args) => {
           calls.push([name, ...args]);
@@ -176,7 +159,7 @@ function expect(actual) {
   };
   return Object.assign(check(false), { not: check(true) });
 }
-Object.assign(window, { list, statuses, workspaces, opened, asked, calls, fail, mount, column, render, host, click, settle, openMenu, menuLabels, pickMenu, dialogButton, expect, act, createRoot,
+Object.assign(window, { refreshed, setCompletionLoader: loader => { completionLoader = loader; }, list, statuses, workspaces, opened, asked, calls, fail, mount, column, render, host, click, settle, openMenu, menuLabels, pickMenu, dialogButton, expect, act, createRoot,
   remount() { act(() => { root.unmount(); }); root = createRoot(mount); },
   unmount() { act(() => { root.unmount(); }); } });
 `;
@@ -190,7 +173,7 @@ before(async () => {
     pluginBuild.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: PRIMITIVES, loader: 'js', resolveDir: resolve('src') }));
   } };
   const bundle = await build({
-    stdin: { contents: `export { AgentBoard, AGENTS_ATTRIBUTE } from './agent-board-view.tsx';\nexport { createRoot } from 'react-dom/client';\nexport { createElement } from 'react';\nexport { act } from 'react-dom/test-utils';`, resolveDir: resolve('src'), loader: 'tsx' },
+    stdin: { contents: `import * as primitives from '@deepseek-ai/dsh-client-ui-primitives';\nwindow.require = name => { if (name === '@deepseek-ai/dsh-client-ui-primitives') return primitives; throw new Error(name); };\nexport { AgentBoard, AGENTS_ATTRIBUTE, agentsZh } from './agent-board-view.js';\nexport { createRoot } from 'react-dom/client';\nexport { createElement } from 'react';\nexport { act } from 'react-dom/test-utils';`, resolveDir: resolve('dist'), loader: 'tsx' },
     bundle: true, write: false, platform: 'browser', format: 'iife', globalName: 'Board', jsx: 'automatic', nodePaths, plugins: [stub], logLevel: 'warning',
     define: { 'process.env.NODE_ENV': '"development"' },
   });
@@ -200,7 +183,7 @@ before(async () => {
 after(() => browser?.close());
 
 /** Runs `body` in a fresh page (its own storage) holding the card and the old suite's helpers. */
-async function inPage(body, { seed, arg } = {}) {
+async function inPage(body, { seed, arg, screenshot } = {}) {
   const context = await browser.newContext();
   try {
     const page = await context.newPage();
@@ -210,131 +193,80 @@ async function inPage(body, { seed, arg } = {}) {
     if (seed) await page.evaluate(seed);
     await page.addScriptTag({ content: script });
     await page.addScriptTag({ content: HARNESS });
+    if (screenshot) await page.evaluate(() => { window.previewCopy = true; });
     await page.evaluate(body, arg);
+    if (screenshot) { await page.addStyleTag({ content: 'html{--dsw-alias-label-primary:#eee;--dsw-alias-label-secondary:#aaa;--dsw-alias-border-l3:#444;--dsw-alias-state-success-primary:#24a259;--dsw-specific-sidebar-fill:#1b1b1b}body{margin:0;padding:12px;background:#1b1b1b;color:#eee;font-family:system-ui,sans-serif}' }); await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: screenshot }); }
   } finally { await context.close(); }
 }
 
-test('the agent card keeps read completions in inline history after remounting', () => inPage(() => {
+test('completed sessions are mixed by task end rather than unread status, rename time or browser history', () => inPage(async () => {
   column();
-  render();
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  expect(host()?.querySelector('.hp-agents-history')).toBeNull();
+  const sessions = { ...list, ids: ['done', 'idle'], byId: { ...list.byId,
+    done: { ...list.byId.done, updatedAt: 999, projectionValues: { harnessTaskCompletedAt: 10 } },
+    idle: { ...list.byId.idle, projectionValues: { harnessTaskCompletedAt: 20 } },
+  } };
+  render(sessions);
+  click(host().querySelector('.hp-agents-tile[data-state="done"]'));
+  const titles = () => [...host().querySelectorAll('.hp-agents-title')].map(row => row.textContent);
+  expect(titles()).toEqual(['空闲', '完成了']);
+  expect(host().querySelectorAll('.hp-agents-group')).toHaveLength(1);
+  expect(host().querySelector('.hp-agents-tile[data-state="done"]').textContent).toBe('agents.done2');
   const read = new Map(statuses);
-  read.set('done', { running: false, pendingInteraction: undefined, completionUnread: false });
-  render(list, {}, read);
-  expect(host()?.querySelector('.hp-agents-tile[data-state="done"]')?.textContent).toBe('agents.done0');
-  expect(host()?.querySelector('.hp-agents-history h3')?.textContent).toBe('agents.history');
-  expect(host()?.querySelector('.hp-agents-history .hp-agents-title')?.textContent).toBe('完成了');
+  read.set('done', { running: false, completionUnread: false });
+  render({ ...sessions, byId: { ...sessions.byId, done: { ...sessions.byId.done, displayTitle: '改名', updatedAt: 9999 } } }, {}, read);
+  expect(titles()).toEqual(['空闲', '改名']);
   remount();
-  render(list, {}, read);
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  expect(host()?.querySelector('.hp-agents-history .hp-agents-title')?.textContent).toBe('完成了');
-  click(host()?.querySelector('.hp-agents-history [data-hp-agents-pick]'));
-  expect(opened).toEqual(['done']);
+  render(sessions, {}, read);
+  click(host().querySelector('.hp-agents-tile[data-state="done"]'));
+  expect(titles()).toEqual(['空闲', '完成了']);
+  click(host().querySelector('[data-hp-agents-pick]'));
+  expect(opened).toEqual(['idle']);
+}, { seed: () => localStorage.setItem('dsh-remote-control.agent-history.v1', JSON.stringify([{ id: 'done', completedAt: 99999 }])) }));
+
+test('a new task end reorders the completed list without requiring an unread reminder', () => inPage(() => {
+  column();
+  const sessions = { ...list, ids: ['done', 'idle'], byId: { ...list.byId,
+    idle: { ...list.byId.idle, projectionValues: { harnessTaskCompletedAt: 2 } },
+  } };
+  const read = new Map([['done', { running: false, completionUnread: false }]]);
+  render(sessions, {}, read);
+  click(host().querySelector('.hp-agents-tile[data-state="done"]'));
+  expect([...host().querySelectorAll('.hp-agents-title')].map(row => row.textContent)).toEqual(['空闲', '完成了']);
+  render(sessions, {}, new Map([['done', { running: true, completionUnread: false }]]));
+  expect([...host().querySelectorAll('.hp-agents-title')].map(row => row.textContent)).toEqual(['空闲']);
+  render({ ...sessions, byId: { ...sessions.byId, done: { ...sessions.byId.done, projectionValues: { harnessTaskCompletedAt: 3 } } } }, {}, read);
+  expect([...host().querySelectorAll('.hp-agents-title')].map(row => row.textContent)).toEqual(['完成了', '空闲']);
 }));
 
-test('the agent card does not re-remind a completion watched from inside the Session, but keeps it in history', () => inPage(async () => {
-  const frame = document.createElement('div');
-  frame.className = 'ui_layout__frame__h1';
-  frame.setAttribute('data-sidebar-collapsed', '');
-  document.body.append(frame);
-  frame.append(column());
-  const sessions = { ...list, ids: ['run'] };
-  render(sessions, {}, new Map([['run', { running: true, pendingInteraction: undefined, completionUnread: false }]]));
-  const finished = { ...sessions, byId: { ...sessions.byId, run: { ...sessions.byId.run, running: false, updatedAt: 10 } } };
-  // The host acknowledges the completion immediately: the user is watching the Session.
-  render(finished, {}, new Map([['run', { running: false, pendingInteraction: undefined, completionUnread: false }]]));
-  frame.removeAttribute('data-sidebar-collapsed');
+test('archived sessions stay out of completed counts and ordering', () => inPage(() => {
+  column(); render();
+  click(host().querySelector('.hp-agents-tile[data-state="done"]'));
+  render(list, {}, statuses, { ...workspaces, archivedSessionIds: ['done'] });
+  expect(host().querySelector('.hp-agents-tile[data-state="done"]').textContent).toBe('agents.done0');
+  expect(host().querySelectorAll('[data-hp-agents-pick]')).toHaveLength(0);
+}));
+
+test('cold completion reads fail visibly and can retry without inventing a timestamp', () => inPage(async () => {
+  column();
+  let failRead = true;
+  const sessions = { ...list, ids: ['idle'], byId: { ...list.byId, idle: { ...list.byId.idle, projectionValues: undefined } } };
+  setCompletionLoader(async id => {
+    refreshed.push(id);
+    if (failRead) throw Error('offline');
+    render({ ...sessions, byId: { ...sessions.byId, idle: { ...sessions.byId.idle, projectionValues: { harnessTaskCompletedAt: 10 } } } });
+  });
+  render(sessions);
+  click(host().querySelector('.hp-agents-tile[data-state="done"]'));
   await settle();
-  expect(host()?.querySelector('.hp-agents-tile[data-state="done"]')?.textContent).toBe('agents.done0');
-  expect(host()?.querySelectorAll('[data-hp-agents-pick]')).toHaveLength(0);
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  expect(host()?.querySelector('.hp-agents-empty')).toBeNull();
-  expect(host()?.querySelector('.hp-agents-history .hp-agents-title')?.textContent).toBe('运行中');
-  click(host()?.querySelector('.hp-agents-history [data-hp-agents-pick]'));
-  expect(opened).toEqual(['run']);
-}));
-
-test('the agent card still reminds of a completion that happened while the user was elsewhere', () => inPage(async () => {
-  column();
-  const sessions = { ...list, ids: ['run'], byId: { ...list.byId, run: { ...list.byId.run, running: false, updatedAt: 10 } } };
-  render(sessions, {}, new Map([['run', { running: true, pendingInteraction: undefined, completionUnread: false }]]));
-  // The user never opened this Session, so the host keeps its completion unread.
-  render(sessions, {}, new Map([['run', { running: false, pendingInteraction: undefined, completionUnread: true }]]));
+  expect(host().querySelector('[role="alert"]').textContent).toContain('agents.completionsError');
+  expect(host().querySelectorAll('[data-hp-agents-pick]')).toHaveLength(0);
+  failRead = false;
+  click(host().querySelector('[role="alert"] button'));
   await settle();
-  expect(host()?.querySelector('.hp-agents-tile[data-state="done"]')?.textContent).toBe('agents.done1');
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  expect(host()?.querySelector('.hp-agents-title')?.textContent).toBe('运行中');
-  click(host()?.querySelector('[data-hp-agents-pick]'));
-  expect(opened).toEqual(['run']);
-  // Opening the Session is what clears the host's unread completion.
-  render(sessions, {}, new Map([['run', { running: false, pendingInteraction: undefined, completionUnread: false }]]));
-  expect(host()?.querySelector('.hp-agents-tile[data-state="done"]')?.textContent).toBe('agents.done0');
-  expect(host()?.querySelector('.hp-agents-history .hp-agents-title')?.textContent).toBe('运行中');
+  expect(host().querySelector('[role="alert"]')).toBeNull();
+  expect(host().querySelector('.hp-agents-title').textContent).toBe('空闲');
+  expect(refreshed).toEqual(['idle', 'idle']);
 }));
-
-// The card moved from dsh-remote-control; it reads the history that plugin saved under the same key.
-test('the agent card restores history saved before the move, with the Harness icon', () => inPage(async () => {
-  column();
-  const read = new Map(statuses);
-  read.set('done', { running: false, pendingInteraction: undefined, completionUnread: false });
-  render(list, { done: { harness: 'codex' } }, read);
-  await settle();
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  expect(host()?.querySelector('.hp-agents-history [data-hp-agents-pick]').dataset.hpHarness).toBe('codex');
-}, { seed: () => localStorage.setItem('dsh-remote-control.agent-history.v1', JSON.stringify([{ id: 'done', completedAt: 1 }])) }));
-
-test('the agent card removes archived Sessions from card counts, rows and saved history', () => inPage(() => {
-  column();
-  render();
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  render(list, {}, statuses, { ...workspaces, archivedSessionIds: ['ask', 'run', 'done'] });
-  expect([...host().querySelectorAll('.hp-agents-card .hp-agents-tile')].map(tile => tile.textContent))
-    .toEqual(['agents.pending0', 'agents.running0', 'agents.done0', 'agents.resident0']);
-  expect(host()?.querySelectorAll('[data-hp-agents-pick]')).toHaveLength(0);
-  expect(JSON.parse(localStorage.getItem('dsh-remote-control.agent-history.v1') ?? '[]')).toEqual([]);
-}));
-
-test('the agent card clears archived read history and keeps other completions after remounting', () => inPage(() => {
-  const kept = { id: 'idle', completedAt: 9 };
-  column();
-  const read = new Map(statuses);
-  read.set('done', { running: false, pendingInteraction: undefined, completionUnread: false });
-  render(list, {}, read);
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  expect(host()?.querySelectorAll('.hp-agents-history .hp-agents-title')).toHaveLength(2);
-  const archived = { ...workspaces, archivedSessionIds: ['done'] };
-  render(list, {}, read, archived);
-  expect([...host().querySelectorAll('.hp-agents-history .hp-agents-title')].map(row => row.textContent)).toEqual(['空闲']);
-  expect(JSON.parse(localStorage.getItem('dsh-remote-control.agent-history.v1') ?? '[]')).toEqual([kept]);
-  remount();
-  render(list, {}, read, archived);
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  expect([...host().querySelectorAll('.hp-agents-history .hp-agents-title')].map(row => row.textContent)).toEqual(['空闲']);
-}, { seed: () => localStorage.setItem('dsh-remote-control.agent-history.v1', JSON.stringify([{ id: 'done', completedAt: 1 }, { id: 'idle', completedAt: 9 }])) }));
-
-test('the agent card preserves saved history until the Workspace archive list is ready', () => inPage(() => {
-  const entry = { id: 'done', completedAt: 1 };
-  column();
-  const read = new Map(statuses);
-  read.set('done', { running: false, pendingInteraction: undefined, completionUnread: false });
-  render({ ...list, ids: [] }, {}, read, { ...workspaces, phase: 'pending' });
-  expect(JSON.parse(localStorage.getItem('dsh-remote-control.agent-history.v1') ?? '[]')).toEqual([entry]);
-  render(list, {}, read, { ...workspaces, archivedSessionIds: ['done'] });
-  expect(JSON.parse(localStorage.getItem('dsh-remote-control.agent-history.v1') ?? '[]')).toEqual([]);
-}, { seed: () => localStorage.setItem('dsh-remote-control.agent-history.v1', JSON.stringify([{ id: 'done', completedAt: 1 }])) }));
-
-test('the agent card does not erase saved history while the Session list is loading', () => inPage(() => {
-  const entry = { id: 'done', completedAt: 1 };
-  column();
-  render({ ...list, phase: 'pending', ids: [] });
-  expect(JSON.parse(localStorage.getItem('dsh-remote-control.agent-history.v1') ?? '[]')).toEqual([entry]);
-  const read = new Map(statuses);
-  read.set('done', { running: false, pendingInteraction: undefined, completionUnread: false });
-  render(list, {}, read);
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  expect(host()?.querySelector('.hp-agents-history .hp-agents-title')?.textContent).toBe('完成了');
-}, { seed: () => localStorage.setItem('dsh-remote-control.agent-history.v1', JSON.stringify([{ id: 'done', completedAt: 1 }])) }));
 
 test('the agent card defaults to running details below four tiles, right after New Session', () => inPage(() => {
   column();
@@ -381,7 +313,7 @@ for (const state of ['pending', 'running', 'done']) {
   test(`the agent card keeps more than five ${state} rows in a five-row scrollport`, () => inPage(async state => {
     column();
     const ids = Array.from({ length: 7 }, (_, index) => `session${index}`);
-    const sessions = { ...list, ids, byId: { ...list.byId, ...Object.fromEntries(ids.map((id, index) => [id, { ...list.byId.idle, displayTitle: id, updatedAt: index }])) } };
+    const sessions = { ...list, ids, byId: { ...list.byId, ...Object.fromEntries(ids.map((id, index) => [id, { ...list.byId.idle, displayTitle: id, updatedAt: index, projectionValues: { harnessTaskCompletedAt: index } }])) } };
     render(sessions, {}, new Map(ids.map(id => [id, { running: state === 'running', pendingInteraction: state === 'pending' ? { kind: 'question' } : undefined, completionUnread: state === 'done' }])));
     await settle();
     click(host()?.querySelector(`.hp-agents-tile[data-state="${state}"]`));
@@ -395,31 +327,19 @@ for (const state of ['pending', 'running', 'done']) {
   }, { arg: state }));
 }
 
-test('the agent card restores and opens saved history beyond the first five rows', () => inPage(async () => {
+test('all completed rows remain accessible beyond the first five, newest task end first', () => inPage(async () => {
   const ids = Array.from({ length: 7 }, (_, index) => `session${index}`);
-  const entries = ids.map((id, index) => ({ id, completedAt: 7 - index }));
   column();
-  render({ ...list, ids, byId: { ...list.byId, ...Object.fromEntries(ids.map(id => [id, { ...list.byId.idle, displayTitle: id }])) } }, {}, new Map());
+  render({ ...list, ids, byId: { ...list.byId, ...Object.fromEntries(ids.map((id, index) => [id, {
+    ...list.byId.idle, displayTitle: id, projectionValues: { harnessTaskCompletedAt: 7 - index },
+  }])) } }, {}, new Map());
   await settle();
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  const scroller = host().querySelector('.hp-agents-history > div');
+  click(host().querySelector('.hp-agents-tile[data-state="done"]'));
+  const scroller = host().querySelector('.hp-agents-group > div');
   expect(scroller.querySelectorAll('.hp-agents-row')).toHaveLength(7);
-  expect(JSON.parse(localStorage.getItem('dsh-remote-control.agent-history.v1') ?? '[]')).toEqual(entries);
-  click(scroller.lastElementChild?.querySelector('[data-hp-agents-pick]'));
+  click(scroller.lastElementChild.querySelector('[data-hp-agents-pick]'));
   expect(opened).toEqual(['session6']);
-}, { seed: () => localStorage.setItem('dsh-remote-control.agent-history.v1', JSON.stringify(Array.from({ length: 7 }, (_, index) => ({ id: `session${index}`, completedAt: 7 - index })))) }));
-
-test('the agent card shows unread completions and read history only under the completed tile', () => inPage(() => {
-  column();
-  render();
-  expect(host()?.querySelector('.hp-agents-history')).toBeNull();
-  click(host()?.querySelector('.hp-agents-tile[data-state="done"]'));
-  expect([...host().querySelectorAll('.hp-agents-title')].map(row => row.textContent)).toEqual(['完成了', '空闲']);
-  expect(host()?.querySelector('.hp-agents-history .hp-agents-title')?.textContent).toBe('空闲');
-  click(host()?.querySelector('.hp-agents-tile[data-state="pending"]'));
-  expect(host()?.querySelector('.hp-agents-history')).toBeNull();
-  expect([...host().querySelectorAll('.hp-agents-title')].map(row => row.textContent)).toEqual(['等回答']);
-}, { seed: () => localStorage.setItem('dsh-remote-control.agent-history.v1', JSON.stringify([{ id: 'idle', completedAt: 9 }])) }));
+}, { screenshot: '/tmp/dsh-completed-sorted.png' }));
 
 test('the agent card shows an empty message for the selected group without falling back to other groups', () => inPage(() => {
   column();
