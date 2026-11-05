@@ -1,7 +1,13 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { UserMessage } from '@deepseek-ai/dsh-llm';
 import type {} from '@deepseek-ai/dsh-attachment';
+import type { FileAttachmentRef, AttachmentAdmissionPart } from '@deepseek-ai/dsh-attachment/types';
 import type { HostInput } from './contracts.js';
+
+/** DSH 0.2.2 receipts already carry their image/file kind; older hosts return a bare file ref. */
+export function stagedAttachment(ref: FileAttachmentRef | AttachmentAdmissionPart): AttachmentAdmissionPart {
+  return 'type' in ref ? ref : { type: 'file', attachment: ref };
+}
 
 /** Resolve only host-admitted attachments; never accept a caller-supplied attachment path. */
 export async function harnessInput(ctx: Context, messages: UserMessage[], signal: AbortSignal): Promise<HostInput[]> {

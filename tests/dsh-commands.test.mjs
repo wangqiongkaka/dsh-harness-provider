@@ -22,7 +22,8 @@ test('public command wrapper preserves native routing, deduplicates external adm
  }
  try{
   await ctx.plugin(LocalAttachments,{dshHome:root});
-  ctx.provide('fileUploads',{resolve:()=>undefined});
+  const file = await ctx.attachments.saveFile({data:Buffer.from('receipt content'),name:'receipt.txt'});
+  ctx.provide('fileUploads',{resolve:(_agent,id)=>id==='valid-file'?{type:'file',attachment:file}:undefined,bindPrompt:()=>({commit(){},[Symbol.dispose](){}})});
   await ctx.plugin(Typert);await ctx.plugin(NativeCommands);
   ctx.provide('agents',{get:()=>agent});ctx.provide('sessions',{});ctx.provide('userQuestions',{});
   const adapter={async close(){}};
@@ -41,6 +42,8 @@ test('public command wrapper preserves native routing, deduplicates external adm
   assert.ok((await ctx.attachments.readImage(agent.inbox.nextTurn[1].content[0].attachment)).data.length);
   await assert.rejects(controller.prompt({...request,requestId:'file-request',content:[{type:'file',receiptId:'foreign'}]},signal),/附件不属于/);
 
+  await controller.prompt({...request,requestId:'valid-file-request',content:[{type:'file',receiptId:'valid-file'}]},signal);
+  assert.deepEqual(agent.inbox.nextTurn.at(-1).content[0],{type:'file',attachment:file});
   await assert.rejects(ctx.harness.select({sessionId:'bound',harness:'claude-code'}),/新建会话/);
   assert.equal(ctx.typert.local.get('harness/state').service,'harness');
   await fiber.dispose();

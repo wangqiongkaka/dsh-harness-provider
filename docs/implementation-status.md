@@ -2,6 +2,20 @@
 
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
+## 修复新版上传回执（2026-11-05，0.2.7）
+
+- DSH 0.2.2 的 `fileUploads.resolve()` 返回包含 `type`、`attachment` 的暂存附件，图片还有用于限额校验的 `encodedBytes`；旧版返回裸文件引用。插件原先再次包装成文件，导致 `File attachment reference is invalid`。
+- 普通发送、用户委派及讨论共用格式归一化：新版保留完整暂存附件，旧版只包装一次；归属校验、附件内容验证和上传字节限制仍交给宿主。依据为该版本 `packages/client/file-upload/src/types.ts` 和 `packages/api/session-controller/src/commands.ts`。
+- 回归先在旧构建复现重复包装及附件读取失败，修复后完整检查通过 282 项测试；真实 rc.1 的 `DSH_IMAGE_PROBE=1` 验证 Codex / Claude Code 同时上传图片与文件，两类附件都进入原生模型请求。只用本地模型响应夹具。没有改写已有会话中失败消息的引用。
+- 额外运行的技能菜单探针未通过：原生 DSH 的技能选项未在超时内出现，未将该项算作本次附件验证通过，也未扩大到技能菜单修复。
+
+## 兼容 DSH 0.2.2-rc.1（2026-11-05）
+
+- 插件升至 0.2.6，9 个 DSH peer 精确加入 `0.2.2-rc.1`；未验证的 `0.2.2-rc.2` 仍被拒绝。
+- 新宿主 `packages/client/ui-chat/src/client/chat/MessageItem.tsx` 的用户消息组件要求消息来源插槽的 `renderSlotChain`。原先另行注册包装组件会丢失此能力，导致宿主回退到原生消息、编辑入口消失。插件现在装饰运行时注册项的组件，保留宿主注入能力，通过注册表修订通知刷新已挂载消息，卸载时恢复原组件并保留其他插件后续替换。未修改宿主文件。
+- 回归断言覆盖兼容版本、宿主注入能力、重复更新和卸载恢复；在原实现上确认失败。开发环境 `npm run check` 类型检查、构建及全部 281 项测试通过，环境仍链接既有宿主构建。
+- 使用本机 DSH 0.2.2-rc.1 桌面版自带 CLI，在隔离 Web Profile 中运行完整 `experiments/dsh-web-probe.mjs`：Codex / Claude Code 连续对话和跨重启恢复、Codex 编辑重生成、刷新后旧轮次隐藏、回滚、分叉、未确认请求恢复及侧栏标识均通过。真实 CLI 使用本地响应夹具，不请求真实模型端点。无头 Chromium 截图已核对，编辑结果为 `.cache/edit-result-web.png`。
+
 ## 兼容 DSH 0.2.1-rc.5（2026-10-30）
 
 - 清单将 9 个 DSH peer 增加 `0.2.1-rc.5`，插件版本升至 0.2.5，未经确认的 rc.4 和 rc.6 仍被拒绝。新增兼容检查在原清单上复现拒绝。

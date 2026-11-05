@@ -1678,6 +1678,34 @@ interface EditInjected {
   host(): ComponentType<ChatNodeViewProps<'user'>> | undefined;
   ht: T;
 }
+// Keep the host registration's injected child-slot capabilities when decorating its renderer.
+export function wrapUserRenderers(slots: Pick<Context['slots'], 'entries' | 'subscribe' | 'register'>, api: EditInjected) {
+  const wrapped = new Map<{ component: unknown }, { original: unknown; wrapper: unknown }>();
+  const refresh = () => {
+    if (slots.entries('conversation.chat.node').length) slots.register({ name: 'conversation.chat.node', key: 'user', priority: -100 }, () => null)();
+  };
+  const sync = () => {
+    let changed = false;
+    for (const entry of slots.entries('conversation.chat.node')) {
+      if (entry.options.key !== 'user' || wrapped.has(entry)) continue;
+      const Original = entry.component as ComponentType<ChatNodeViewProps<'user'>>;
+      const host = () => Original;
+      const Wrapper = (props: ChatNodeViewProps<'user'>) => <EditableUserMessage {...props} {...api} host={host} />;
+      wrapped.set(entry, { original: Original, wrapper: Wrapper });
+      entry.component = Wrapper;
+      changed = true;
+    }
+    // Publish a slot revision so already mounted bubbles receive the decorated component.
+    if (changed) refresh();
+  };
+  const stop = slots.subscribe('conversation.chat.node', sync);
+  sync();
+  return () => {
+    stop();
+    for (const [entry, { original, wrapper }] of wrapped) if (entry.component === wrapper) entry.component = original;
+    refresh();
+  };
+}
 export function EditableUserMessage(props: ChatNodeViewProps<'user'> & InjectFace<EditInjected>) {
   const { sessionId, useSessions, node, read, edit, previewRewind, confirmRewind, host, ht } = props;
   const Host = host();
@@ -1977,8 +2005,7 @@ export async function apply(ctx: Context): Promise<void> {
         // After the host's session stats (order 0), where the host draws a DSH session's context reading.
         nativeSeats.push(scope.slots.register({ name: 'conversation.composer.dock', id: 'harness-context', order: 100, locale: 'harness', inject: () => api }, HarnessContext));
         nativeSeats.push(scope.slots.register({ name: 'settings.onboarding', id: 'deepseek-official', priority: -100 }, ExternalOnboarding));
-        nativeSeats.push(scope.slots.inject('conversation.chat.node', () => scope.slots.register({ name: 'conversation.chat.node', key: 'user', priority: -100,
-          locale: 'chat', inject: () => editApi }, EditableUserMessage)));
+        nativeSeats.push(scope.slots.inject('conversation.chat.node', () => wrapUserRenderers(scope.slots, editApi)));
       }
       if (!external && nativeSeats.length) { for (const dispose of nativeSeats) dispose(); nativeSeats = []; }
     }

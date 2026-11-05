@@ -104,7 +104,7 @@ async function dismiss(){
   const visible = await button.waitFor({state:'visible',timeout:name==='Continue'?1200:6000}).then(()=>true,error=>{if(error.name==='TimeoutError')return false;throw error;});
   if(visible){await button.click();await delay(300);}
  }
- if(backgroundProbe && await page.getByText('Get started',{exact:true}).isVisible()) await page.keyboard.press('Escape');
+ if(await page.getByRole('dialog',{name:'Get started'}).isVisible()) await page.keyboard.press('Escape');
 }
 async function send(text,reply){
  const replies=page.getByText(reply,{exact:false});
@@ -201,7 +201,7 @@ try{
    await dismiss();
    const selector=page.getByLabel('Select Harness',{exact:true});await selector.click();
    await page.getByRole('menuitemradio',{name:label,exact:true}).click();
-   await page.locator('input[type="file"]').setInputFiles({name:'fixture.png',mimeType:'image/png',buffer:png});
+   await page.locator('input[type="file"]').setInputFiles([{name:'fixture.png',mimeType:'image/png',buffer:png},{name:'fixture.txt',mimeType:'text/plain',buffer:Buffer.from('attachment fixture')}]);
    await page.locator('[contenteditable="true"][role="textbox"]').fill('Describe the attached image');
    const responsePromise=page.waitForResponse(response=>response.url().includes('/api/session/prompt'));
    await page.getByRole('button',{name:'Send message',exact:true}).click();
@@ -210,7 +210,8 @@ try{
    await expect(page.getByText(reply,{exact:true})).toBeVisible({timeout:45000});
    const requests=harness==='codex'?codex.requests:claude.requests;
    assert.ok(requests.some(request=>JSON.stringify(request.body).includes(harness==='codex'?'input_image':'"type":"image"')),'native model request must contain image');
-   console.log('PASS: '+label+' composer image upload reaches the native model request');
+   assert.ok(requests.some(request=>JSON.stringify(request.body).includes('fixture.txt')),'native model request must contain the verified file path');
+   console.log('PASS: '+label+' composer image and file uploads reach the native model request');
   }
  }else if(subagentProbe){
   const sessionId='claude-subagent-probe';

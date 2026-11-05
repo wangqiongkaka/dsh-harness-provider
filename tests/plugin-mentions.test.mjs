@@ -183,6 +183,7 @@ test('the model seat follows the Harness of the main-view session and task modes
  const snapshot={ids:['draft','other'],byId:{draft:{id:'draft',retainedBy:{mainView:1}},other:{id:'other',retainedBy:{}}}};
  const seats=new Map(),components=new Map();let api;
  const slots={
+  entries:()=>[], subscribe:()=>()=>{},
   inject(_name,register){return register();},
   register(options,component){if(options.name==='conversation.input.left')api=options.inject();components.set(options.name,component);seats.set(options.name,(seats.get(options.name)??0)+1);return ()=>seats.set(options.name,seats.get(options.name)-1);},
  };
@@ -194,6 +195,19 @@ test('the model seat follows the Harness of the main-view session and task modes
    else if(keys.length===1&&keys[0]==='slots')apply({slots,effect(fn){fn();}});
   },
  };
+ const original = () => null, entry = { options: { key: 'user' }, component: original };
+ let listener, unsubscribed = false;
+ const dispose = module.exports.wrapUserRenderers({ register: () => () => {}, entries: () => [entry], subscribe: (_key, fn) => { listener = fn; return () => { unsubscribed = true; }; } }, {});
+ const renderSlotChain = () => 'source decoration';
+ const decorated = entry.component({ renderSlotChain });
+ assert.equal(decorated.props.renderSlotChain, renderSlotChain, 'the host child-slot capability survives decoration');
+ assert.equal(decorated.props.host(), original);
+ const wrapper = entry.component;
+ listener(); assert.equal(entry.component, wrapper, 'slot updates do not wrap twice');
+ dispose(); assert.equal(entry.component, original); assert.equal(unsubscribed, true);
+ const disposeAgain = module.exports.wrapUserRenderers({ register: () => () => {}, entries: () => [entry], subscribe: () => () => {} }, {});
+ const replacement = () => null; entry.component = replacement; disposeAgain();
+ assert.equal(entry.component, replacement, 'unload preserves a later plugin replacement');
  await module.exports.apply(ctx);
  const React=require('react'),{renderToStaticMarkup}=require('react-dom/server'),Dock=components.get('conversation.input.dock');
  assert.ok(Dock);

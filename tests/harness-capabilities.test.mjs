@@ -6,11 +6,20 @@ import { join } from 'node:path';
 import { Context } from '@deepseek-ai/cordis';
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
-import { harnessInput } from '../dist/media.js';
+import { harnessInput, stagedAttachment } from '../dist/media.js';
 import { SecretQuestions } from '../dist/secret-questions.js';
 import { DshOutput } from '../dist/dsh-output.js';
 
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWNgZGIGAAAOAAeCcsnOAAAAAElFTkSuQmCC';
+
+test('staged receipts retain their kind and image byte budget, while legacy file refs are wrapped once', () => {
+  const file = { attachmentId: 'sha256:' + 'a'.repeat(64), name: 'note.txt', bytes: 3 };
+  const modernFile = { type: 'file', attachment: file };
+  const image = { type: 'image', attachment: { attachmentId: file.attachmentId, mediaType: 'image/png', bytes: 3, width: 1, height: 1 }, encodedBytes: 17 };
+  assert.deepEqual(stagedAttachment(file), modernFile);
+  assert.equal(stagedAttachment(modernFile), modernFile);
+  assert.equal(stagedAttachment(image), image);
+});
 
 test('images/files use verified attachment storage and image tool output retains durable references', async () => {
   const root = await mkdtemp(join(tmpdir(), 'harness-media-')), ctx = new Context();

@@ -78,7 +78,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   const stagedFile=await ctx.attachments.saveFile({data:Buffer.from('attachment text'),name:'note.txt'});
   let receiptCommitted=false;
   ctx.provide('fileUploads',{
-   resolve:(agent,id)=>agent.id==='other'&&id==='receipt-note'?stagedFile:undefined,
+   resolve:(agent,id)=>agent.id==='other'&&id==='receipt-note'?{type:'file',attachment:stagedFile}:undefined,
    bindPrompt:()=>({commit(){receiptCommitted=true;},[Symbol.dispose](){}}),
   });ctx.provide('sessionTitle',{});ctx.provide('sessionSkillCatalog',{async list(){return {skills:[]};}});
   const permissionPresets={names:['read-only','workspace-write'],current:()=>'read-only',resolve:name=>({sandbox:name}),set:(session,name)=>presetSets.push([session.id,name])};

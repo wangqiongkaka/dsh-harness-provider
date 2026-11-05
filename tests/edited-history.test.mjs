@@ -19,7 +19,8 @@ const render = () => {
  const content = row(124, '这两个字段容器让人误解', true) + (state.supersededTurns.length ? row(125, '这两个字段容易让人误解', false) : '');
  document.querySelector('#chat').innerHTML = wrapped ? '<div data-slot="conversation.chat.flow">' + content + '</div>' : content;
 };
-const slots = { inject: (_name, callback) => callback(), entries: () => [], register: (options, component) => { const entry = { options, component }; registrations.push(entry); return () => { const i = registrations.indexOf(entry); if (i >= 0) registrations.splice(i, 1); }; } };
+const hostEntry = { options: { key: 'user' }, component: () => null };
+const slots = { subscribe: () => () => {}, inject: (_name, callback) => callback(), entries: () => [hostEntry], register: (options, component) => { const entry = { options, component }; registrations.push(entry); return () => { const i = registrations.indexOf(entry); if (i >= 0) registrations.splice(i, 1); }; } };
 const remote = { $mount: async () => () => {}, harness: {
  state: async ({ sessionId }) => ({ ok: true, value: states[sessionId] }),
  edit: async ({ sessionId }) => { states[sessionId] = { ...states[sessionId], supersededTurns: [124], editableTurns: [125] }; render(); return { ok: true, value: states[sessionId] }; }
@@ -32,7 +33,7 @@ const ctx = { ...scope, inject: (dependencies, callback) => { if (dependencies[0
 window.ready = apply(ctx).then(async () => {
  const input = registrations.find(entry => entry.options.name === 'conversation.input.left').options.inject();
  input.changed(current, 'codex');
- const edits = () => registrations.find(entry => entry.component === EditableUserMessage).options.inject();
+ const edits = () => hostEntry.component({}).props;
  window.editMessage = () => edits().edit(current, 28246, '这两个字段容易让人误解', crypto.randomUUID());
  window.switchSession = async id => { current = id; for (const callback of subscribers) callback(); input.changed(id, 'codex'); render(); await edits().read(id); };
  window.setWrapped = async value => { wrapped = value; render(); await edits().read(current); };

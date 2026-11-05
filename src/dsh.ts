@@ -11,6 +11,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools';
 import { brandString } from '@deepseek-ai/dsh-brand';
 import type {} from '@deepseek-ai/dsh-user-questions';
 import type {} from '@deepseek-ai/dsh-typert-registry';
+import { stagedAttachment } from './media.js';
 import type { HarnessAdapter, HarnessAuthStatus, HarnessInspection, ManagedSession } from './contracts.js';
 import type {} from '@deepseek-ai/dsh-session-projection';
 import type {} from '@deepseek-ai/dsh-settings';
@@ -861,7 +862,7 @@ export class HarnessService extends TypertRemoteService {
       if (part.type === 'image') return part;
       const attachment = this.ctx.fileUploads.resolve(source, brandString<FileUploadReceiptId>(part.receiptId));
       if (!attachment) throw new RemoteError('session/attachment-invalid', '附件不属于当前会话或上传已过期', { reason: 'FILE_NOT_STAGED' });
-      return { type: 'file' as const, attachment };
+      return stagedAttachment(attachment);
     });
     const content = await this.ctx.attachments.admitPromptContent([
       ...admission,
@@ -1604,7 +1605,7 @@ export class HarnessService extends TypertRemoteService {
         if (part.type !== 'file') return part;
         const attachment = ctx.fileUploads.resolve(agent, part.receiptId);
         if (!attachment) throw new RemoteError('session/attachment-invalid', '附件不属于当前会话或上传已过期', { reason: 'FILE_NOT_STAGED' });
-        return { type: 'file' as const, attachment };
+        return stagedAttachment(attachment);
       });
       const content = admission.every(part => part.type === 'text') ? admission : await ctx.attachments.admitPromptContent(admission);
       signal.throwIfAborted();
