@@ -208,11 +208,13 @@ DSH Host
 
 ### 供插件管理的工单会话
 
-`ctx.harness.manageSession(sessionId, { owner, harness, context })` 绑定已有的 DSH 会话，不创建委派会话，也不修改用户记忆的 Harness、模型或推理强度。`harness: 'dsh'` 固定主会话使用原生执行；外部工单使用 `codex` 或 `claude-code`，沿用最近可用的模型和推理选择，并以完全权限执行。该接口仅供可信插件调用，没有开放远程或模型工具入口。
+`ctx.harness.manageSession(sessionId, { owner, harness, context, selection? })` 绑定已有的 DSH 会话，不创建委派会话，也不修改用户记忆的 Harness、模型或推理强度。`harness: 'dsh'` 固定主会话使用原生执行；外部工单使用 `codex` 或 `claude-code`，并以完全权限执行。该接口仅供可信插件调用，没有开放远程或模型工具入口。
+
+`managedSessionOptionsVersion >= 1` 表示支持 `selection: { model?: string, thinking?: string, fast?: boolean }`。省略字段保留 Harness 默认行为（模型和推理沿用最近可用选择）；显式值按能力目录校验，快速模式适配 `fast` / `fast-mode` 的布尔值或 `on/off` 表示，不支持时拒绝绑定。只在首次绑定时应用，恢复已有受控会话不会覆盖原选择。插件可用 `models({ sessionId, harness })` 查询目录，并用 `validateManagedSessionSelection(sessionId, harness, selection)` 在保存设置前只读校验；调用方应先检查能力版本，避免旧版本忽略参数。DSH 原生会话不接受 `selection`。
 
 外部工单的 `context()` 返回 `{ instructions, environment?, mcpServers }`。系统说明通过原生系统／开发者通道传入，HTTP MCP 配置通过 ACP 创建及恢复请求传入，不混入用户正文。说明或连接配置变化时，下一轮关闭空闲进程并恢复原生会话；仍有后台任务时明确暂停，避免更新上下文时杀死任务。
 
-绑定只持久化 `managedBy` 管理方标识；说明、环境和 MCP 凭据只在内存中。重启后，管理方须重新调用 `manageSession`，否则会话拒绝运行。结束派工时调用 `releaseManagedSession(sessionId, owner)` 撤销接入并关闭原生进程，持久化绑定保留以供后续恢复。
+绑定持久化 `managedBy` 管理方标识和模型、推理、快速模式选择；说明、环境和 MCP 凭据只在内存中。重启后，管理方须重新调用 `manageSession`，否则会话拒绝运行。结束派工时调用 `releaseManagedSession(sessionId, owner)` 撤销接入并关闭原生进程，持久化绑定保留以供后续恢复。
 
 Harness 的工具仍可并行执行，DSH 中的工具记录按启动顺序逐项登记和结算；后一项等待前一项结算后才显示，保证每项调用都有完整的日志关联，并保留冷恢复和轮次用量统计。原生模型的额度查询按提供商注册的配置行与字段路径读取当前配置，支持自定义配置行名。
 

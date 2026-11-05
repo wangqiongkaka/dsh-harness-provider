@@ -48,6 +48,7 @@ import { confirmRewindRequest, rewindRequest } from './remote.js';
 
 /** DSH commands a Harness session keeps: the row stays DSH's, the work runs on the Harness's own command or mode. */
 const HARNESS_COMMANDS = new Set(['goal', 'plan', 'compact', 'clear']);
+const managedSelection = modelPick.extend({ fast: z.boolean().optional() }).strict();
 const CLEAR_COMMAND: CommandDescriptor = { name: 'clear', description: 'Clear the Harness context' };
 
 export const inject = ['sessionController', 'sessions', 'agents', 'typert', 'userQuestions', 'attachments', 'fileUploads'];
@@ -151,14 +152,36 @@ export function nativeSubagent(child: { id: string; parentId: string | null; lab
 }
 
 export class HarnessService extends TypertRemoteService {
+  readonly managedSessionOptionsVersion = 1;
+
+  /** Validate a plugin's choices without binding a session or changing personal defaults. */
+  async validateManagedSessionSelection(sessionId: string, harness: Binding['harness'], selection: unknown): Promise<void> {
+    await this.startingManagedSelection(sessionId, harness, selection);
+  }
+
+  private async startingManagedSelection(sessionId: string, harness: Binding['harness'], selection: unknown): Promise<Partial<Pick<Binding, 'model' | 'thinking' | 'configs'>>> {
+    const pick = managedSelection.parse(selection);
+    const cwd = (await this.agent(sessionId)).session.header.cwd;
+    if (!cwd) throw new Error('请先连接工作目录');
+    const starting = await this.startingModel(harness, cwd, pick);
+    if (pick.fast === undefined) return starting ?? {};
+    const catalog = await this.catalog({ version: 1, sessionId, harness, cwd, locked: false });
+    if ('error' in catalog) throw new Error(catalog.error);
+    const option = catalog.configOptions?.find(option => option.id === 'fast' || option.id === 'fast-mode');
+    const value = typeof option?.currentValue === 'boolean' ? pick.fast : pick.fast ? 'on' : 'off';
+    if (!option || (typeof value === 'string' && !option.choices?.some(choice => choice.value === value))) throw new Error('当前 Harness 不支持快速模式');
+    return { ...starting, configs: { [option.id]: value } };
+  }
+
   /** Bind a plugin-owned session without changing the user's remembered Harness or model. */
-  async manageSession(sessionId: string, options: { owner: string; harness: 'dsh' | Binding['harness']; context?: ManagedSession['context'] }): Promise<void> {
+  async manageSession(sessionId: string, options: { owner: string; harness: 'dsh' | Binding['harness']; context?: ManagedSession['context']; selection?: z.infer<typeof managedSelection> }): Promise<void> {
     if (!options.owner || (options.harness !== 'dsh' && !options.context)) throw new Error('受控会话需要管理方和上下文');
     await this.bindings.serial(sessionId, async () => {
       const agent = await this.agent(sessionId), current = await this.bindings.read(sessionId);
       const owner = await this.bindings.managedOwner(sessionId);
       if (owner && owner !== options.owner) throw new Error('受控会话的管理方不匹配');
       if (options.harness === 'dsh') {
+        if (options.selection) throw new Error('DSH 原生会话使用宿主模型配置');
         if (current && (current.managedBy || current.nativeRef || !this.unstarted(agent))) throw new Error('受控主会话必须使用 DSH 原生 Harness');
         if (owner === options.owner && !current) return;
         await this.bindings.writeNativeSelection(sessionId, options.owner);
@@ -167,7 +190,8 @@ export class HarnessService extends TypertRemoteService {
       if (current && (current.managedBy !== options.owner || current.harness !== options.harness)) throw new Error('受控会话的管理方或 Harness 不匹配');
       if (!current && !this.unstarted(agent)) throw new Error('已有对话不能转为受控会话');
       const binding = current ?? await this.bind(agent, sessionId, options.harness,
-        { permission: harnessPermissionModeIdSchema.parse(FULL_ACCESS[options.harness]) });
+        { permission: harnessPermissionModeIdSchema.parse(FULL_ACCESS[options.harness]),
+          ...options.selection ? await this.startingManagedSelection(sessionId, options.harness, options.selection) : {} });
       binding.managedBy = options.owner;
       binding.locked = true;
       await this.bindings.write(binding);
@@ -1063,7 +1087,7 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /** Bind a fresh session to a Harness, seeding permission from the native sandbox and model / thinking from the last pick. */
-  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation' | 'cwd' | 'model' | 'thinking' | 'carry' | 'linked' | 'linkedPaths'>> = {}): Promise<Binding> {
+  private async bind(agent: Awaited<ReturnType<HarnessService['agent']>>, sessionId: string, harness: Binding['harness'], overrides: Partial<Pick<Binding, 'permission' | 'delegation' | 'cwd' | 'model' | 'thinking' | 'configs' | 'carry' | 'linked' | 'linkedPaths'>> = {}): Promise<Binding> {
     const cwd = agent.session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
     const binding: Binding = { version: 1, sessionId, harness, cwd, locked: false };
