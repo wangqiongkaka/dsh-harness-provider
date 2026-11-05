@@ -195,7 +195,7 @@ async function inPage(body, { seed, arg, screenshot } = {}) {
     await page.addScriptTag({ content: HARNESS });
     if (screenshot) await page.evaluate(() => { window.previewCopy = true; });
     await page.evaluate(body, arg);
-    if (screenshot) { await page.addStyleTag({ content: 'html{--dsw-alias-label-primary:#eee;--dsw-alias-label-secondary:#aaa;--dsw-alias-border-l3:#444;--dsw-alias-state-success-primary:#24a259;--dsw-specific-sidebar-fill:#1b1b1b}body{margin:0;padding:12px;background:#1b1b1b;color:#eee;font-family:system-ui,sans-serif}' }); await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: screenshot }); }
+    if (screenshot) { await page.addStyleTag({ content: 'html{--dsw-alias-state-business-primary:#8baaff;--dsw-alias-label-primary:#eee;--dsw-alias-label-secondary:#aaa;--dsw-alias-border-l3:#444;--dsw-alias-state-success-primary:#24a259;--dsw-specific-sidebar-fill:#1b1b1b}body{margin:0;padding:12px;background:#1b1b1b;color:#eee;font-family:system-ui,sans-serif}' }); await page.setViewportSize({ width: 390, height: 844 }); await page.screenshot({ path: screenshot }); }
   } finally { await context.close(); }
 }
 
@@ -209,6 +209,8 @@ test('completed sessions are mixed by task end rather than unread status, rename
   click(host().querySelector('.hp-agents-tile[data-state="done"]'));
   const titles = () => [...host().querySelectorAll('.hp-agents-title')].map(row => row.textContent);
   expect(titles()).toEqual(['空闲', '完成了']);
+  expect(host().querySelectorAll('.hp-agents-unread')).toHaveLength(1);
+  expect(host().querySelector('.hp-agents-unread').closest('.hp-agents-row').querySelector('.hp-agents-title').textContent).toBe('完成了');
   expect(host().querySelectorAll('.hp-agents-group')).toHaveLength(1);
   // The tile counts unread completions only; the list keeps read ones too.
   expect(host().querySelector('.hp-agents-tile[data-state="done"]').textContent).toBe('agents.done1');
@@ -216,6 +218,7 @@ test('completed sessions are mixed by task end rather than unread status, rename
   read.set('done', { running: false, completionUnread: false });
   render({ ...sessions, byId: { ...sessions.byId, done: { ...sessions.byId.done, displayTitle: '改名', updatedAt: 9999 } } }, {}, read);
   expect(titles()).toEqual(['空闲', '改名']);
+  expect(host().querySelectorAll('.hp-agents-unread')).toHaveLength(0);
   expect(host().querySelector('.hp-agents-tile[data-state="done"]').textContent).toBe('agents.done0');
   remount();
   render(sessions, {}, read);
@@ -224,6 +227,23 @@ test('completed sessions are mixed by task end rather than unread status, rename
   click(host().querySelector('[data-hp-agents-pick]'));
   expect(opened).toEqual(['idle']);
 }, { seed: () => localStorage.setItem('dsh-remote-control.agent-history.v1', JSON.stringify([{ id: 'done', completedAt: 99999 }])) }));
+
+test('the unread badge stays visible beside a truncated title without changing completion order', () => inPage(() => {
+  const col = column(); col.style.width = '264px';
+  const sessions = { ...list, ids: ['done', 'idle'], byId: { ...list.byId,
+    done: { ...list.byId.done, displayTitle: '等待查看的构建与类型检查结果和完整的发布说明', projectionValues: { harnessTaskCompletedAt: 10 } },
+    idle: { ...list.byId.idle, displayTitle: '最近完成的任务', projectionValues: { harnessTaskCompletedAt: 20 } },
+  } };
+  render(sessions);
+  click(host().querySelector('.hp-agents-tile[data-state="done"]'));
+  const rows = host().querySelectorAll('.hp-agents-row');
+  expect(rows[0].querySelector('.hp-agents-unread')).toBeNull();
+  expect(rows[1].querySelector('.hp-agents-unread').textContent).toBe('未读');
+  expect(rows[1].scrollWidth).toBe(rows[1].clientWidth);
+  const title = rows[1].querySelector('.hp-agents-title');
+  expect(title.scrollWidth).toBeGreaterThan(title.clientWidth);
+  col.style.width = '100%';
+}, { screenshot: '/tmp/dsh-unread-mark.png' }));
 
 test('a new task end reorders the completed list without requiring an unread reminder', () => inPage(() => {
   column();

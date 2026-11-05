@@ -44,6 +44,7 @@ export const agentsZh = {
   'agents.pending': '待确认',
   'agents.running': '运行中',
   'agents.done': '已完成',
+  'agents.unread': '未读',
   'agents.resident': '未释放',
   'agents.completionsLoading': '正在读取任务完成记录…',
   'agents.completionsError': '任务完成记录读取失败，请重试',
@@ -87,6 +88,7 @@ export const agentsEn: Record<keyof typeof agentsZh, string> = {
   'agents.pending': 'Waiting',
   'agents.running': 'Running',
   'agents.done': 'Finished',
+  'agents.unread': 'Unread',
   'agents.resident': 'Resident',
   'agents.completionsLoading': 'Loading task completion records…',
   'agents.completionsError': 'Could not load completion records. Please retry.',
@@ -210,7 +212,10 @@ const STYLE = ''
   + '.hp-agents-error{margin-top:8px;font-size:13px;color:var(--dsw-alias-state-error-primary)}'
   + '.hp-agents-lead{width:16px;flex:none;display:flex;justify-content:center}'
   + '.hp-agents-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}'
-  + '.hp-agents-title{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+  + '.hp-agents-heading{display:flex;align-items:center;gap:6px;min-width:0}'
+  + '.hp-agents-unread{flex:none;padding:0 5px;border-radius:4px;font-size:11px;line-height:18px;'
+  + 'color:var(--dsw-alias-state-business-primary,var(--dsw-alias-label-primary));background:color-mix(in srgb,var(--dsw-alias-state-business-primary) 12%,transparent)}'
+  + '.hp-agents-title{min-width:0;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
   + '.hp-agents-meta{font-size:12px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
   + '.hp-agents-meta[data-state="pending"]{color:var(--dsw-alias-state-warn-primary)}'
   + '.hp-agents-time{flex:none;font-size:12px;color:var(--dsw-alias-label-tertiary)}'
@@ -305,8 +310,8 @@ function stateLabel(row: AgentRow<SessionId>, t: Translate): string {
   return row.pending === undefined ? t(`agents.${row.state}`) : t(`agents.pending.${row.pending}`)
 }
 
-function Row({ row, mark, pinned, now, t, open, act }: {
-  row: AgentRow<SessionId>; mark: HarnessMark | undefined; pinned: boolean; now: number; t: Translate
+function Row({ row, mark, pinned, unread, now, t, open, act }: {
+  row: AgentRow<SessionId>; mark: HarnessMark | undefined; pinned: boolean; unread: boolean; now: number; t: Translate
   open: (id: SessionId) => void; act: (action: RowAction, row: AgentRow<SessionId>) => void
 }) {
   const { Menu, StateDot, IconEllipsisOutlineRegular } = ui()
@@ -330,7 +335,10 @@ function Row({ row, mark, pinned, now, t, open, act }: {
       >
         <span className="hp-agents-lead">{harness === undefined && <StateDot state={DOT[row.state]} />}</span>
         <span className="hp-agents-text">
-          <span className="hp-agents-title">{row.title}</span>
+          <span className="hp-agents-heading">
+            <span className="hp-agents-title">{row.title}</span>
+            {unread && <span className="hp-agents-unread">{t('agents.unread')}</span>}
+          </span>
           <span className="hp-agents-meta" data-state={row.state}>{meta}</span>
         </span>
         <span className="hp-agents-time">{timeLabel(row.updatedAt, now, t)}</span>
@@ -542,7 +550,7 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
           {shown.length > 0 && (
             <section className="hp-agents-group">
               <h3><StateDot state={DOT[filter]} size={filter === 'running' ? 12 : 10} />{t(`agents.${filter}`)}</h3>
-              <div>{shown.map(row => <Row key={row.id} row={row} mark={marks.get(row.id)} pinned={pinned.has(row.id)} now={now} t={t} open={openSession} act={act} />)}</div>
+              <div>{shown.map(row => <Row key={row.id} row={row} mark={marks.get(row.id)} pinned={pinned.has(row.id)} unread={row.state === 'done' && statuses.get(row.id)?.completionUnread === true} now={now} t={t} open={openSession} act={act} />)}</div>
             </section>
           )}
         </div>
