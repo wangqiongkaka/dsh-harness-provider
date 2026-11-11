@@ -42,6 +42,10 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (params.replayFrom?.type !== 'start') return send({ id, error: { code: -32602, message: '需要完整回放' } });
   const content = JSON.parse(readFileSync(process.env.V2_HISTORY, 'utf8'));
   update({ sessionUpdate: 'user_message', messageId: 'user-1', content });
+  if (content[0].text === '断线') {
+   update({ sessionUpdate: 'session_info_update', _meta: { jetbrains: { air: { sessionFailure: { title: 'The connection to Claude was lost.', severity: 'error', category: 'connection', actions: ['new_session'] } } } } });
+   return send({ id, result: { configOptions: [], availableCommands: [] } });
+  }
   if (content[0].text === '完整回放') {
    update({ sessionUpdate: 'user_message', messageId: 'user-1' });
    update({ sessionUpdate: 'agent_message', messageId: 'reply-1', content: [{ type: 'text', text: '旧内容' }] });
@@ -60,6 +64,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   return send({ id, result: { configOptions: [], availableCommands: [] } });
  }
  if (method === 'session/prompt') {
+  if (params.prompt[0].text === '失效请求') return send({ id, error: { code: -32603, message: 'The Claude Agent session has ended. Please start a new session.' } });
   if (busy) return send({ id, error: { code: -32600, message: '上一轮仍在运行' } });
   if (params.prompt[0].text.startsWith('/rename ')) {
    busy = true;
@@ -74,6 +79,16 @@ createInterface({ input: process.stdin }).on('line', line => {
   else update({ sessionUpdate: 'user_message', messageId: 'user-1', content: params.prompt });
   update({ sessionUpdate: 'state_update', state: 'running' });
   send({ id, result: { messageId: 'user-1' } });
+  const failureInput = params.prompt[0].text;
+  if (['断线', '断线警告', '服务错误', '子会话断线'].includes(failureInput)) {
+   update({ sessionUpdate: 'session_info_update', _meta: { jetbrains: { air: { sessionFailure: {
+    title: 'The connection to Claude was lost.', severity: failureInput === '断线警告' ? 'warning' : 'error',
+    category: failureInput === '服务错误' ? 'service' : 'connection', actions: ['new_session'],
+   } } } } }, failureInput === '子会话断线' ? 'child-1' : 'v2-session');
+   update({ sessionUpdate: 'state_update', state: 'idle', stopReason: failureInput === '断线' || failureInput === '服务错误' ? 'error' : 'end_turn',
+    ...(failureInput === '断线' || failureInput === '服务错误' ? { error: { code: -32603, message: 'The connection to Claude was lost.' } } : {}) });
+   return;
+  }
   if (params.prompt[0].text === '批准') {
    setTimeout(() => send({ id: 777, method: 'session/request_permission', params: { sessionId: 'v2-session', title: '允许执行？', description: '用于验证', subject: { type: 'command', command: 'npm test', cwd: '/tmp' }, options: [{ optionId: 'yes', name: '允许', kind: 'allow_once' }, { optionId: 'no', name: '拒绝', kind: 'reject_once' }] } }), 20);
    return;
@@ -136,6 +151,42 @@ createInterface({ input: process.stdin }).on('line', line => {
 
 
 `;
+
+for (const input of ['断线', '失效请求', '断线警告', '服务错误', '子会话断线']) test('Claude 失效连接退出复用且不误伤可用连接：' + input, { timeout: 10000 }, async t => {
+ const cwd = await mkdtemp(join(tmpdir(), 'dsh-claude-disconnect-'));
+ const adapter = new AcpAdapter({ profile: { harnessId: 'claude-code', protocolVersion: 2, spawn: env => ({ command: process.execPath, args: ['--input-type=module', '-e', peer], env: { ...env, V2_HISTORY: join(cwd, 'history.json') } }) }, environment: process.env });
+ t.after(async () => { await adapter.close(); await rm(cwd, { recursive: true, force: true }); });
+ const opened = await adapter.open({ kind: 'create', cwd }); assert.equal(opened.ok, true);
+ const session = opened.value, output = session.outputs[Symbol.asyncIterator]();
+ assert.equal((await session.execute({ type: 'turn.start', turnId: 'first', input: [{ type: 'text', text: input }] })).ok, true);
+ let completed;
+ while (!completed) { const next = await output.next(); assert.equal(next.done, false); if (next.value.event?.type === 'turn.completed') completed = next.value.event; }
+ if (input === '断线' || input === '失效请求') {
+  assert.equal(completed.outcome.status, 'failed');
+  assert.equal(completed.outcome.error.code, 'processExited');
+  assert.match(completed.outcome.error.message, /Claude/);
+  const fault = await output.next(); assert.equal(fault.value.event.type, 'session.faulted');
+  assert.equal((await output.next()).done, true);
+  assert.equal((await session.execute({ type: 'turn.start', turnId: 'retry', input: [{ type: 'text', text: '继续' }] })).ok, false);
+  if (input === '断线') {
+   const resumed = await adapter.open({ kind: 'resume', cwd, nativeRef: session.initialState.nativeRef });
+   assert.equal(resumed.ok, true, JSON.stringify(resumed));
+   const snapshot = await resumed.value.readSnapshot(); assert.equal(snapshot.ok, true);
+   assert.equal(snapshot.value.turns[0].outcome.status, 'failed');
+   assert.equal(snapshot.value.turns[0].nativeTurnRef.nativeTurnKey, completed.nativeTurnRef.nativeTurnKey);
+   assert.equal((await resumed.value.execute({ type: 'turn.start', turnId: 'new-turn', input: [{ type: 'text', text: '继续' }] })).ok, true);
+   const stream = resumed.value.outputs[Symbol.asyncIterator]();
+   let starts = 0;
+   do { const next = await stream.next(); assert.equal(next.done, false); completed = next.value.event; if (completed?.type === 'turn.started') starts++; } while (completed?.type !== 'turn.completed');
+   assert.equal(completed.outcome.status, 'succeeded'); assert.equal(starts, 1);
+  }
+ } else {
+  assert.equal(completed.outcome.status, input === '服务错误' ? 'failed' : 'succeeded');
+  assert.equal((await session.execute({ type: 'turn.start', turnId: 'next', input: [{ type: 'text', text: '继续' }] })).ok, true);
+  do { const next = await output.next(); assert.equal(next.done, false); completed = next.value.event; } while (completed?.type !== 'turn.completed');
+  assert.equal(completed.outcome.status, 'succeeded');
+ }
+});
 
 for (const [input, expected] of [['你好', 'succeeded'], ['片段', 'succeeded'], ['失败', 'failed'], ['未知', 'failed'], ['取消', 'cancelled']]) test('ACP v2 在 idle 后结束轮次：' + input, { timeout: 10000 }, async t => {
  const cwd = await mkdtemp(join(tmpdir(), 'dsh-acp-v2-'));

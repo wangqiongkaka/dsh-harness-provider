@@ -1,5 +1,19 @@
 # Harness 能力补齐
 
+## Claude 断线后不再复用失效 Query（2026-11-11）
+
+- 修复 Claude 内部 Query 已结束、外层 ACP 进程仍存活时，发送“继续”反复报 `The Claude Agent session has ended`。主会话 AIR 失败为 `severity: error`、`category: connection` 且动作包含 `new_session` 时，统一进入已有的连接失效处理，结束输出并关闭进程。旧连接缺失 AIR 通知时，识别 Claude 的明确 session-ended / process-exited 错误，覆盖 prompt 拒绝和 v2 idle 错误两条路径。
+- 沿用 runner 的未确认请求保护：保留原生引用及轮次映射，不自动重发；用户核对历史或手动解除暂停后由新进程恢复原生会话。历史回放的旧失败不会使新连接失效；重试警告、普通服务错误和子会话失败不会关闭主连接。
+- 上游依据：`node_modules/@agentclientprotocol/claude-agent-acp/dist/acp-agent.js` 的 Query 消费异常处理、`queryClosed` 检查，以及 `dist/session-failure-extension.js` 的连接失败策略。未修改宿主或第三方源码。
+- 回归先在修复前构建上复现两项失败（致命断线和已结束会话被误作普通轮次失败），修复后五项通过，包括历史恢复、轮次键一致和新消息仅启动一次。`npm run check` 类型检查、构建及全部 285 项测试通过。无界面渲染变更，未做截图；未重载运行中的插件，未在真实线上模型环境复现首次断线。
+
+## ACP SDK 2.6.0（2026-11-11）
+
+- 插件直接使用的 `@agentclientprotocol/sdk` 从 2.1.0 升至 npm `latest` 2.6.0，更新 `package-lock.json` 和第三方说明。Codex ACP 2.3.0、Claude ACP 0.98.0 及各自固定的 SDK 2.0.2 保持原版本；不覆盖上游依赖。
+- 核对安装包 `dist/v2/acp.d.ts`、`dist/v2/unstable/schema/types.gen.d.ts` 和 `dist/core/stream.js`：新版 v2 传输流采用单条消息类型，连接处移除 `as never`，由类型检查验证流兼容性。新增可选能力不主动启用，既有协议行为沿用。
+- 开发验证：`npm run check` 的类型检查、构建及全部 280 项测试通过；`node experiments/acp-native-probe.mjs` 使用真实 Codex / Claude CLI 和本地模型响应夹具，通过模型与技能读取、多轮、指定边界分支、技能调用、跨进程恢复及 Claude 运行中追加。未请求真实模型端点，未重载运行中的插件。
+- 本次没有新增行为或缺陷修复，复用现有协议回归测试，未新增测试；此前 Claude Query 断线后复用失效会话的问题不在本次升级中修复。既有 `pnpm-lock.yaml` 早已与当前清单不一致，本次沿用项目 npm 流程，仅更新有效的 npm 锁文件。
+
 > 各节记录的测试数量是该次 `npm run check` 的结果，括号内注明对应提交；之后的改动会增减测试，当前数量以实际运行输出为准。
 
 ## 修复新版上传回执（2026-11-05，0.2.7）

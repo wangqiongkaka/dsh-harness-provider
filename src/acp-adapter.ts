@@ -336,7 +336,7 @@ class AcpProcess {
         return await handlers.permission({ sessionId: params.sessionId, toolCall: { ...toolCall, toolCallId: text(toolCall.toolCallId, 200) ?? randomUUID() }, options, _meta: meta } as acp.RequestPermissionRequest, signal) as never;
       })
       .onRequest('elicitation/create', async ({ params, signal }) => await handlers.elicitation(params as unknown as acp.CreateElicitationRequest, signal) as never);
-    const connection = v2 ? appV2.connect({ ...stream, readable } as never) as unknown as ClientConnection : app.connect({ ...stream, readable });
+    const connection = v2 ? appV2.connect({ ...stream, readable }) as unknown as ClientConnection : app.connect({ ...stream, readable });
     const process_ = new AcpProcess(child, connection, exited, v2 ? 2 : 1);
     process_.requestTimeoutMs = () => limitsOf(profile).requestTimeoutMs;
     void Promise.race([process_.connection.closed, exited]).then(() => { if (process_.live) { process_.live = false; handlers.fault(new Error(`${profile.harnessId} agent exited`)); } });
@@ -1094,6 +1094,7 @@ class AcpSession implements HarnessSession {
         }
       }, cause => {
         const failure = toError(cause, 'Turn failed');
+        if (this.#closedClaudeQuery(failure)) return;
         if (failure.code === 'authenticationRequired') this.#authChanged({ kind: 'none', label: '未登录' });
         this.#finish(active, active.cancelled ? { status: 'cancelled', reason: 'Cancelled by user' } : { status: 'failed', error: failure });
       });
@@ -1125,6 +1126,7 @@ class AcpSession implements HarnessSession {
     if (reason === 'error') {
       const failure = record(update.error);
       const code = failure.code === -32000 ? 'authenticationRequired' : 'nativeFailure';
+      if (this.#closedClaudeQuery(error(code, text(failure.message, 1000) ?? 'ACP v2 轮次失败'))) return;
       if (code === 'authenticationRequired') this.#authChanged({ kind: 'none', label: '未登录' });
       this.#finish(active, { status: 'failed', error: error(code, text(failure.message, 1000) ?? 'ACP v2 轮次失败', code === 'authenticationRequired') });
     } else if (typeof reason !== 'string' || !['end_turn', 'max_tokens', 'max_turn_requests', 'refusal', 'cancelled'].includes(reason)) {
@@ -1143,6 +1145,7 @@ class AcpSession implements HarnessSession {
       this.#publishUsage({ ...this.#totals, totalTokens: this.#totals.inputTokens + this.#totals.outputTokens }, active.hostId);
     }
     const failure = sessionFailure(response._meta);
+    if (failure?.severity === 'error' && failure.connectionLost) { this.#faulted(error('processExited', failure.title, true)); return; }
     if (failure?.severity === 'error') { this.#finish(active, { status: 'failed', error: error('nativeFailure', failure.title, true) }); return; }
     if (response.stopReason === 'cancelled') this.#finish(active, { status: 'cancelled', reason: 'Cancelled by user' });
     else if (response.stopReason === 'refusal') this.#finish(active, { status: 'failed', error: error('nativeFailure', 'The agent refused the request') });
@@ -1217,6 +1220,12 @@ class AcpSession implements HarnessSession {
     for (const event of this.#terminalEvents(notification)) this.#notifyEvent(event);
   }
   #notifyEvent(notification: acp.SessionNotification): void {
+    if (this.#fault) return;
+    const failure = sessionFailure(notification.update._meta);
+    if (notification.sessionId === this.#sessionId && failure?.severity === 'error' && failure.connectionLost) {
+      this.#faulted(error('processExited', failure.title, true));
+      return;
+    }
     if (this.#process.protocolVersion === 2 && notification.sessionId === this.#sessionId) {
       const update = record(notification.update), active = this.#active;
       const title = this.#v2Title;
@@ -1624,6 +1633,12 @@ class AcpSession implements HarnessSession {
     }
     this.#taskEnds.clear();
   }
+  #closedClaudeQuery(failure: HarnessError): boolean {
+    // Old live connections may reject the next prompt without the AIR failure that originally closed the Query.
+    if (this.harnessId !== 'claude-code' || !/The Claude Agent (?:session has ended|process exited unexpectedly)\. Please start a new session\.$/.test(failure.message)) return false;
+    this.#faulted(failure);
+    return true;
+  }
   #faulted(cause: HarnessError): void {
     if (this.#fault || this.#closing) return;
     this.#fault = { ...cause, code: 'processExited', retryable: true };
@@ -1663,10 +1678,11 @@ function skillsOf(profile: AcpProfile, commands: acp.AvailableCommand[]): Harnes
     return name ? [{ name, description: [command.description, command.input?.hint ? `<${command.input.hint}>` : ''].filter(Boolean).join(' '), modelInvocable: true }] : [];
   });
 }
-function sessionFailure(meta: unknown): { title: string; details?: string; severity: string } | undefined {
+function sessionFailure(meta: unknown): { title: string; details?: string; severity: string; connectionLost: boolean } | undefined {
   const failure = record(record(record(record(meta).jetbrains).air).sessionFailure);
   const title = text(failure.title, 1000);
-  return title ? { title, severity: String(failure.severity), ...(text(failure.details, 4000) ? { details: text(failure.details, 4000)! } : {}) } : undefined;
+  return title ? { title, severity: String(failure.severity), connectionLost: failure.category === 'connection' && Array.isArray(failure.actions) && failure.actions.includes('new_session'),
+    ...(text(failure.details, 4000) ? { details: text(failure.details, 4000)! } : {}) } : undefined;
 }
 
 // ── Adapter ─────────────────────────────────────────────────────────────────────────────────────────────────────────

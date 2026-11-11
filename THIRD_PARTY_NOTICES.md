@@ -3,7 +3,7 @@
 本插件打包以下依赖：
 
 - Zod 4.4.3，以及 Claude ACP 使用的 Zod 4.6.7（MIT）。
-- `@agentclientprotocol/sdk` 2.1.0，以及适配器使用的 2.0.2（Apache-2.0）。
+- `@agentclientprotocol/sdk` 2.6.0，以及适配器使用的 2.0.2（Apache-2.0）。
 - `@agentclientprotocol/codex-acp` 2.3.0（Apache-2.0）。
 - `@agentclientprotocol/claude-agent-acp` 0.98.0（Apache-2.0）。
 - Anthropic Claude Agent SDK 0.3.284 和 0.3.310，用于账户额度探测和 Claude ACP；适用 Anthropic 自有条款，不适用本项目 MIT 许可证。
