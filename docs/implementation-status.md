@@ -1,5 +1,12 @@
 # Harness 能力补齐
 
+## Claude ACP v2 后台任务转换（2026-11-11）
+
+- 用户实际报错 `The ACP v2 surface does not translate async_task_spawned session updates yet`。当前 Claude ACP 0.98.0 的 `dist/async-tasks.js` 发布启动、进度和状态事件，但 `dist/v2/session-update.js` 的 `v2SessionUpdate` 未转换这三类事件，走默认分支抛错。这是本次后台任务失败的直接原因，不能反推此前所有连接丢失都由它导致。
+- 在插件 `scripts/build.mjs` 的已有打包兼容层，将三类后台事件完整保留并转为带下划线的 v2 扩展；`src/acp-adapter.ts` 补齐进度扩展事件归一化，沿用现有任务状态、输出路径和日志处理。不修改第三方或宿主源码；上游转换位置变化时构建明确失败。
+- 新增 `tests/claude-v2-background.test.mjs`，读取实际打包产物的转换函数：三类事件及后台任务后继续对话四项在旧构建全部失败，原始错误与截图一致；修复后通过。`npm run check` 类型检查、构建和全部 289 项测试通过。
+- 真实 Claude CLI 配合本地 Messages 模型响应夹具，调用 `Bash` 的 `run_in_background`：收到任务运行和完成状态，轮次正常结束。临时探针及日志位于 `.cache/claude-v2-background/`；未请求真实模型端点，无界面渲染变化，未截图。
+
 ## Claude 断线后不再复用失效 Query（2026-11-11）
 
 - 修复 Claude 内部 Query 已结束、外层 ACP 进程仍存活时，发送“继续”反复报 `The Claude Agent session has ended`。主会话 AIR 失败为 `severity: error`、`category: connection` 且动作包含 `new_session` 时，统一进入已有的连接失效处理，结束输出并关闭进程。旧连接缺失 AIR 通知时，识别 Claude 的明确 session-ended / process-exited 错误，覆盖 prompt 拒绝和 v2 idle 错误两条路径。

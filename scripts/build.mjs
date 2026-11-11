@@ -31,6 +31,12 @@ const quietBypassNotice = {
       if (source.split(seam).length !== 2) throw new Error('claude-agent-acp local command replay seam changed');
       return { contents: source.replace(seam, seam + '    "/rename",\n') + '\nexport { parseSteerRequest };\n', loader: 'js' };
     });
+    // Claude's v2 converter throws on its own AIR background events; carry them as v2 extensions, like Codex.
+    pluginBuild.onLoad({ filter: /claude-agent-acp[\\/]dist[\\/]v2[\\/]session-update\.js$/ }, async ({ path }) => {
+      const source = await readFile(path, 'utf8'), seam = '        case "current_mode_update":';
+      if (source.split(seam).length !== 2) throw new Error('claude-agent-acp v2 background update seam changed');
+      return { contents: source.replace(seam, '        case "async_task_spawned":\n        case "async_task_progress":\n        case "async_task_state_update":\n            return { ...update, sessionUpdate: "_" + update.sessionUpdate };\n' + seam), loader: 'js' };
+    });
     // Expose Claude's existing steering extension on its v2 connection too.
     pluginBuild.onLoad({ filter: /claude-agent-acp[\\/]dist[\\/]v2[\\/]agent\.js$/ }, async ({ path }) => {
       let source = await readFile(path, 'utf8');

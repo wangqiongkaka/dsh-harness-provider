@@ -297,7 +297,7 @@ class AcpProcess {
         }
       }
       const update = 'method' in message && message.method === 'session/update' ? record(record(message.params).update).sessionUpdate : undefined;
-      if (profile.protocolVersion === 2 && typeof update === 'string' && ['_subagent_update', '_async_task_spawned', '_async_task_state_update'].includes(update) && 'params' in message) {
+      if (profile.protocolVersion === 2 && typeof update === 'string' && ['_subagent_update', '_async_task_spawned', '_async_task_progress', '_async_task_state_update'].includes(update) && 'params' in message) {
         const params = record(message.params), payload = record(params.update);
         controller.enqueue({ ...message, method: SUBAGENT_UPDATE, params: { ...params, update: { ...payload, sessionUpdate: update.startsWith('_async_') ? update.slice(1) : update } } } as acp.AnyMessage);
         return;
