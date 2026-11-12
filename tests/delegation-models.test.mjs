@@ -13,7 +13,7 @@ import Llm, { createUserMessage } from '@deepseek-ai/dsh-llm';
 import Sessions from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
-import Tools from '@deepseek-ai/dsh-tools';
+import Tools, { executeTool } from './tools.mjs';
 import Persistence from './session-persistence.mjs';
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local';
 import { HarnessOutputChannel } from '../dist/contracts.js';
@@ -31,7 +31,7 @@ test('delegation and discussion start sessions on a validated model and thinking
  class Commands extends Service {
   constructor(ctx) { super(ctx, 'sessionController'); }
   async resolveAgent(id) { const agent=ctx.agents.get(id); return agent ? {agent} : {error:new Error('missing session')}; }
-  async create(request) { created.push(request);const {agent}=await ctx.agents.create({sessionId:request.sessionId,meta:{cwd:root}});workspace.sessionIds.push(agent.id);return {sessionId:agent.id}; }
+  async create(request) { created.push(request);const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:request.sessionId,meta:{cwd:root}});workspace.sessionIds.push(agent.id);return {sessionId:agent.id}; }
   async prompt(request) { ctx.agents.get(request.sessionId).followup(createUserMessage({content:request.content,source:{kind:'user',rpcId:request.requestId}}));return {accepted:true}; }
   async rename() {} async fork() {} async selectModel() {} updateQueue() {}
  }
@@ -61,7 +61,7 @@ test('delegation and discussion start sessions on a validated model and thinking
   await ctx.plugin({inject,apply(scope){new HarnessService(scope,join(root,'bindings'),{codex:adapter('codex'),'claude-code':adapter('claude-code')},()=>current);}});
   ctx.on('agent/pre-step',async(payload,next)=>payload.agent.id==='source'?{kind:'enter',messages:[]}:next());
   await ctx.plugin(Loop,{agents:[]});
-  await ctx.agents.create({sessionId:'source',meta:{cwd:root}});
+  await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:'source',meta:{cwd:root}});
   const h=ctx.harness;
   const remembered={codex:{model:{id:'deep'},thinking:'high'}};
   await h.bindings.writeDefaults(remembered);
@@ -110,7 +110,7 @@ test('delegation and discussion start sessions on a validated model and thinking
   assert.deepEqual(choices.codex.models,[{id:'fast',label:'Fast',thinking:['low']},{id:'deep',label:'Deep',thinking:['low','high']}]);
   assert.deepEqual(choices['claude-code'],choices.codex);
   await assert.rejects(cli('models','{}'),error=>/Usage/.test(error.stderr));
-  const tool=await ctx.tools.execute({callId:'models',name:'harness_models',arguments:{},agent:ctx.agents.get('source'),signal:new AbortController().signal});
+  const tool=await executeTool(ctx.tools,{callId:'models',name:'harness_models',arguments:{},agent:ctx.agents.get('source'),signal:new AbortController().signal});
   assert.equal(tool.isError,false,JSON.stringify(tool));assert.deepEqual(JSON.parse(tool.content[0].text),choices);
   h.discussions.set('source',{requestId:'discussion',content:[{type:'text',text:'Compare designs'}]});
   const beforeDiscussion=created.length;

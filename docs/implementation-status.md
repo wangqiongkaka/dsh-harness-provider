@@ -1,5 +1,13 @@
 # Harness 能力补齐
 
+## 兼容 DSH 0.2.2-rc.2（2026-11-12）
+
+- 9 个 DSH peer 精确加入 `0.2.2-rc.2`，同时更新 npm 锁文件；`0.2.2-rc.3` 等未验证版本继续拒绝。新兼容断言先在旧清单上复现拒绝，再确认更新后的清单通过。
+- 新版公共组件移除了 `useAnchoredPosition`。工作目录动作在渲染时调用旧 Hook，导致宿主移除该动作、按钮不可见。插件改用 CSS 锚点与每个实例独立的锚点名称，限制水平边距，并在下方空间不足时上翻或回退到视窗内；目录浮层使用公共 `MenuSurface` 绘制新版半透明菜单材质，较早宿主保留普通容器回退。保留 portal、Escape、外部点击和数据更新行为。未修改宿主源码、产物或依赖。
+- 工作目录回归为插件提供不含旧 Hook 的公共导出，旧实现无法渲染按钮，修复后通过；参考仓库的实验性团队组件仍使用自身的旧导入。新增打开时缩放和底边上翻断言。真实 Agent 测试显式配置 `agentOptions`，冷恢复沿用同一模型配置；测试组合兼容新版独立原生执行器与批量执行参数，不改变生产执行流程。
+- 开发环境与 `0.2.2-rc.2` 发行包环境分别运行 `npm run check`，类型检查、构建及全部 290 项测试通过。发行包文件只读复制到 `.cache/compat-0.2.2-rc.2/runtime`，缺失的公共组件取自同版本 npm 包；React、Lexical 和源码对照 UI 测试使用参考仓库的测试依赖与夹具。测试未改写原有开发链接，也未重载运行中的插件。
+- 使用该桌面版自带 CLI，在隔离 Web Profile 中通过完整 `experiments/dsh-web-probe.mjs`：Codex / Claude Code 连续对话与跨重启恢复、编辑重生成、回滚、分叉、未确认请求处理和侧栏标识。`DSH_IMAGE_PROBE=1` 验证两种 Harness 的图片与文件进入原生请求；`DSH_DIRECTORY_PROBE=1` 单独验证 390 / 1320px 目录面板边界与 Escape，并在减少动态效果模式截图核对材质和定位。真实 CLI 仅连接本地模型响应夹具，未请求真实模型端点。未验证原生桌面窗口交互、Windows 或 Linux。
+
 ## Claude ACP v2 后台任务转换（2026-11-11）
 
 - 用户实际报错 `The ACP v2 surface does not translate async_task_spawned session updates yet`。当前 Claude ACP 0.98.0 的 `dist/async-tasks.js` 发布启动、进度和状态事件，但 `dist/v2/session-update.js` 的 `v2SessionUpdate` 未转换这三类事件，走默认分支抛错。这是本次后台任务失败的直接原因，不能反推此前所有连接丢失都由它导致。

@@ -15,7 +15,7 @@ import Llm, { createUserMessage } from '@deepseek-ai/dsh-llm';
 import Sessions from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
-import Tools from '@deepseek-ai/dsh-tools';
+import Tools from './tools.mjs';
 import { Bindings } from '../dist/bindings.js';
 import { HarnessOutputChannel } from '../dist/contracts.js';
 
@@ -107,7 +107,7 @@ test('real discussion turns reject approvals, cancel questions, retain restricti
   const runner=new DshRunner(ctx,bindings,{codex:adapter});
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(payload.agent.id));return {kind:'enter',messages:[]};});
   await ctx.plugin(Loop,{agents:[]});
-  const {agent}=await ctx.agents.create({sessionId:'discussion',meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:'discussion',meta:{cwd:root}});
   await bindings.write({version:1,sessionId:agent.id,harness:'codex',cwd:root,locked:true,permission:'agent',configs:{mode:'agent'},delegation:{parentSessionId:'parent',requestHash:'hash',discussion:true}});
   const prompt=async text=>{agent.followup(createUserMessage({content:[{type:'text',text}],source:{kind:'user'}}));await agent.whenIdle();return agent.session.snapshotEvents().filter(e=>e.type==='turn/end').at(-1).data.reason;};
   for(const text of ['read','approval','question'])assert.equal((await prompt(text)).kind,'completed');

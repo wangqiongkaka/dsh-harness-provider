@@ -13,7 +13,7 @@ import Llm, { createUserMessage } from '@deepseek-ai/dsh-llm';
 import Sessions from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
-import Tools from '@deepseek-ai/dsh-tools';
+import Tools, { executeTool } from './tools.mjs';
 import Persistence from './session-persistence.mjs';
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local';
 import { HarnessOutputChannel } from '../dist/contracts.js';
@@ -36,7 +36,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   async create(request) {
    created.push(request);assert.equal(request.workspaceId,target.id);
    let agent=ctx.agents.get(request.sessionId);
-   if (!agent) ({agent}=await ctx.agents.create({sessionId:request.sessionId,meta:{cwd:target.path}}));
+   if (!agent) ({agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:request.sessionId,meta:{cwd:target.path}}));
    // A UI state read that passes its fresh-session checks before the native delegation record is written.
    if (raceState) { raceState=false;const state=ctx.harness.state({sessionId:agent.id});await new Promise(resolve=>setTimeout(resolve,20));created.race=state; }
    target.sessionIds.push(agent.id);return {sessionId:agent.id};
@@ -86,8 +86,8 @@ test('session CLI creates a visible independent harness session, reads its resul
   await ctx.plugin({inject,apply(scope){new HarnessService(scope,join(root,'bindings'),{codex:adapter('codex'),'claude-code':adapter('claude-code')});}});
   ctx.on('agent/pre-step',async(payload,next)=>payload.agent.id==='other'||!(await ctx.harness.bindings.read(payload.agent.id))?{kind:'enter',messages:[]}:next());
   await ctx.plugin(Loop,{agents:[]});
-  await ctx.agents.create({sessionId:'parent',meta:{cwd:root}});
-  await ctx.agents.create({sessionId:'other',meta:{cwd:root}});
+  await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:'parent',meta:{cwd:root}});
+  await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:'other',meta:{cwd:root}});
   const h=ctx.harness;
   await h.bindings.write({version:1,sessionId:'parent',harness:'claude-code',cwd:root,locked:true,permission:'default'});
   await h.bindings.writeDefaults({harness:'claude-code'});
@@ -181,7 +181,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   const notice=await Promise.race([nativeNotice,new Promise((_,reject)=>{nativeNoticeTimeout=setTimeout(()=>reject(new Error('missing automatic delegation notice')),1000);})]);
   clearTimeout(nativeNoticeTimeout);await stopNativeNotice();
   assert.ok(notice.source.summary.startsWith(`DSH delegation ${nativeChild.sessionId}:`));
-  const nativeRead=await ctx.tools.execute({callId:'native-read',name:'harness_delegate_read',arguments:{sessionId:nativeChild.sessionId},agent:nativeAgent,signal:new AbortController().signal});
+  const nativeRead=await executeTool(ctx.tools,{callId:'native-read',name:'harness_delegate_read',arguments:{sessionId:nativeChild.sessionId},agent:nativeAgent,signal:new AbortController().signal});
   assert.equal(nativeRead.isError,false,JSON.stringify(nativeRead));
   assert.equal(JSON.parse(nativeRead.content[0].text).status,'completed');
   const opensBeforeNative=opens.length;
@@ -278,7 +278,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   h.discussions.set('other',{requestId:'discussion-single',content:[{type:'text',text:'Handle one focused task'}]});
   await assert.rejects(h.discuss('other',{assignments:Array.from({length:5},(_,i)=>({harness:'codex',task:`Task ${i}`}))}),/最多|4/);
   await assert.rejects(h.startDiscussionFromUser({sessionId:'other',requestId:'discussion-overlap',prompt:'Overlap',attachments:[]}),/讨论仍在进行|当前轮次/);
-  const singleTool=await ctx.tools.execute({callId:'native-discuss',name:'harness_discussion_dispatch',arguments:{assignments:[{harness:'codex',task:'Focused task'}]},agent:nativeAgent,signal:new AbortController().signal});
+  const singleTool=await executeTool(ctx.tools,{callId:'native-discuss',name:'harness_discussion_dispatch',arguments:{assignments:[{harness:'codex',task:'Focused task'}]},agent:nativeAgent,signal:new AbortController().signal});
   assert.equal(singleTool.isError,false,JSON.stringify(singleTool));
   const single=JSON.parse(singleTool.content[0].text);
   assert.equal(single.peerReview,false);assert.equal(turns.length,singleTurns+1,'one worker skips peer review');
@@ -350,7 +350,7 @@ test('session CLI creates a visible independent harness session, reads its resul
   assert.match(ctx.tools.get('harness_delegate_read').description,/not-started.*进入目标会话/s);
   assert.match(ctx.tools.get('harness_discussion_dispatch').description,/1.?4/);
   // `/delegate /handoff task`: the source Harness runs its own skill first; its reply goes to the delegated Harness.
-  await ctx.agents.create({sessionId:'handoff-source',meta:{cwd:root}});workspace.sessionIds.push('handoff-source');
+  await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:'handoff-source',meta:{cwd:root}});workspace.sessionIds.push('handoff-source');
   await h.bindings.write({version:1,sessionId:'handoff-source',harness:'codex',cwd:root,locked:true,permission:'agent'});
   reply='Hand-off notes in HANDOFF.md';
   const turnsBeforeHandoff=turns.length, createdBeforeHandoff=created.length;

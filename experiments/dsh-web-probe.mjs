@@ -75,7 +75,7 @@ if(titlesProbe) await copyFile(join(reference,'packages/experimental/session-tit
 let child,browser,page,logs='';
 async function boot(){
  const ready=Promise.withResolvers();
- child=spawn(dshCommand,['--profile','web',...(titlesProbe ? ['--patch',titlesPatch] : []),'--no-open','--port','0'],{env,cwd:workspace,stdio:['ignore','pipe','pipe']});
+ child=spawn(dshCommand,['--profile','web','--patch',join(reference,'apps/web/tests/pin-browse-picker.overlay.yml'),...(titlesProbe ? ['--patch',titlesPatch] : []),'--no-open','--port','0'],{env,cwd:workspace,stdio:['ignore','pipe','pipe']});
  child.stdout.on('data',chunk=>{const text=chunk.toString();const match=text.match(/dsh web: (http:\/\/[^\s]+)/);if(match)ready.resolve(match[1]);});
  child.stderr.on('data',chunk=>{logs=(logs+chunk.toString()).slice(-10000);});
  child.once('error',ready.reject);child.once('exit',()=>ready.reject(new Error('DSH exited before ready')));
@@ -117,9 +117,10 @@ async function send(text,reply){
 
 try{
  let url=await boot();
- browser=await chromium.launch({headless:true});page=await browser.newPage({viewport:{width:1320,height:900}});
+ browser=await chromium.launch({headless:true});page=await browser.newPage({viewport:{width:1320,height:900},reducedMotion:'reduce'});
  page.setDefaultTimeout(10000);
  page.on('pageerror',error=>{logs+='\nBrowser: '+error.message;});
+ page.on('console',message=>{if(message.type()==='error')logs+='\nBrowser console: '+message.text();});
  await page.goto(url);await dismiss();
  const created=await rpc('workspace/create',{path:workspace});
  if(backgroundProbe){
@@ -313,6 +314,28 @@ try{
  await page.getByLabel('Select Harness model',{exact:true}).waitFor();
  await send('Remember first marker','Codex native first');
  await send('Continue with second marker','Codex native second');
+ const directoryCwd=(await rpc('harness/harnesses',{sessionIds:[codexSessionId]}))[codexSessionId]?.cwd;
+ assert.equal(typeof directoryCwd,'string');
+ for(const width of [390,1320]){
+  await page.setViewportSize({width,height:900});
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  const mask=page.locator('[data-sidebar-mask]');
+  if(await mask.count()&&await mask.evaluate(node=>getComputedStyle(node).pointerEvents!=='none'))await mask.click({position:{x:width-8,y:200}});
+  const collapse=page.locator('[data-sidebar-toggle]:not([aria-label="Open sidebar"])');
+  if(width===390&&await collapse.count())await collapse.click();
+  const reopen=page.locator('[data-sidebar-opener]:visible,[data-sidebar-toggle][aria-label="Open sidebar"]:visible');
+  if(width===1320&&await reopen.count())await reopen.first().click();
+  await expect(page.locator('[data-animating]')).toHaveCount(0);
+  await page.evaluate(()=>window.scrollTo(0,0));
+  const directory=page.getByRole('dialog',{name:/^(Working directory|工作目录)$/});
+  await page.getByRole('button',{name:/^(Working directory|工作目录)$/}).click();
+  await expect(directory).toContainText(directoryCwd);
+  await expect.poll(()=>directory.evaluate(node=>{const r=node.getBoundingClientRect();return r.left>=16&&r.right<=innerWidth-16&&r.top>=16&&r.bottom<=innerHeight-16;})).toBe(true);
+  await page.screenshot({path:resolve(`.cache/directory-rc2-${width}.png`)});
+  await page.keyboard.press('Escape');await expect(directory).toHaveCount(0);
+ }
+ console.log('PASS: working directory opens within desktop and mobile viewports and closes with Escape');
+ if(process.env.DSH_DIRECTORY_PROBE!=='1'){
  await page.screenshot({path:resolve('.cache/codex-web.png')});
  console.log('PASS: original DSH composer selected Codex and displayed two native replies');
  await stop();url=await boot();await page.goto(url);await dismiss();
@@ -393,6 +416,7 @@ try{
  }
  await page.screenshot({path:resolve('.cache/sidebar-marks.png')});
  console.log('PASS: sidebar session rows carry their Harness logo');
+ }
  }
  console.log('Native replies came only from local fixture servers; no real model endpoint was used.');
 } catch(error){

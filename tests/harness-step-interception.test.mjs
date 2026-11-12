@@ -10,7 +10,7 @@ import Llm, { createUserMessage } from '@deepseek-ai/dsh-llm';
 import Sessions, { SessionId } from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
-import Tools from '@deepseek-ai/dsh-tools';
+import Tools from './tools.mjs';
 import * as SkillTool from '@deepseek-ai/dsh-tool-skill';
 import Typert from '@deepseek-ai/dsh-typert-registry';
 import { restoreReleasedV4Artifact } from '@deepseek-ai/dsh-session-format-v3-to-v4';
@@ -43,13 +43,13 @@ test('Harness completion bypasses native skill injection and preserves restorabl
     await ctx.plugin(Loop, { agents: [] });
     const id = SessionId('step-interception');
     await ctx.harness.bindings.write({ version: 1, sessionId: id, harness: 'codex', cwd: root, locked: true });
-    const { agent } = await ctx.agents.create({ sessionId: id, meta: { cwd: root, delegationDepth: 0 } });
+    const { agent } = await ctx.agents.create({ agentOptions: { provider: 'fixture', model: 'fixture' }, sessionId: id, meta: { cwd: root, delegationDepth: 0 } });
     for (let i = 0; i < 2; i++) {
       agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] }));
       await agent.whenIdle();
     }
     const events = agent.session.snapshotEvents();
-    assert.equal(runs, 2);
+    assert.equal(runs, 2, JSON.stringify(events.filter(event => event.type === 'turn/end').map(event => event.data.reason)));
     assert.deepEqual(events.filter(e => e.type === 'step/start').map(e => [e.data.turn, e.data.step]), [[1, 1], [1, 2], [2, 1], [2, 2]]);
     const ends = events.filter(e => e.type === 'turn/end').map(e => e.data.reason);
     assert.deepEqual(ends.map(reason => reason.kind), ['completed', 'completed'], JSON.stringify(ends));

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { Context } from '@deepseek-ai/cordis';
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
@@ -1545,7 +1545,10 @@ ${nativeContextColors}
 .hp-directory-trigger:hover,.hp-directory-trigger:focus-visible,.hp-directory-trigger[aria-expanded=true]{color:var(--dsw-alias-label-primary)}
 .hp-directory-trigger svg{flex:none;width:14px;height:14px}
 @container (max-width:480px){.hp-directory-label{display:none}}
-.hp-panel.hp-directory-panel{position:fixed;bottom:auto;width:min(420px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow-y:auto}
+.hp-panel.hp-directory-panel{--hp-directory-width:min(420px,calc(100vw - 32px));position:fixed;inset:auto;z-index:1100;top:calc(anchor(bottom) + 8px);left:clamp(16px,calc(anchor(right) - var(--hp-directory-width)),calc(100vw - 16px - var(--hp-directory-width)));position-try-fallbacks:--hp-directory-above,--hp-directory-window;width:var(--hp-directory-width);max-height:calc(100dvh - max(16px,var(--dsh-frame-overlay-top,16px)) - 16px);overflow-y:auto}
+.hp-directory-panel[data-hp-menu-surface]{background:transparent}
+@position-try --hp-directory-above{top:auto;bottom:calc(anchor(top) + 8px)}
+@position-try --hp-directory-window{position-area:none;top:max(16px,var(--dsh-frame-overlay-top,16px));left:16px;right:16px;bottom:16px;margin:0;justify-self:safe end;align-self:safe start}
 .hp-directory-path{margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text}
 .hp-panel-icon{display:inline-flex;color:var(--dsw-alias-label-tertiary)}
 .hp-panel-title{font-weight:500;color:var(--dsw-alias-label-primary)}
@@ -1819,11 +1822,12 @@ function rowSessionId(row: Element): string | undefined {
 function WorkingDirectoryAction({ sessionId, useSessions, loadDirectory, t }: Pick<PropsRuntime<'conversation.session.header.actions'>, 'sessionId' | 'useSessions'> & PropsLocale<'harness'> & {
   loadDirectory: (id: string) => Promise<string | undefined>;
 }) {
-  const { useAnchoredPosition, useDismissOnOutsidePointer } = require('@deepseek-ai/dsh-client-ui-primitives') as typeof import('@deepseek-ai/dsh-client-ui-primitives');
+  const { MenuSurface, useDismissOnOutsidePointer } = require('@deepseek-ai/dsh-client-ui-primitives') as typeof import('@deepseek-ai/dsh-client-ui-primitives');
+  const Surface = MenuSurface ?? 'div';
+  const anchorName = `--hp-directory-${useId().replaceAll(':', '')}`;
   const anchor = useRef<HTMLButtonElement>(null), panel = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [resolved, setResolved] = useState<{ id: string; cwd?: string }>();
-  const position = useAnchoredPosition({ open, anchorRef: anchor, panelRef: panel, align: 'end', gap: 8, margin: 16 });
   useDismissOnOutsidePointer(anchor, open, setOpen, panel);
   const summaryCwd = useSessions(state => {
     const summary = state.byId[sessionId], values = summary?.projectionValues;
@@ -1844,13 +1848,13 @@ function WorkingDirectoryAction({ sessionId, useSessions, loadDirectory, t }: Pi
   }, [sessionId, open, loadDirectory, summaryCwd]);
   const cwd = (resolved?.id === sessionId ? resolved.cwd : undefined) ?? summaryCwd;
   return <div data-hp-directory-action>
-    <button ref={anchor} type="button" className="hp-directory-trigger" aria-label={t('workingDirectory')} aria-haspopup="dialog" aria-expanded={open}
+    <button ref={anchor} type="button" className="hp-directory-trigger" style={{ anchorName }} aria-label={t('workingDirectory')} aria-haspopup="dialog" aria-expanded={open}
       onClick={() => setOpen(value => !value)}><FolderIcon /><span className="hp-directory-label">{t('workingDirectory')}</span></button>
-    {open && createPortal(<div ref={panel} className="hp-panel hp-directory-panel" role="dialog" aria-label={t('workingDirectory')}
-      style={position ?? { visibility: 'hidden', left: 0, top: 0 }}>
+    {open && createPortal(<Surface ref={panel} className="hp-panel hp-directory-panel" role="dialog" aria-label={t('workingDirectory')} data-hp-menu-surface={typeof MenuSurface === 'undefined' ? undefined : ''}
+      style={{ positionAnchor: anchorName }}>
       <div className="hp-panel-head">{t('workingDirectory')}</div>
       <div className="hp-directory-path">{cwd || t('noWorkingDirectory')}</div>
-    </div>, document.body)}
+    </Surface>, document.body)}
   </div>;
 }
 

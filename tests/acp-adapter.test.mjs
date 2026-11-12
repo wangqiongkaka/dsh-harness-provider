@@ -15,7 +15,7 @@ import Llm, { createUserMessage } from '@deepseek-ai/dsh-llm';
 import Sessions from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
-import Tools from '@deepseek-ai/dsh-tools';
+import Tools from './tools.mjs';
 import { Bindings } from '../dist/bindings.js';
 import { DshRunner } from '../dist/dsh-runner.js';
 
@@ -435,7 +435,7 @@ for (const harness of ['codex', 'claude-code']) test('轮次保存 Git 前后检
     const runner = new DshRunner(ctx, bindings, { [harness]: adapter });
     ctx.on('agent/pre-step', async payload => { await runner.run(payload, await bindings.read(payload.agent.id)); return { kind: 'enter', messages: [] }; });
     await ctx.plugin(Loop, { agents: [] });
-    const { agent } = await ctx.agents.create({ sessionId: 'checkpoint-' + harness, meta: { cwd: f.root } });
+    const { agent } = await ctx.agents.create({ agentOptions: { provider: 'fixture', model: 'fixture' }, sessionId: 'checkpoint-' + harness, meta: { cwd: f.root } });
     await bindings.write({ version: 1, sessionId: agent.id, harness, cwd: f.root, locked: true });
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'checkpoint-edit' }], source: { kind: 'user' } }));
     await agent.whenIdle();
@@ -462,7 +462,7 @@ test('discussion create and resume do not replay pre-open permission states afte
       return { kind: 'enter', messages: [] };
     });
     await ctx.plugin(Loop, { agents: [] });
-    const { agent } = await ctx.agents.create({ sessionId: 'discussion-hints', meta: { cwd: f.root } });
+    const { agent } = await ctx.agents.create({ agentOptions: { provider: 'fixture', model: 'fixture' }, sessionId: 'discussion-hints', meta: { cwd: f.root } });
     await bindings.write({ version: 1, sessionId: agent.id, harness: 'codex', cwd: f.root, locked: true,
       model: modelRef('opus[1m]'), thinking: 'low', permission: 'read-only',
       delegation: { parentSessionId: 'parent', requestHash: 'hash', discussion: true } });
@@ -597,7 +597,7 @@ test('DSH Stop clears a wedged Codex tool and the next message resumes the sessi
       return { kind: 'enter', messages: [] };
     });
     await ctx.plugin(Loop, { agents: [] });
-    const { agent } = await ctx.agents.create({ sessionId: 'wedged-tool', meta: { cwd: f.root } });
+    const { agent } = await ctx.agents.create({ agentOptions: { provider: 'fixture', model: 'fixture' }, sessionId: 'wedged-tool', meta: { cwd: f.root } });
     await bindings.write({ version: 1, sessionId: agent.id, harness: 'codex', cwd: f.root, locked: true });
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'stuck' }], source: { kind: 'user' } }));
     for (let i = 0; i < 100 && !agent.session.snapshotEvents().some(event => event.type === 'tool/call'); i++)

@@ -11,7 +11,7 @@ import Llm, { createUserMessage } from '@deepseek-ai/dsh-llm';
 import Sessions, { SessionId } from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
-import Tools from '@deepseek-ai/dsh-tools';
+import Tools from './tools.mjs';
 import { HarnessOutputChannel } from '../dist/contracts.js';
 import { HarnessService, inject } from '../dist/dsh.js';
 
@@ -91,7 +91,7 @@ async function fixture({ bound = true, resumed = false, harness = 'codex', befor
   // An unbound native session still delegates to its host middleware; reject needs no model fixture.
   ctx.on('agent/pre-step', async () => { nativeSteps++; return { kind: 'reject' }; });
   await ctx.plugin(Loop, { agents: [] });
-  const handle = await ctx.agents.create({ sessionId: id, meta: { cwd: root } });
+  const handle = await ctx.agents.create({ agentOptions: { provider: 'fixture', model: 'fixture' }, sessionId: id, meta: { cwd: root } });
   const { agent } = handle;
   if (bound) await ctx.harness.bindings.write({ version: 1, sessionId: id, harness, cwd: root, locked: true,
     ...(resumed ? { nativeRef: { harnessId: harness, nativeSessionId: 'same-native-session', formatVersion: 1 } } : {}) });

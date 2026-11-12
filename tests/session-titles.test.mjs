@@ -11,7 +11,7 @@ import Sessions, { SessionId } from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Titles from '@deepseek-ai/dsh-session-title';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
-import Tools from '@deepseek-ai/dsh-tools';
+import Tools from './tools.mjs';
 import * as AllPrompts from '../node_modules/@deepseek-ai/dsh-session-title-all-prompts-llm/lib/index.js';
 import * as FirstPrompt from '@deepseek-ai/dsh-session-title-first-prompt-llm';
 import { Bindings } from '../dist/bindings.js';
@@ -56,7 +56,7 @@ async function mount(t, { harness = 'codex', provider = AllPrompts, explicit = f
  await ctx.plugin(Loop, { agents: [] });
  const id = SessionId('title-session');
  await bindings.write({ version: 1, sessionId: id, harness, cwd: root, locked: true });
- const { agent } = await ctx.agents.create({ sessionId: id, meta: { cwd: root } });
+ const { agent } = await ctx.agents.create({ agentOptions: { provider: 'fixture', model: 'fixture' }, sessionId: id, meta: { cwd: root } });
  const prompt = async text => { agent.followup(user(text)); await agent.whenIdle(); await settle(); };
  return { ctx, agent, runner, requests, opens, inputs, prompt, providerFiber };
 }

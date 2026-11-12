@@ -50,12 +50,13 @@ void applied.then(() => window.renderTeam('session', '/Users/me/项目/很长的
     bundle: true, write: false, platform: 'browser', format: 'iife', jsx: 'automatic',
     alias: { react: require.resolve('react'), 'react/jsx-runtime': require.resolve('react/jsx-runtime'), 'react-dom': require.resolve('react-dom'), 'react-dom/client': require.resolve('react-dom/client') },
     plugins: [{ name: 'team-host', setup(builder) {
-      builder.onResolve({ filter: /^@deepseek-ai\/dsh-client-ui-primitives$/ }, () => ({ path: 'ui', namespace: 'stub' }));
-      builder.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: `import { createElement } from 'react';
+      // The reference TeamAction keeps its legacy import; the plugin sees rc.2's public exports.
+      builder.onResolve({ filter: /^@deepseek-ai\/dsh-client-ui-primitives$/ }, ({ kind }) => ({ path: kind === 'require-call' ? 'runtime' : 'ui', namespace: 'stub' }));
+      builder.onLoad({ filter: /.*/, namespace: 'stub' }, ({ path }) => ({ contents: `import { createElement } from 'react';
         export const IconChevronDownOutlineRegular = () => null, IconUserOutlineRegular = () => null, IconUsersOutlineRegular = () => createElement('span', null, '♧');
         export const StateDot = () => createElement('span', null, '○'), Tag = ({children, ...props}) => createElement('span', props, children), Tooltip = ({children}) => children;
-        export { useAnchoredPosition } from '${resolve('node_modules/@deepseek-ai/dsh-client-ui-primitives/src')}/useAnchoredPosition.ts';
-        export { useDismissOnOutsidePointer } from '${resolve('node_modules/@deepseek-ai/dsh-client-ui-primitives/src')}/useDismissOnOutsidePointer.ts';`, loader: 'js', resolveDir: resolve('src') }));
+        ${path === 'ui' ? `export { useAnchoredPosition } from '${reference}/packages/client/ui-primitives/src/useAnchoredPosition.ts';` : ''}
+        export { useDismissOnOutsidePointer } from '${reference}/packages/client/ui-primitives/src/useDismissOnOutsidePointer.ts';`, loader: 'js', resolveDir: resolve('src') }));
       builder.onLoad({ filter: /TeamAction\.module\.css$/ }, async ({path}) => {
         const css = (await readFile(path, 'utf8')).replace(/\.([a-zA-Z]\w*)/g, '.host_$1');
         return { contents: `const style = document.createElement('style'); style.textContent = ${JSON.stringify(css)}; document.head.append(style); export default new Proxy({}, {get: (_, key) => 'host_' + key});`, loader: 'js' };
@@ -67,10 +68,10 @@ void applied.then(() => window.renderTeam('session', '/Users/me/项目/很长的
     const page = await browser.newPage();
     await page.setContent(`<style>:root{--dsw-alias-label-primary:#eee;--dsw-alias-label-secondary:#ccc;--dsw-alias-label-tertiary:#aaa;--dsw-alias-bg-layer-2:#29292c;--dsw-specific-menu:#303034;--dsw-alias-border-l2:#555;--dsw-elevation-stroke:inset 0 0 0 1px #555;--dsw-elevation-prominent:0 0 0 1px #444}body{background:#1b1b1b;color:#eee;font:14px sans-serif;margin:20px}button{font:inherit}#root{container-type:inline-size}.host_headerActions{display:flex;align-items:center;gap:8px;justify-content:flex-end}</style><div id="root"></div>`);
     await page.addScriptTag({ content: bundle.outputFiles[0].text });
+    const trigger = page.getByRole('button', { name: '工作目录', exact: true });
+    await expect(trigger).toHaveCount(1, { timeout: 5000 });
     await page.getByRole('button', { name: '智能体团队' }).waitFor();
     assert.deepEqual(await page.evaluate(() => window.directoryRequests), []);
-    const trigger = page.getByRole('button', { name: '工作目录', exact: true });
-    await expect(trigger).toHaveCount(1);
     assert.equal(await trigger.evaluate(node => node.parentElement.parentElement.className), 'host_headerActions');
     const directory = page.getByRole('dialog', { name: '工作目录', exact: true });
     await page.getByRole('button', { name: '智能体团队' }).click();
@@ -85,15 +86,26 @@ void applied.then(() => window.renderTeam('session', '/Users/me/项目/很长的
       await expect(directory).toContainText('工作目录');
       await expect(directory).toContainText('long-project-name'.repeat(5));
       assert.equal(await directory.evaluate(node => node.scrollWidth <= node.clientWidth + 1), true);
-      assert.equal(await directory.evaluate(node => { const rect = node.getBoundingClientRect(); return rect.left >= 16 && rect.right <= innerWidth - 16; }), true);
+      assert.equal(await directory.evaluate(node => { const rect = node.getBoundingClientRect(); return rect.left >= 16 && rect.right <= innerWidth - 16; }), true, JSON.stringify(await directory.boundingBox()));
       await page.evaluate(cwd => window.renderTeam('session', cwd, true), resolve('.'));
       await expect(directory).toHaveText('工作目录' + resolve('.'));
       await mkdir('.cache', { recursive: true });
       await page.screenshot({ clip: { x: Math.max(0, width - 600), y: 0, width: Math.min(width, 600), height: 180 }, path: resolve('.cache/team-directory-' + (width === 390 ? 'mobile' : 'desktop') + '.png') });
+      await page.setViewportSize({ width: width === 390 ? 1280 : 390, height: 800 });
+      await expect.poll(() => directory.evaluate(node => { const rect = node.getBoundingClientRect(); return rect.left >= 16 && rect.right <= innerWidth - 16; })).toBe(true);
       await page.keyboard.press('Escape');
       await expect(directory).toHaveCount(0);
       await page.evaluate(() => window.renderTeam('session', '/Users/me/项目/很长的工作目录/' + 'long-project-name'.repeat(5)));
     }
+    await page.locator('.host_headerActions').evaluate(node => { node.style.position = 'fixed'; node.style.bottom = '16px'; node.style.right = '16px'; });
+    await trigger.click();
+    await expect.poll(async () => {
+      const [popup, button] = await Promise.all([directory.boundingBox(), trigger.boundingBox()]);
+      return popup !== null && button !== null && popup.y >= 16 && popup.y + popup.height <= button.y - 8;
+    }).toBe(true);
+    await page.keyboard.press('Escape');
+    await page.locator('.host_headerActions').evaluate(node => node.removeAttribute('style'));
+    await page.setViewportSize({ width: 1280, height: 800 });
     await page.evaluate(() => {
       window.lookup = async () => ({ok: true, value: {worker: {cwd: '/work/isolated-checkout'}}});
       window.renderTeam('worker', '/work/original');

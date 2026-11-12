@@ -14,7 +14,7 @@ import Llm, { createUserMessage } from '@deepseek-ai/dsh-llm';
 import Sessions from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
-import Tools from '@deepseek-ai/dsh-tools';
+import Tools from './tools.mjs';
 import Persistence from './session-persistence.mjs';
 import LocalAttachments from '@deepseek-ai/dsh-attachment-local';
 import { HarnessOutputChannel } from '../dist/contracts.js';
@@ -98,7 +98,7 @@ test('a worktree delegation runs the Harness in the checkout and asks in the chi
       async resolveAgent(id) { const agent = ctx.agents.get(id); return agent ? { agent } : { error: new Error('missing session') }; }
       async create(request) {
         created.push(request);
-        const { agent } = await ctx.agents.create({ sessionId: request.sessionId, meta: { cwd: request.workspaceId ? repo : request.cwd } });
+        const { agent } = await ctx.agents.create({ agentOptions: { provider: 'fixture', model: 'fixture' }, sessionId: request.sessionId, meta: { cwd: request.workspaceId ? repo : request.cwd } });
         if (request.workspaceId) workspace.sessionIds.push(agent.id);
         return { sessionId: agent.id };
       }
@@ -131,8 +131,8 @@ test('a worktree delegation runs the Harness in the checkout and asks in the chi
     await ctx.plugin({ inject, apply(scope) { new HarnessService(scope, join(root, 'bindings'), { codex: adapter, 'claude-code': adapter }); } });
     ctx.on('agent/pre-step', async (payload, next) => !(await ctx.harness.bindings.read(payload.agent.id)) ? { kind: 'enter', messages: [] } : next());
     await ctx.plugin(Loop, { agents: [] });
-    await ctx.agents.create({ sessionId: 'parent', meta: { cwd: repo } });
-    await ctx.agents.create({ sessionId: 'plain', meta: { cwd: plain } });
+    await ctx.agents.create({ agentOptions: { provider: 'fixture', model: 'fixture' }, sessionId: 'parent', meta: { cwd: repo } });
+    await ctx.agents.create({ agentOptions: { provider: 'fixture', model: 'fixture' }, sessionId: 'plain', meta: { cwd: plain } });
     const h = ctx.harness;
     const delegate = async (requestId, prompt) => {
       const { sessionId } = await h.delegateFromUser({ sessionId: 'parent', requestId, harness: 'codex', worktree: true, prompt, attachments: [] });

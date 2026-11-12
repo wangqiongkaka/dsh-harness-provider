@@ -10,7 +10,7 @@ import Llm, { createUserMessage } from '@deepseek-ai/dsh-llm';
 import Sessions, { Session, SessionId } from '@deepseek-ai/dsh-session';
 import Projections from '@deepseek-ai/dsh-session-projection';
 import Prompt from '@deepseek-ai/dsh-system-prompt';
-import Tools from '@deepseek-ai/dsh-tools';
+import Tools from './tools.mjs';
 import Persistence from './session-persistence.mjs';
 import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence';
 import { HarnessOutputChannel } from '../dist/contracts.js';
@@ -29,7 +29,7 @@ test('正文替换重建实时流，后续追加和最终记录保持一致', as
  try {
   for (const plugin of [Llm, Sessions, Projections, Prompt, Tools, Agents]) await ctx.plugin(plugin);
   await ctx.plugin(Loop, { agents: [] });
-  const { agent } = await ctx.agents.create({ sessionId: SessionId('replace-text'), meta: { cwd: tmpdir() } });
+  const { agent } = await ctx.agents.create({ agentOptions: { provider: 'fixture', model: 'fixture' }, sessionId: SessionId('replace-text'), meta: { cwd: tmpdir() } });
   ctx.on('agent/assistant-stream', ({ frame }) => frames.push(frame));
   agent.session.append('turn/start', { turn: 1 }); agent.session.append('step/start', { turn: 1, step: 1 });
   let revision = 0;
@@ -138,7 +138,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
  try {
   await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
   const first=await mount();
-  const {agent}=await first.ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await first.ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   await prompt(agent,'one');await prompt(agent,'two');
   assert.deepEqual(accounts,[['codex',{credits:{usedPercent:7,periodType:'five_hour'}}]]);
   assert.deepEqual(stopping.slice(0,2),[{turn:1,lastEvent:'step/end'},{turn:2,lastEvent:'step/end'}],
@@ -181,7 +181,7 @@ test('real DSH loop persists streams/tools, handles cancellation, and cold-resum
   validateStoredEvents(agent.session.header,structuredClone(agent.session.snapshotEvents()));
   await first.ctx.fiber.dispose();await first.adapter.close();
   const second=await mount();
-  const resumed=await second.ctx.agents.resume({resumeSessionId:id});
+  const resumed=await second.ctx.agents.resume({agentOptions:{provider:'fixture',model:'fixture'},resumeSessionId:id});
   await prompt(resumed.agent,'three');
   assert.equal(logs.length,2);
   assert.equal(logs[1].kind,'resume');assert.equal(logs[1].nativeRef.nativeSessionId,'native-fixed');
@@ -284,7 +284,7 @@ test('工具运行期间的正文和通知不会拆开调用与结果',async()=>
  try{
   for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
   await ctx.plugin(Loop,{agents:[]});
-  const {agent}=await ctx.agents.create({sessionId:SessionId('overlapping-prose'),meta:{cwd:tmpdir()}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:SessionId('overlapping-prose'),meta:{cwd:tmpdir()}});
   agent.session.append('turn/start',{turn:1});
   agent.session.append('step/start',{turn:1,step:1});
   const output=new DshOutput(ctx,agent,{turn:1,step:1},()=>1,()=>({provider:'fixture',model:'fixture'}));
@@ -329,7 +329,7 @@ test('delegation instructions go to the adapter, not the user input, so a leadin
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
   await ctx.plugin(Loop,{agents:[]});
   await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
-  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   agent.followup(createUserMessage({content:[{type:'text',text:'/review now'}],source:{kind:'user'}}));await agent.whenIdle();
   const [input]=native.inputs;
   assert.deepEqual(input,[{type:'text',text:'/review now'}]); // the user's words reach the adapter untouched
@@ -354,7 +354,7 @@ test('a session\'s linked projects reach the adapter as extra directories and ar
   // Directories picked for this session alone follow the projects; one deleted since is left out.
   await mkdir(join(root,'picked'));
   await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true,linked:['api','gone','web','own'],linkedPaths:[join(root,'picked'),join(root,'deleted'),'/projects/api']});
-  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   agent.followup(createUserMessage({content:[{type:'text',text:'compare them'}],source:{kind:'user'}}));await agent.whenIdle();
   assert.deepEqual(opened[0].additionalDirectories,['/projects/api','/projects/web',join(root,'picked')]);
   assert.equal(opened[0].instructions,`\n\n[DSH 关联项目]\n本会话除工作目录外还关联了以下项目，可按当前权限直接访问其目录：\n- API：/projects/api\n- Web：/projects/web\n- picked：${join(root,'picked')}\n[/DSH 关联项目]`);
@@ -379,7 +379,7 @@ test('an idle Harness session is closed after the idle window and the next turn 
  try {
   await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
   await ctx.plugin(Loop,{agents:[]});
-  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   agent.followup(createUserMessage({content:[{type:'text',text:'one'}],source:{kind:'user'}}));
   await agent.whenIdle();
   assert.deepEqual(logs.filter(entry=>entry.kind==='create'||entry.kind==='resume').map(entry=>entry.kind),['create']);
@@ -418,7 +418,7 @@ test('a Harness session that closed itself after a turn is resumed by the next t
  try {
   await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
   await ctx.plugin(Loop,{agents:[]});
-  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   for(const text of ['closes','two']){agent.followup(createUserMessage({content:[{type:'text',text}],source:{kind:'user'}}));await agent.whenIdle();}
   assert.deepEqual(logs.filter(entry=>entry.kind==='create'||entry.kind==='resume').map(entry=>entry.kind),['create','resume']);
   assert.deepEqual(agent.session.snapshotEvents().filter(e=>e.type==='turn/end').map(e=>e.data.reason.kind),['completed','completed']);
@@ -441,7 +441,7 @@ test('a Harness process stays open while its session is on screen or runs backgr
  try {
   await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
   await ctx.plugin(Loop,{agents:[]});
-  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   agent.followup(createUserMessage({content:[{type:'text',text:'one'}],source:{kind:'user'}}));
   await agent.whenIdle();
   // On screen: reported every 50ms for well past the idle window, the process stays open.
@@ -483,7 +483,7 @@ test('the idle window is read live: shortening it closes an idle process by the 
  try {
   await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
   await ctx.plugin(Loop,{agents:[]});
-  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   agent.followup(createUserMessage({content:[{type:'text',text:'one'}],source:{kind:'user'}}));
   await agent.whenIdle();
   await new Promise(resolve=>setTimeout(resolve,700));
@@ -505,7 +505,7 @@ test('a branch switched from another Harness hands its inherited history to the 
   const runner=new DshRunner(ctx,bindings,{codex:adapter},undefined,undefined,undefined,()=>limit);
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
   await ctx.plugin(Loop,{agents:[]});
-  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   // The history the branch inherited from its source, recorded before the switch.
   agent.session.append('user/message',createUserMessage({content:[{type:'text',text:'earlier question'}],source:{kind:'user'}}),{surfaceOp:'append'});
   const throughSeq=agent.session.snapshotEvents().length;
@@ -531,7 +531,7 @@ test('a tool image that cannot be read becomes a note in the result instead of f
  try{
   for(const plugin of [Llm,Sessions,Projections,Prompt,Tools,Agents]) await ctx.plugin(plugin);
   await ctx.plugin(Loop,{agents:[]});
-  const {agent}=await ctx.agents.create({sessionId:SessionId('unreadable-image'),meta:{cwd:tmpdir()}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:SessionId('unreadable-image'),meta:{cwd:tmpdir()}});
   agent.session.append('turn/start',{turn:1});
   agent.session.append('step/start',{turn:1,step:1});
   const output=new DshOutput(ctx,agent,{turn:1,step:1},()=>1,()=>({provider:'fixture',model:'fixture'}));
@@ -575,7 +575,7 @@ test('a notice the Harness sends once its turn is over waits for the step instea
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
   await ctx.plugin(Loop,{agents:[]});
   await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
-  ({agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}}));
+  ({agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}}));
   agent.followup(createUserMessage({content:[{type:'text',text:'go'}],source:{kind:'user'}}));await agent.whenIdle();
   const events=agent.session.snapshotEvents(),call=events.findIndex(e=>e.type==='tool/call');
   assert.equal(events[call+1].type,'tool/result','工具调用的下一条记录必须是对应结果');
@@ -617,7 +617,7 @@ test('后台任务结束后 Harness 自行续跑的输出进入跟进轮次：�
   ctx.on('agent/inbox/inserted',({agent})=>{runner.drainSteering(agent);});
   await ctx.plugin(Loop,{agents:[]});
   await bindings.write({version:1,sessionId:id,harness:'claude-code',cwd:root,locked:true});
-  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   agent.followup(createUserMessage({content:[{type:'text',text:'go'}],source:{kind:'user'}}));
   await agent.whenIdle();
   continueAfterTurn();
@@ -654,7 +654,7 @@ test('current-title instructions stay trusted on every Harness create/resume and
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(payload.agent.id));return {kind:'enter',messages:[]};});
   await ctx.plugin(Loop,{agents:[]});
   for(const harness of Object.keys(adapters))for(const discussion of [false,true]){
-   const id=harness+'-'+discussion,{agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+   const id=harness+'-'+discussion,{agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
    await bindings.write({version:1,sessionId:id,harness,cwd:root,locked:true,...(discussion?{delegation:{parentSessionId:'parent',requestHash:'hash',discussion:true}}:{})});
    for(const kind of ['create','resume']){
     const before=logs.length;
@@ -682,7 +682,7 @@ test('当前轮切换目录不会被完成事件写回，下一轮从新目录�
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
   await ctx.plugin(Loop,{agents:[]});
   await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true});
-  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   const service=Object.create(HarnessService.prototype);
   Object.assign(service,{bindings,runner,agent:async()=>agent});
   native.onTurn=async()=>{
@@ -720,7 +720,7 @@ test('受控工单的系统说明、环境和工具在冷恢复时重建，不�
   ctx.on('agent/pre-step',async payload=>{await runner.run(payload,await bindings.read(id));return {kind:'enter',messages:[]};});
   await ctx.plugin(Loop,{agents:[]});
   await bindings.write({version:1,sessionId:id,harness:'codex',cwd:root,locked:true,managedBy:'superagent'});
-  const {agent}=await ctx.agents.create({sessionId:id,meta:{cwd:root}});
+  const {agent}=await ctx.agents.create({agentOptions:{provider:'fixture',model:'fixture'},sessionId:id,meta:{cwd:root}});
   const prompt=async text=>{agent.followup(createUserMessage({content:[{type:'text',text}],source:{kind:'user'}}));await agent.whenIdle();};
   await prompt('first');
   assert.equal(opened[0].instructions,'工单说明 1');
