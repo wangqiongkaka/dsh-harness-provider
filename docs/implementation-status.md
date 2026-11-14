@@ -1,5 +1,12 @@
 # Harness 能力补齐
 
+## Claude v2 子代理生命周期转换（2026-11-14）
+
+- 复现截图中的 `The ACP v2 surface does not translate subagent_spawned session updates yet`。Claude ACP 0.98.0 的 `node_modules/@agentclientprotocol/claude-agent-acp/dist/v2/session-update.js` 缺少 `subagent_spawned` 和 `subagent_state_update` 的转换；`dist/acp-agent.js` 的原生子代理历史回放会发布这两类事件，导致恢复也可能失败。
+- 扩展插件现有 `scripts/build.mjs` 打包补丁，将两类事件保留为 v2 扩展；`src/acp-adapter.ts` 还原事件名，复用已有子代理路由及完成、失败、取消、断联状态处理。不修改宿主或第三方源码。
+- 新增 9 项回归先在旧构建上失败，覆盖打包转换、实时子代理消息、历史恢复和恢复后继续对话。开发验证 `npm run check` 类型检查、构建及全部 318 项测试通过。
+- 真实 Claude CLI 配合本机模型夹具、启用 AIR 原生子代理能力，验证子代理创建与完成、跨进程恢复、恢复前后轮次标识一致及继续对话。未调用真实模型服务，未重载运行中的插件；无界面渲染变化，未截图。
+
 ## 对话栏显示推理强度（2026-11-14）
 
 - 按用户最新补充要求，外部模型对话栏在模型名旁显示当前真实推理档位，替代此前仅在菜单内显示的方式；服务商提示仍保留在菜单中。窄屏优先保留强度文字，模型名可省略，悬停保留完整名称与档位。无推理能力的模型隐藏标签与入口。
