@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore, type ComponentType, type ReactNode } from 'react';
+import { supportsModelConfig } from './contracts.js';
 import { createPortal } from 'react-dom';
 import type { Context } from '@deepseek-ai/cordis';
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol';
@@ -278,7 +279,7 @@ const windowLabel = (t: T, id: string, label: string) => {
   const generic = label.match(/^(.*) · 7-day$/);
   return generic ? `${generic[1]} ${t('window.seven_day')}` : label;
 };
-const effortLabel = (t: T, id: string, fallback: string) => { const key = `effort.${id}` as Key; return key in zh ? t(key) : fallback; };
+const effortLabel = (t: T, id: string, fallback: string) => { const key = `effort.${id.startsWith('dsh~') ? fallback.toLowerCase() : id}` as Key; return key in zh ? t(key) : fallback; };
 const modeLabel = (t: T, id: string, fallback: string) => { const key = `mode.${id}` as Key; return key in zh ? t(key) : fallback; };
 const configLabel = (t: T, id: string, fallback: string) => id === 'fast' || id === 'fast-mode' ? t('fastMode') : id === 'collaboration_mode' ? t('collaborationMode') : fallback;
 const configValueLabel = (t: T, value: string | boolean, fallback?: string) => typeof value === 'boolean' ? t(value ? 'enabled' : 'disabled')
@@ -1208,14 +1209,14 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
   const effective = state.thinking ?? catalog?.defaultThinkingOptionId ?? null;
   const effortOption = efforts.find(option => option.id === effective);
   const effortText = efforts.length ? (effortOption ? effortLabel(t, effortOption.id, effortOption.label) : effective ?? t('effortDefault')) : undefined;
-  const configs = catalog?.configOptions ?? [];
+  const configs = (catalog?.configOptions ?? []).filter(option => supportsModelConfig(state.harness, state.model ?? catalog?.defaultModel?.id, option.id));
   const disabled = locked || busy || !!summary?.running || state.recoveryRequired;
   return <div ref={root} className="hp-root hp-model-seat">
     <div className="hp-anchor">
       <button type="button" className="hp-chip" aria-label={t('model')} aria-haspopup="menu" aria-expanded={open} title={effortText ? `${modelTitle} · ${effortText}` : modelTitle}
         disabled={disabled} onClick={() => { if (open) close(); else { setPane('root'); setOpen(true); } }}>
         <span className="hp-chip-label">{modelLabel}</span>
-        {effortText && <span className="hp-chip-effort">· {effortText}</span>}
+        {effortText && !(state.harness === 'claude-code' && modelEntry?.id.startsWith('dsh~')) && <span className="hp-chip-effort">· {effortText}</span>}
         <Chevron open={open} />
       </button>
       {open && <div className="hp-menu hp-menu-right" role="menu" aria-label={t('model')} aria-busy={!catalog}>

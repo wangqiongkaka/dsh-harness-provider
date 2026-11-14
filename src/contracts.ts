@@ -22,6 +22,9 @@ export type HarnessModelRef = z.infer<typeof harnessModelRefSchema>;
 export type HarnessThinkingOptionId = z.infer<typeof harnessThinkingOptionIdSchema>;
 export type HarnessPermissionModeId = z.infer<typeof harnessPermissionModeIdSchema>;
 
+export const supportsModelConfig = (harness: string, model: string | undefined, configId: string): boolean =>
+  harness !== 'claude-code' || !model?.startsWith('dsh~') || !['fast', 'ultracode'].includes(configId);
+
 export type JsonValue = z.infer<ReturnType<typeof z.json>>;
 export const nativeSessionRefSchema = z.strictObject({
   harnessId: harnessIdSchema, nativeSessionId: opaqueId, locator: z.json().optional(), formatVersion: z.literal(1),
@@ -30,7 +33,7 @@ export type NativeSessionRef = z.infer<typeof nativeSessionRefSchema>;
 export interface NativeTurnRef { harnessId: HarnessId; nativeSessionId: string; nativeTurnKey: string; formatVersion: 1 }
 
 export interface HarnessThinkingOption { id: HarnessThinkingOptionId; label: string }
-export interface HarnessModel { ref: HarnessModelRef; label: string; resolvedModelLabel?: string; supportedThinkingOptionIds?: HarnessThinkingOptionId[] }
+export interface HarnessModel { ref: HarnessModelRef; label: string; resolvedModelLabel?: string; supportedThinkingOptionIds?: HarnessThinkingOptionId[]; defaultThinkingOptionId?: HarnessThinkingOptionId }
 export type HarnessConfigValue = string | boolean;
 export interface HarnessConfigOption {
   id: string; label: string; description?: string; currentValue: HarnessConfigValue;

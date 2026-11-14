@@ -508,6 +508,51 @@ test('inspection reads catalogs, modes and skills from a throwaway session; quot
   } finally { await adapter.close(); await f.close(); }
 });
 
+test('external Claude ignores saved fast and ultracode on create and resume but keeps native configuration support', async () => {
+  const f = await fixture();
+  f.profile.harnessId = 'claude-code';
+  const spawn = f.profile.spawn;
+  f.profile.spawn = (...args) => {
+    const spec = spawn(...args);
+    return { ...spec, args: spec.args.map(value => value === peer ? peer.replaceAll("'fast-mode'", "'fast'").replaceAll("'collaboration_mode'", "'ultracode'") : value) };
+  };
+  const model = modelRef('dsh~fixture');
+  f.profile.modelCatalog = async () => ({ models: [{ ref: model, label: '外部模型', supportedThinkingOptionIds: [] }], thinkingOptions: [] });
+  const adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    let nativeRef;
+    for (const kind of ['create', 'resume']) {
+      const session = value(await adapter.open({ kind, ...(nativeRef ? { nativeRef } : {}), cwd: f.root, model, configValues: { fast: true, ultracode: 'plan' } }));
+      nativeRef = session.initialState.nativeRef;
+      assert.equal(session.initialState.configValues.fast, false);
+      assert.equal(session.initialState.configValues.ultracode, 'default');
+      assert.equal((await session.execute({ type: 'config.select', configId: 'fast', value: true })).error.code, 'unsupported');
+      assert.equal((await session.execute({ type: 'config.select', configId: 'ultracode', value: 'plan' })).error.code, 'unsupported');
+      await session.close();
+    }
+    const native = value(await adapter.open({ kind: 'create', cwd: f.root, model: modelRef('gpt-5.5'), configValues: { fast: true, ultracode: 'plan' } }));
+    assert.equal(native.initialState.configValues.fast, true);
+    assert.equal(native.initialState.configValues.ultracode, 'plan');
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('routed reasoning keeps the requested choice while initial model and later native settings change', async () => {
+  const f = await fixture();
+  const selected = modelRef('gpt-5.5-mini');
+  let received;
+  f.profile.modelCatalog = async () => ({ models: [{ ref: selected, label: '外部模型', supportedThinkingOptionIds: ['dsh~off', 'dsh~high'], defaultThinkingOptionId: 'dsh~high' }],
+    thinkingOptions: [{ id: 'dsh~off', label: '关闭' }, { id: 'dsh~high', label: '高' }] });
+  f.profile.modelEnvironment = async (model, thinking) => { received = { model, thinking }; return {}; };
+  const adapter = new AcpAdapter({ profile: f.profile, environment: {} });
+  try {
+    const session = value(await adapter.open({ kind: 'create', cwd: f.root, model: selected, thinkingOptionId: 'dsh~off', permissionModeId: 'read-only' }));
+    assert.deepEqual(received, { model: selected, thinking: 'dsh~off' });
+    assert.equal(session.initialState.effectiveThinkingOptionId, 'dsh~off');
+    value(await session.execute({ type: 'config.select', configId: 'fast-mode', value: true }));
+    assert.equal(session.initialState.effectiveThinkingOptionId, 'dsh~off');
+  } finally { await adapter.close(); await f.close(); }
+});
+
 test('turns stream text, apply hints, steer, cancel, and carry cumulative usage and context', { timeout: 20000 }, async () => {
   const f = await fixture();
   const adapter = new AcpAdapter({ profile: f.profile, environment: {} });

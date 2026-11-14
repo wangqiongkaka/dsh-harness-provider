@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { AvailableCommand } from '@agentclientprotocol/sdk/unstable';
 import pkg from '../package.json' with { type: 'json' };
+import { isDshModel, type ClaudeDshModels } from './claude-dsh-models.js';
 import type { HarnessAccountSnapshot, HarnessPlugin, HostTurnSnapshot } from './contracts.js';
 import { defaultSettings, feedbackOf, type SettingsSource } from './settings.js';
 import { interactionInstructions } from './feedback.js';
@@ -236,7 +237,7 @@ export function claudeRateLimitSnapshot(rateLimit: unknown): HarnessAccountSnaps
       : window])) });
 }
 
-export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command?: string; settings?: SettingsSource }): AcpProfile {
+export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command?: string; settings?: SettingsSource; dshModels?: ClaudeDshModels }): AcpProfile {
   const environment = withUserShellEnvironment({ ...options.environment });
   const settings = options.settings ?? defaultSettings;
   // An empty setting means unset: the environment variable and the usual install locations still apply.
@@ -247,6 +248,11 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
   };
   return {
     harnessId: 'claude-code',
+    ...(options.dshModels ? {
+      modelCatalog: () => options.dshModels!.catalog(),
+      modelEnvironment: (model, thinking) => isDshModel(model) ? options.dshModels!.environment(model!.id, thinking) : Promise.resolve({}),
+      close: () => options.dshModels!.close(),
+    } : {}),
     protocolVersion: 2,
     spawn: raw => {
       const env = withUserShellEnvironment({ ...raw });
@@ -256,11 +262,15 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
     },
     // The same system-prompt append the SDK adapter used; ACP forwards it through the agent's own options channel. Host
     // instructions (delegation) ride along, so they stay out of the user's messages and survive context compaction.
-    sessionMeta: (_kind, instructions, discussion) => ({ systemPrompt: { append: interactionInstructions + '\n\n' + feedbackOf(settings()) + (instructions ?? '') },
-      ...(discussion ? { claudeCode: { options: {
+    sessionMeta: (_kind, instructions, discussion, modelEnvironment) => ({ systemPrompt: { append: interactionInstructions + '\n\n' + feedbackOf(settings()) + (instructions ?? '') },
+      ...(discussion || modelEnvironment?.ANTHROPIC_BASE_URL ? { claudeCode: { options: {
+        ...(discussion ? {
         tools: ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'], allowDangerouslySkipPermissions: false,
         settingSources: [], settings: { disableAllHooks: true }, plugins: [],
         extraArgs: { 'strict-mcp-config': '' },
+        } : {}),
+        ...(modelEnvironment?.ANTHROPIC_BASE_URL ? { model: modelEnvironment.ANTHROPIC_MODEL, env: modelEnvironment,
+          settings: { ...(discussion ? { disableAllHooks: true } : {}), apiKeyHelper: '', env: modelEnvironment } } : {}),
       } } } : {}),
     }),
     legacyThinkingOptions: { auto: 'default', off: 'default' },

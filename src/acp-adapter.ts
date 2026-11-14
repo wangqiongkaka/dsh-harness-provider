@@ -13,7 +13,7 @@ import { client as clientV2 } from '@agentclientprotocol/sdk/experimental/v2/uns
 import type * as acp from '@agentclientprotocol/sdk/unstable';
 import pkg from '../package.json' with { type: 'json' };
 import {
-  HarnessOutputChannel, harnessIdSchema, harnessModelRefSchema, harnessPermissionModeIdSchema, harnessThinkingOptionIdSchema,
+  HarnessOutputChannel, harnessIdSchema, harnessModelRefSchema, harnessPermissionModeIdSchema, harnessThinkingOptionIdSchema, supportsModelConfig,
   hostInteractionIdSchema, hostItemIdSchema, nativeSessionRefSchema, validateHostInteractionResponse,
   type HarnessAccountSnapshot, type HarnessAdapter, type HarnessError, type HarnessPlugin, type HarnessId, type HarnessInspection, type HarnessModelCatalog,
   type HarnessModelRef, type HarnessOutput, type HarnessPermissionModeCatalog, type HarnessResult, type HarnessSession,
@@ -47,7 +47,10 @@ export interface AcpProfile {
    * `_meta` for session/new and session/load: the agent's own options channel (system prompt, SDK options). A profile
    * that defines it carries the Host's session instructions there. Instructions never enter the user's prompt.
    */
-  sessionMeta?(kind: 'create' | 'resume', instructions?: string, discussion?: true): Record<string, unknown> | undefined;
+  sessionMeta?(kind: 'create' | 'resume', instructions?: string, discussion?: true, modelEnvironment?: NodeJS.ProcessEnv): Record<string, unknown> | undefined;
+  modelCatalog?(): Promise<HarnessModelCatalog>;
+  modelEnvironment?(model?: HarnessModelRef, thinkingOptionId?: string): Promise<NodeJS.ProcessEnv>;
+  close?(): Promise<void>;
   /** Ids persisted by the previous, non-ACP adapters mapped onto the agent's ids. */
   legacyPermissionModes?: Record<string, string>;
   legacyThinkingOptions?: Record<string, string>;
@@ -155,7 +158,7 @@ const isSelect = (option: acp.SessionConfigOption): option is SelectOption => op
 const selectOptions = (option: acp.SessionConfigOption): acp.SessionConfigSelectOption[] =>
   isSelect(option) ? option.options.flatMap(entry => 'group' in entry ? entry.options : [entry]) : [];
 /** Model, thought-level and mode selectors of the session; per-model effort support comes from the `models` extension. */
-export function catalogsOf(opened: Opened): Catalogs {
+export function catalogsOf(opened: Opened, additional: HarnessModelCatalog = { models: [], thinkingOptions: [] }, thinkingSelection?: string): Catalogs {
   const options = opened.configOptions ?? [];
   const model = options.filter(isSelect).find(option => option.category === 'model');
   const thinking = options.filter(isSelect).find(option => option.category === 'thought_level');
@@ -170,12 +173,17 @@ export function catalogsOf(opened: Opened): Catalogs {
   const thinkingOptions = thinking ? selectOptions(thinking).map(option => ({ id: harnessThinkingOptionIdSchema.parse(option.value), label: option.name })) : [];
   const models = model ? selectOptions(model).map(option => ({
     ref: modelRef(option.value), label: option.name, ...(text(option.description, 256) ? { resolvedModelLabel: text(option.description, 256)! } : {}),
-    ...(efforts.has(option.value) ? { supportedThinkingOptionIds: thinkingOptions.filter(entry => efforts.get(option.value)!.has(entry.id)).map(entry => entry.id) } : {}),
+    ...(efforts.has(option.value) ? { supportedThinkingOptionIds: thinkingOptions.filter(entry => efforts.get(option.value)!.has(entry.id)).map(entry => entry.id) }
+      : additional.thinkingOptions.length ? { supportedThinkingOptionIds: thinkingOptions.map(entry => entry.id) } : {}),
   })) : [];
   const defaultModel = model ? recommended(model) ?? model.currentValue : undefined;
-  const defaultThinking = thinking ? recommended(thinking) ?? thinking.currentValue : undefined;
+  const external = model && additional.models.find(entry => entry.ref.id === modelRef(model.currentValue).id);
+  const defaultThinking = external ? external.defaultThinkingOptionId : thinking ? recommended(thinking) ?? thinking.currentValue : undefined;
+  const currentThinking = external ? thinkingSelection && external.supportedThinkingOptionIds?.includes(harnessThinkingOptionIdSchema.parse(thinkingSelection))
+    ? thinkingSelection : external.defaultThinkingOptionId : thinking?.currentValue;
   return {
-    catalog: { models, thinkingOptions, ...(defaultModel ? { defaultModel: modelRef(defaultModel) } : {}),
+    catalog: { models: [...models.filter(model => !additional.models.some(extra => extra.ref.id === model.ref.id)), ...additional.models],
+      thinkingOptions: [...thinkingOptions, ...additional.thinkingOptions], ...(defaultModel ? { defaultModel: modelRef(defaultModel) } : {}),
       ...(defaultThinking ? { defaultThinkingOptionId: harnessThinkingOptionIdSchema.parse(defaultThinking) } : {}),
       configOptions: auxiliary.map(option => ({ id: option.id, label: option.name, ...(text(option.description, 256) ? { description: text(option.description, 256)! } : {}),
         currentValue: option.currentValue, ...(isSelect(option) ? { choices: selectOptions(option).map(entry => ({ value: entry.value, label: entry.name,
@@ -184,12 +192,12 @@ export function catalogsOf(opened: Opened): Catalogs {
       ...(text(mode.description) ? { description: text(mode.description)! } : {}), ...((record(record(record(mode._meta).jetbrains).air).kind ?? record(mode._meta).kind) === 'full_access' ? { dangerous: true } : {}) })),
       defaultModeId: harnessPermissionModeIdSchema.parse(modes.currentModeId) } } : {}),
     ...(model ? { modelConfigId: model.id, currentModel: model.currentValue } : {}),
-    ...(thinking ? { thinkingConfigId: thinking.id, currentThinking: thinking.currentValue } : {}),
+    ...(thinking ? { thinkingConfigId: thinking.id } : {}), ...(currentThinking ? { currentThinking } : {}),
     ...(modes ? { currentMode: modes.currentModeId } : {}), ...(mode ? { modeConfigId: mode.id } : {}), configOptions: new Map(auxiliary.map(option => [option.id, option])),
   };
 }
 const capabilitiesOf = (agent: acp.AgentCapabilities | undefined, catalogs: Catalogs): HarnessSessionCapabilities => ({
-  configuration: { selectModel: !!catalogs.modelConfigId, selectThinkingOption: !!catalogs.thinkingConfigId, selectPermissionMode: !!catalogs.permissionModes, permissionModeScope: 'live' },
+  configuration: { selectModel: !!catalogs.modelConfigId, selectThinkingOption: !!catalogs.thinkingConfigId || catalogs.catalog.thinkingOptions.length > 0, selectPermissionMode: !!catalogs.permissionModes, permissionModeScope: 'live' },
   history: { fork: !!agent?.sessionCapabilities?.fork, forkAcrossCwd: false, rollbackLastTurn: !!agent?.sessionCapabilities?.fork },
 });
 
@@ -748,7 +756,7 @@ interface ActiveTurn {
   interactions: Map<HostInteractionId, Pending>;
   done: PromiseWithResolvers<void>;
 }
-interface SessionOptions { profile: AcpProfile; environment: NodeJS.ProcessEnv; input: OpenSessionInput; onClosed(): void }
+interface SessionOptions { profile: AcpProfile; environment: NodeJS.ProcessEnv; input: OpenSessionInput; additionalCatalog?: HarnessModelCatalog; onClosed(): void }
 type V2Terminal = { decoder: StringDecoder; output: string; exitCode?: number | null; toolCallId?: string };
 
 class AcpSession implements HarnessSession {
@@ -775,6 +783,8 @@ class AcpSession implements HarnessSession {
   readonly #profile: AcpProfile;
   readonly #environment: NodeJS.ProcessEnv;
   #catalogs: Catalogs;
+  readonly #additionalCatalog: HarnessModelCatalog;
+  readonly #requestedThinking?: string;
   #modes: Opened['modes'];
   /** The `models` extension of session/new: per-model effort support, which no later update repeats. */
   readonly #models: unknown;
@@ -798,13 +808,14 @@ class AcpSession implements HarnessSession {
     this.#profile = options.profile; this.#environment = options.environment; this.#process = process_; this.#sessionId = sessionId; this.#cwd = options.input.cwd; this.#roots = options.input.additionalDirectories ?? []; this.#onClosed = options.onClosed;
     this.#transcript = new Transcript(() => limitsOf(options.profile).toolOutputChars);
     this.harnessId = harnessIdSchema.parse(options.profile.harnessId);
-    this.#catalogs = catalogs; this.#modes = opened.modes; this.#models = record(opened as unknown).models;
+    this.#catalogs = catalogs; this.#additionalCatalog = options.additionalCatalog ?? { models: [], thinkingOptions: [] }; this.#modes = opened.modes; this.#models = record(opened as unknown).models;
+    this.#requestedThinking = options.input.thinkingOptionId;
     this.#commands = commands;
     this.capabilities = capabilitiesOf(process_.initialized.agentCapabilities, catalogs);
     this.#titlePending = options.input.kind === 'create' && !!options.profile.titleCommand;
     this.#state = {
       nativeRef: nativeSessionRefSchema.parse({ harnessId: this.harnessId, nativeSessionId: sessionId, formatVersion: 1 }),
-      ...(catalogs.currentModel ? { effectiveModel: modelRef(catalogs.currentModel), resolvedModelLabel: selectOptions(opened.configOptions!.find(option => option.id === catalogs.modelConfigId)!).find(option => option.value === catalogs.currentModel)?.name ?? catalogs.currentModel } : {}),
+      ...(catalogs.currentModel ? { effectiveModel: modelRef(catalogs.currentModel), resolvedModelLabel: catalogs.catalog.models.find(model => model.ref.id === modelRef(catalogs.currentModel!).id)?.label ?? catalogs.currentModel } : {}),
       ...(catalogs.currentThinking ? { effectiveThinkingOptionId: harnessThinkingOptionIdSchema.parse(catalogs.currentThinking), availableThinkingOptions: catalogs.catalog.thinkingOptions } : {}),
       ...(catalogs.currentMode ? { effectivePermissionModeId: harnessPermissionModeIdSchema.parse(catalogs.currentMode) } : {}),
       ...(catalogs.configOptions.size ? { configValues: Object.fromEntries([...catalogs.configOptions].map(([id, option]) => [id, option.currentValue])) } : {}),
@@ -816,6 +827,8 @@ class AcpSession implements HarnessSession {
 
   static async open(options: SessionOptions): Promise<AcpSession> {
     const { profile, input } = options;
+    const modelEnvironment = await profile.modelEnvironment?.(input.model, input.thinkingOptionId);
+    options = { ...options, environment: { ...options.environment, ...modelEnvironment }, additionalCatalog: await profile.modelCatalog?.() };
     let session: AcpSession | undefined;
     const replay: acp.SessionNotification[] = [];
     let commands: acp.AvailableCommand[] | undefined;
@@ -835,7 +848,7 @@ class AcpSession implements HarnessSession {
       fault: cause => { if (session) session.#faulted(toError(cause, 'ACP agent exited')); },
     }, input.instructions);
     try {
-      const meta = profile.sessionMeta?.(input.kind, input.instructions, input.discussion);
+      const meta = profile.sessionMeta?.(input.kind, input.instructions, input.discussion, modelEnvironment);
       // Both agents take the standard field on new, load and fork; omitted when empty so the request stays as before.
       const roots = input.additionalDirectories?.length ? { additionalDirectories: input.additionalDirectories } : {};
       let opened: Opened;
@@ -847,7 +860,7 @@ class AcpSession implements HarnessSession {
         opened = await request<acp.LoadSessionResponse>(process_, process_.protocolVersion === 2 ? 'session/resume' : 'session/load', { sessionId, cwd: input.cwd, mcpServers: input.mcpServers ?? [], ...roots,
           ...(process_.protocolVersion === 2 ? { replayFrom: { type: 'start' } } : {}), ...(meta ? { _meta: meta } : {}) }, limitsOf(profile).loadTimeoutMs);
       }
-      const catalogs = catalogsOf(opened);
+      const catalogs = catalogsOf(opened, options.additionalCatalog, input.thinkingOptionId);
       const responseCommands = record(opened).availableCommands;
       const skills = (Array.isArray(responseCommands) ? responseCommands as acp.AvailableCommand[] : await waitFor(() => commands, 3_000)) ?? [];
       session = new AcpSession(options, process_, sessionId, opened, catalogs, skillsOf(profile, skills));
@@ -865,10 +878,12 @@ class AcpSession implements HarnessSession {
     const { profile } = this;
     if (input.model && this.#catalogs.modelConfigId && modelValue(input.model) !== this.#catalogs.currentModel) await this.#setConfig(this.#catalogs.modelConfigId, modelValue(input.model));
     const thinking = input.thinkingOptionId ? profile.legacyThinkingOptions?.[input.thinkingOptionId] ?? input.thinkingOptionId : undefined;
-    if (thinking && this.#catalogs.thinkingConfigId && thinking !== this.#catalogs.currentThinking && this.#catalogs.catalog.thinkingOptions.some(option => option.id === thinking)) await this.#setConfig(this.#catalogs.thinkingConfigId, thinking);
+    const external = this.#additionalCatalog.models.some(model => model.ref.id === input.model?.id);
+    if (!external && thinking && this.#catalogs.thinkingConfigId && thinking !== this.#catalogs.currentThinking && this.#catalogs.catalog.thinkingOptions.some(option => option.id === thinking)) await this.#setConfig(this.#catalogs.thinkingConfigId, thinking);
     const mode = input.permissionModeId ? profile.legacyPermissionModes?.[input.permissionModeId] ?? input.permissionModeId : undefined;
     if (mode && this.#catalogs.permissionModes?.modes.some(entry => entry.id === mode) && mode !== this.#catalogs.currentMode) await this.#setMode(mode);
     for (const [id, value] of Object.entries(input.configValues ?? {})) {
+      if (!supportsModelConfig(this.harnessId, this.#state.effectiveModel?.id ?? input.model?.id, id)) continue;
       const option = this.#catalogs.configOptions.get(id);
       if (option && option.currentValue !== value) await this.#setConfig(id, value);
     }
@@ -981,6 +996,7 @@ class AcpSession implements HarnessSession {
         }
         case 'config.select': {
           if (this.#active) return failed('sessionBusy', 'Configuration selection requires an idle session', true);
+          if (!supportsModelConfig(this.harnessId, this.#state.effectiveModel?.id, command.configId)) return failed('unsupported', '当前模型不支持这个配置');
           const option = this.#catalogs.configOptions.get(command.configId);
           if (!option || typeof option.currentValue !== typeof command.value
             || (isSelect(option) && !selectOptions(option).some(entry => entry.value === command.value))) return failed('invalidRequest', 'Unknown configuration value');
@@ -1017,7 +1033,7 @@ class AcpSession implements HarnessSession {
     this.#publish({ ...this.#state, effectivePermissionModeId: harnessPermissionModeIdSchema.parse(modeId) });
   }
   #configChanged(options: acp.SessionConfigOption[]): void {
-    const catalogs = this.#catalogs = catalogsOf({ configOptions: options, ...(this.#modes ? { modes: this.#modes } : {}), ...(this.#models ? { models: this.#models } : {}) } as Opened);
+    const catalogs = this.#catalogs = catalogsOf({ configOptions: options, ...(this.#modes ? { modes: this.#modes } : {}), ...(this.#models ? { models: this.#models } : {}) } as Opened, this.#additionalCatalog, this.#requestedThinking ?? this.#state.effectiveThinkingOptionId);
     this.capabilities = capabilitiesOf(this.#process.initialized.agentCapabilities, catalogs);
     const { effectiveModel: _model, resolvedModelLabel: _label, effectiveThinkingOptionId: _thinking, availableThinkingOptions: _options,
       effectivePermissionModeId: _mode, configValues: _configs, ...base } = this.#state;
@@ -1704,7 +1720,7 @@ export class AcpAdapter implements HarnessAdapter {
       const startedAt = Date.now();
       try {
         return await this.#probe(input.cwd ?? process.cwd(), async (process_, opened): Promise<HarnessInspection> => {
-          const catalogs = catalogsOf(opened);
+          const catalogs = catalogsOf(opened, await this.#options.profile.modelCatalog?.());
           return { status: 'ready', catalog: catalogs.catalog, ...(catalogs.permissionModes ? { permissionModes: catalogs.permissionModes } : {}),
             capabilities: capabilitiesOf(process_.initialized.agentCapabilities, catalogs) };
         });
@@ -1748,17 +1764,29 @@ export class AcpAdapter implements HarnessAdapter {
       await Promise.allSettled([...this.#pending]);
       const results = await Promise.allSettled([...this.#sessions].map(session => session.close()));
       this.#sessions.clear();
+      await this.#options.profile.close?.();
       const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
       if (failures.length) throw new AggregateError(failures, 'Harness session cleanup failed');
     })();
   }
   async #probe<T>(cwd: string, work: (process_: AcpProcess, opened: acp.NewSessionResponse, commands: { value?: acp.AvailableCommand[] }) => Promise<T>): Promise<T> {
+    try { return await this.#probeModel(cwd, work); }
+    catch (cause) {
+      if (toError(cause, '').code !== 'authenticationRequired') throw cause;
+      const model = (await this.#options.profile.modelCatalog?.())?.models[0]?.ref;
+      if (!model) throw cause;
+      return this.#probeModel(cwd, work, model);
+    }
+  }
+  async #probeModel<T>(cwd: string, work: (process_: AcpProcess, opened: acp.NewSessionResponse, commands: { value?: acp.AvailableCommand[] }) => Promise<T>, model?: HarnessModelRef): Promise<T> {
     if (this.#closing) throw error('invalidState', 'Harness adapter is closing');
     const commands: { value?: acp.AvailableCommand[] } = {};
-    const process_ = await AcpProcess.connect(this.#options.profile, this.#options.environment, cwd, { ...IDLE_HANDLERS,
+    const modelEnvironment = await this.#options.profile.modelEnvironment?.(model);
+    const process_ = await AcpProcess.connect(this.#options.profile, { ...this.#options.environment, ...modelEnvironment }, cwd, { ...IDLE_HANDLERS,
       update: notification => { if (notification.update.sessionUpdate === 'available_commands_update') commands.value = notification.update.availableCommands; } });
     try {
-      const opened = await request<acp.NewSessionResponse>(process_, 'session/new', { cwd, mcpServers: [], ...(this.#options.profile.sessionMeta?.('create') ? { _meta: this.#options.profile.sessionMeta('create') } : {}) });
+      const meta = this.#options.profile.sessionMeta?.('create', undefined, undefined, modelEnvironment);
+      const opened = await request<acp.NewSessionResponse>(process_, 'session/new', { cwd, mcpServers: [], ...(meta ? { _meta: meta } : {}) });
       if (commands.value === undefined && Array.isArray(record(opened).availableCommands)) commands.value = record(opened).availableCommands as acp.AvailableCommand[];
       try { return await work(process_, opened, commands); }
       finally { await request(process_, 'session/close', { sessionId: opened.sessionId }, 2_000).catch(() => {}); }

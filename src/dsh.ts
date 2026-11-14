@@ -31,11 +31,12 @@ import type { CommandDescriptor, CommandExecution, CommandSubmitAttachment } fro
 import type {} from '@deepseek-ai/dsh-session-reference';
 import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import type { HarnessPlugin, HarnessSubagent } from './contracts.js';
-import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, type HarnessAccountSnapshot } from './contracts.js';
+import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema, supportsModelConfig, type HarnessAccountSnapshot } from './contracts.js';
 import { z } from 'zod';
 import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT } from './acp-adapter.js';
 import { claudeProfile, codexProfile } from './acp-profiles.js';
+import { ClaudeDshModels, isDshModel } from './claude-dsh-models.js';
 import { DshRunner, linkedDirectories, linkedWorkspaces, unwrap } from './dsh-runner.js';
 import { QueuedTurns } from './queued-turns.js';
 import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
@@ -59,16 +60,18 @@ declare module '@deepseek-ai/cordis' { interface Context { harness: HarnessServi
 
 /** Standalone DSH entry: no replacement of the original client/plugin row. The Loader hands over `Config`-parsed options. */
 export async function apply(ctx: Context, config: ReturnType<typeof Config> = Config({})): Promise<void> {
-  ctx.inject(['sessionProjections'], scope => { scope.sessionProjections.register(completionProjection); });
-  const settings = settingsOf(config);
-  const environment = { ...process.env };
-  const adapters = {
-    codex: new AcpAdapter({ profile: codexProfile({ environment, settings }), environment }),
-    'claude-code': new AcpAdapter({ profile: claudeProfile({ environment, settings }), environment }),
-  };
-  new HarnessService(ctx, resolve(config.root ?? resolve(process.env.DSH_HOME ?? resolve(homedir(), '.dsh'), 'harness-plugin')), adapters, settings);
-  // The plugin ships its own Settings page, so DSH need not build one from the schema; without Settings it runs unchanged.
-  ctx.inject(['settings'], scope => { scope.effect(() => scope.settings.configure({ auto: false }, ctx.fiber), 'harness: settings page policy'); });
+  ctx.inject(['llm'], scope => {
+    scope.inject(['sessionProjections'], ctx => { ctx.sessionProjections.register(completionProjection); });
+    const settings = settingsOf(config);
+    const environment = { ...process.env };
+    const adapters = {
+      codex: new AcpAdapter({ profile: codexProfile({ environment, settings }), environment }),
+      'claude-code': new AcpAdapter({ profile: claudeProfile({ environment, settings, dshModels: new ClaudeDshModels(scope.llm, scope.attachments) }), environment }),
+    };
+    new HarnessService(scope, resolve(config.root ?? resolve(process.env.DSH_HOME ?? resolve(homedir(), '.dsh'), 'harness-plugin')), adapters, settings);
+    // The plugin ships its own Settings page, so DSH need not build one from the schema; without Settings it runs unchanged.
+    scope.inject(['settings'], ctx => { ctx.effect(() => ctx.settings.configure({ auto: false }, scope.fiber), 'harness: settings page policy'); });
+  });
 }
 
 type Ready = Extract<HarnessInspection, { status: 'ready' }>;
@@ -1107,6 +1110,7 @@ export class HarnessService extends TypertRemoteService {
         if (model) binding.model = remembered!.model;
         const allowed = model?.supportedThinkingOptionIds ?? inspection.catalog.thinkingOptions.map(option => option.id);
         if (remembered?.thinking && inspection.catalog.thinkingOptions.some(option => option.id === remembered.thinking) && allowed.includes(remembered.thinking)) binding.thinking = remembered.thinking;
+        else if (model?.defaultThinkingOptionId) binding.thinking = model.defaultThinkingOptionId;
       }
     }
     Object.assign(binding, overrides);
@@ -1132,16 +1136,19 @@ export class HarnessService extends TypertRemoteService {
     const last = remembered?.model && catalog.models.find(model => model.ref.id === remembered.model!.id);
     const defaultId = last ? last.ref.id : catalog.defaultModel?.id;
     const fallback = defaultId !== undefined ? catalog.models.find(model => model.ref.id === defaultId) : undefined;
-    const allowed = fallback?.supportedThinkingOptionIds ?? catalog.thinkingOptions.map(option => option.id);
+    const current = catalog.models.find(model => model.ref.id === binding.model?.id) ?? fallback;
+    const allowed = current?.supportedThinkingOptionIds ?? catalog.thinkingOptions.map(option => option.id);
     const lastThinking = remembered?.thinking && catalog.thinkingOptions.some(option => option.id === remembered.thinking) && allowed.includes(remembered.thinking) ? remembered.thinking : undefined;
+    const defaultThinking = current?.defaultThinkingOptionId ?? catalog.defaultThinkingOptionId;
     return {
       models: catalog.models.map(model => ({ id: model.ref.id, label: model.label, resolved: model.resolvedModelLabel ?? null, thinkingOptionIds: model.supportedThinkingOptionIds ?? null })),
       defaultModel: defaultId !== undefined ? { id: defaultId, label: fallback?.label ?? defaultId, resolved: fallback?.resolvedModelLabel ?? null } : null,
       thinkingOptions: catalog.thinkingOptions.map(option => ({ id: option.id, label: option.label })),
-      defaultThinkingOptionId: lastThinking ?? catalog.defaultThinkingOptionId ?? null,
+      defaultThinkingOptionId: lastThinking ?? (defaultThinking && allowed.includes(defaultThinking) ? defaultThinking : null),
       permissionModes: (inspection.permissionModes?.modes ?? []).map(mode => ({ id: mode.id, label: mode.label, dangerous: mode.dangerous === true })),
       defaultPermissionModeId: inspection.permissionModes?.defaultModeId ?? null,
-      configOptions: (catalog.configOptions ?? []).map(option => ({ id: option.id, label: option.label, description: option.description ?? null,
+      configOptions: (catalog.configOptions ?? []).filter(option => supportsModelConfig(binding.harness, (binding.model ?? current?.ref)?.id, option.id))
+        .map(option => ({ id: option.id, label: option.label, description: option.description ?? null,
         currentValue: pushed ? option.currentValue : binding.configs?.[option.id] ?? option.currentValue,
         choices: option.choices?.map(choice => ({ value: choice.value, label: choice.label, description: choice.description ?? null })) ?? null })),
       error: null,
@@ -1190,7 +1197,7 @@ export class HarnessService extends TypertRemoteService {
     if (pick.thinking && !allowed.includes(pick.thinking)) {
       throw new Error(`${name} 的模型 ${entry?.ref.id ?? '默认模型'} 不支持推理强度 ${pick.thinking}；可用推理强度：${allowed.join('、') || '无'}`);
     }
-    const thinking = pick.thinking ?? (remembered?.thinking && allowed.includes(remembered.thinking) ? remembered.thinking : undefined);
+    const thinking = pick.thinking ?? (remembered?.thinking && allowed.includes(remembered.thinking) ? remembered.thinking : entry?.defaultThinkingOptionId);
     // Both keys are set so a last-picked thinking level the picked model lacks cannot come back through `bind`.
     return { model: modelId ? harnessModelRefSchema.parse({ id: modelId }) : undefined, thinking: thinking ? harnessThinkingOptionIdSchema.parse(thinking) : undefined };
   }
@@ -1222,10 +1229,14 @@ export class HarnessService extends TypertRemoteService {
       if (!entry) throw new Error('Harness 未提供这个模型');
       const model = harnessModelRefSchema.parse({ id: request.model });
       const live = this.runner.live.get(request.sessionId);
-      if (live) unwrap(await live.session.execute({ type: 'model.select', model }));
+      if (live && binding.harness === 'claude-code' && (isDshModel(binding.model) || isDshModel(model))) {
+        if (live.session.hasBackgroundTasks?.()) throw new Error('请等待后台任务结束后再切换模型服务商');
+        await live.session.close(); this.runner.live.delete(request.sessionId);
+      } else if (live) unwrap(await live.session.execute({ type: 'model.select', model }));
       binding.model = model;
       // A thinking level the new model does not support falls back to the Harness default.
       if (binding.thinking && entry.supportedThinkingOptionIds && !entry.supportedThinkingOptionIds.includes(binding.thinking)) delete binding.thinking;
+      if (!binding.thinking && entry.defaultThinkingOptionId) binding.thinking = entry.defaultThinkingOptionId;
       await this.bindings.write(binding);
       await this.remember(binding);
       return this.view(binding);
@@ -1249,7 +1260,10 @@ export class HarnessService extends TypertRemoteService {
       }
       const thinkingOptionId = harnessThinkingOptionIdSchema.parse(request.thinking);
       const live = this.runner.live.get(request.sessionId);
-      if (live) unwrap(await live.session.execute({ type: 'thinking.select', thinkingOptionId }));
+      if (live && binding.harness === 'claude-code' && isDshModel(binding.model)) {
+        if (live.session.hasBackgroundTasks?.()) throw new Error('请等待后台任务结束后再切换推理强度');
+        await live.session.close(); this.runner.live.delete(request.sessionId);
+      } else if (live) unwrap(await live.session.execute({ type: 'thinking.select', thinkingOptionId }));
       binding.thinking = thinkingOptionId;
       await this.bindings.write(binding);
       await this.remember(binding);
@@ -1346,6 +1360,7 @@ export class HarnessService extends TypertRemoteService {
       if (!binding) throw new Error('请使用 DSH 原生配置');
       if (binding.delegation?.discussion) throw new Error('讨论会话不能修改 Harness 配置');
       if (agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length || binding.pending || binding.fileRewind) throw new Error('请等待当前请求结束');
+      if (!supportsModelConfig(binding.harness, binding.model?.id, request.configId)) throw new Error('当前模型不支持这个配置');
       const catalog = await this.catalog(binding);
       if ('error' in catalog) throw new Error(catalog.error);
       const option = catalog.configOptions?.find(entry => entry.id === request.configId);
@@ -1505,6 +1520,7 @@ export class HarnessService extends TypertRemoteService {
     const agent = await this.agent(sessionId);
     const binding = await this.bindings.read(sessionId);
     if (binding) {
+      if (binding.harness === 'claude-code' && isDshModel(binding.model)) return null;
       // An external Harness probe spawns a throwaway CLI process, so reads answer the cached snapshot and only a
       // missing or reset snapshot, or a finished turn of a Harness that pushes nothing (in the background), starts a probe.
       return this.harnessQuota(binding.harness)?.read() ?? null;
