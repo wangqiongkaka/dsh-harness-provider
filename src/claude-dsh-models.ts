@@ -77,7 +77,8 @@ export class ClaudeDshModels {
   }
   async environment(id: string, thinking?: string): Promise<NodeJS.ProcessEnv> {
     if (this.#closed) throw new Error('DSH 模型转接已关闭');
-    this.#effort(await this.#model(id), thinking);
+    const info = await this.#model(id);
+    this.#effort(info, thinking);
     if (this.#closed) throw new Error('DSH 模型转接已关闭');
     this.#listening ??= (async () => {
       this.#server.listen(0, '127.0.0.1');
@@ -93,6 +94,9 @@ export class ClaudeDshModels {
       ANTHROPIC_MODEL: id, ANTHROPIC_SMALL_FAST_MODEL: id,
       ANTHROPIC_DEFAULT_OPUS_MODEL: id, ANTHROPIC_DEFAULT_SONNET_MODEL: id, ANTHROPIC_DEFAULT_HAIKU_MODEL: id,
       ANTHROPIC_CUSTOM_MODEL_OPTION: id, ANTHROPIC_CUSTOM_MODEL_OPTION_NAME: 'DSH 外部模型',
+      // The id above is opaque to Claude Code, which otherwise assumes 200k (claude-agent-acp acp-agent.js:79) and
+      // auto-compacts there. The DSH catalog knows the real window.
+      ...info.context?.contextWindow ? { CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(info.context.contextWindow) } : {},
       ENABLE_TOOL_SEARCH: 'false', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     };
   }

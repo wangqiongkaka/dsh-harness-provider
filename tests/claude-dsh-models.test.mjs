@@ -112,6 +112,22 @@ test('DSH reasoning choices follow each exact model and reach the provider inclu
   await assert.rejects(gateway.environment(plain.ref.id, high), /推理/);
 });
 
+// Claude Code assumes 200k for a model id it does not recognize (claude-agent-acp acp-agent.js:79), and auto-compacts
+// there. The DSH catalog's window has to be handed over explicitly.
+test('the DSH model window reaches Claude Code as its context limit', async t => {
+  const llm = model => ({
+    listProviders: () => [{ id: 'my/provider', name: '服务商' }],
+    listModels: async () => [{ id: 'model/with space', name: '外部模型' }],
+    resolveModelInfo: async (provider, id) => ({ provider, id, name: '外部模型', ...model }),
+    stream: async function* () { assert.fail('must not call a provider'); },
+  });
+  const known = new ClaudeDshModels(llm({ context: { contextWindow: 1_048_576 } }));
+  const unknown = new ClaudeDshModels(llm({}));
+  t.after(() => Promise.all([known.close(), unknown.close()]));
+  assert.equal((await known.environment(model)).CLAUDE_CODE_MAX_CONTEXT_TOKENS, '1048576');
+  assert.equal((await unknown.environment(model)).CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
+});
+
 test('the loopback gateway rejects unauthenticated, unknown and unrepresentable requests', async t => {
   const gateway = bridge(async function* () { assert.fail('must not call a provider'); });
   t.after(() => gateway.close());
