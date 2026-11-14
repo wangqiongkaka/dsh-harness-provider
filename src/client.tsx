@@ -1107,8 +1107,8 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
         {(['dsh', 'codex', 'claude-code'] as const).map(id => <Option key={id} label={id === 'dsh' ? t('native') : names[id]} selected={current === id} onClick={() => void choose(id)} />)}
       </div>}
     </div>
-    {/* A subscription login's label is its plan ("ChatGPT Plus"), which the composer row leaves out; the other statuses (not logged in, API key) stay. */}
-    {authStatus && !authStatus.account?.plan && <span className="hp-chip-label" role="status" title={authStatus.detail ?? authStatus.account?.email}>{authStatus.label}</span>}
+    {/* Only "not logged in" earns composer-row space; the identity labels (plan, API key, external backend) do not. */}
+    {authStatus?.kind === 'none' && <span className="hp-chip-label" role="status" title={authStatus.detail ?? authStatus.account?.email}>{authStatus.label}</span>}
     <QuotaChip quota={quotaView} t={t} />
     {current !== 'dsh' && state?.recoveryRequired && !summary?.running && <SessionRecovery key={`recovery:${sessionId}`} sessionId={sessionId} recover={recover} running={!!summary?.running} onChange={setState} />}
     {state?.rewindRecoveryToken && !summary?.running && <button type="button" className="hp-chip" disabled={busy} onClick={() => {
