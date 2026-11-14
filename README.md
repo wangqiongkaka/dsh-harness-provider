@@ -30,7 +30,7 @@
 ## 前置条件
 
 - Node.js 22 或更高版本。
-- 使用 DSH 0.1.7-rc.2 的 Web Profile，或 DSH 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.2 / 0.2.1-rc.3 / 0.2.1-rc.5 / 0.2.2-rc.1 桌面版。本插件按这些版本的消息来源、工具结果、预设注册表和实时配置接口构建；rc.5 已核对相对 rc.3 的宿主源码变更；0.2.2-rc.1 已通过桌面版自带 CLI 的隔离 Web Profile 验证（Codex / Claude Code 使用本地模型响应夹具）。
+- 使用 DSH 0.1.7-rc.2 的 Web Profile，或 DSH 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.2 / 0.2.1-rc.3 / 0.2.1-rc.5 / 0.2.2-rc.1 / 0.2.2-rc.2 / 0.2.2-rc.3 桌面版。本插件按这些版本的消息来源、工具结果、预设注册表和实时配置接口构建；rc.5 已核对相对 rc.3 的宿主源码变更；0.2.2-rc.1 已通过桌面版自带 CLI 的隔离 Web Profile 验证（Codex / Claude Code 使用本地模型响应夹具）。
 - 已安装并完成登录或环境配置的 [Codex CLI](https://developers.openai.com/codex/cli/) 或 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)。
 
 ## 安装
@@ -236,7 +236,7 @@ npm run check
 
 在 DSH `0.1.7-rc.2` 参考构建上运行 `npm run check`；DSH `0.2.0-rc.1` 桌面版发行包还验证了类型检查、构建和发行版测试，覆盖工具结果、通知来源、实时额度配置、并行调用日志、取消与会话冷恢复。DSH `0.2.0-rc.2` 桌面版已验证安装、冷启动和插件加载。DSH `0.2.1-rc.2` 发行包已验证类型检查、构建和全部 173 项测试（宿主源码取自该版本的 Git 标签）。DSH `0.2.1-rc.3` 标签源码已验证类型检查、构建和全部 225 项测试。
 
-DSH `0.2.2-rc.2` 的 macOS 桌面发行包已验证类型检查、构建和全部 290 项测试，原有 `0.2.1-alpha.4` 参考环境也通过同一组检查。工作目录面板使用 CSS 锚点定位，兼容新版宿主移除 `useAnchoredPosition` 后的公共组件接口；回归覆盖手机与桌面宽度、打开时调整窗口、底边上翻、Escape、外部点击和卸载。验证记录与环境限制见 [实现状态](docs/implementation-status.md)。
+DSH `0.2.2-rc.2` 的 macOS 桌面发行包已验证类型检查、构建和全部 290 项测试，原有 `0.2.1-alpha.4` 参考环境也通过同一组检查。工作目录面板使用 CSS 锚点定位，兼容新版宿主移除 `useAnchoredPosition` 后的公共组件接口；回归覆盖手机与桌面宽度、打开时调整窗口、底边上翻、Escape、外部点击和卸载。插件也精确支持 `0.2.2-rc.3`，验证记录与环境限制见 [实现状态](docs/implementation-status.md)。
 
 ### 免重启重载
 

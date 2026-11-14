@@ -129,7 +129,7 @@ export const agentsEn: Record<keyof typeof agentsZh, string> = {
 type AgentKey = keyof typeof agentsZh
 
 /** New Session in the sidebar column: the card takes the seat right after it. */
-const ANCHOR = '[class*="_sidebarCol"] button[class*="_newSession"]'
+const ANCHOR = '[class*="_sidebarCol"] :is([class*="_newSessionRow"], button[class*="_newSession"])'
 
 /** Host commands passed through the slot injection face. */
 export interface AgentBoardInjected {

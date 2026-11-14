@@ -374,6 +374,19 @@ test('the agent card shows an empty message for the selected group without falli
   }
 }));
 
+test('rc.3 新会话横向容器下方的运行卡片保持完整宽度', () => inPage(async () => {
+  const col = column(), sidebar = col.firstElementChild;
+  sidebar.style.cssText = 'width:280px;display:flex;flex-direction:column';
+  const button = sidebar.querySelector('button'), row = document.createElement('div');
+  row.className = 'ui_sidebar__newSessionRow__h1';
+  row.style.cssText = 'display:flex;align-items:center';
+  button.before(row); row.append(button);
+  render(); await settle();
+  expect(host()?.parentElement?.className).toBe(sidebar.className);
+  expect(host()?.previousElementSibling?.className).toBe(row.className);
+  expect(host().getBoundingClientRect().width).toBe(280);
+}));
+
 test('the agent card follows the column when the shell rebuilds it, and leaves with the component', () => inPage(async () => {
   render();
   expect(host()).toBeNull();

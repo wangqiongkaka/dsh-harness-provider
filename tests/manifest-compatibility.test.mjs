@@ -23,10 +23,11 @@ test('plugin peers accept DSH 0.2.0-rc.1, rc.2, 0.2.1-rc.2 and 0.2.1-rc.3 and rc
   assert.ok(evaluatePluginCompatibility(manifest, {}, '0.2.1-rc.6'));
 });
 
-test('plugin peers accept DSH 0.2.2-rc.2 but reject the untested rc.3', async () => {
+test('plugin peers accept DSH 0.2.2-rc.2 and rc.3 but reject the untested rc.4', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(evaluatePluginCompatibility(manifest, {}, '0.2.2-rc.2'), undefined);
-  assert.ok(evaluatePluginCompatibility(manifest, {}, '0.2.2-rc.3'));
+  assert.equal(evaluatePluginCompatibility(manifest, {}, '0.2.2-rc.3'), undefined);
+  assert.ok(evaluatePluginCompatibility(manifest, {}, '0.2.2-rc.4'));
 });
 
 // DSH routes a linked plugin's imports to its own packages only for names the plugin declares as peers.
