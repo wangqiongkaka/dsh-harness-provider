@@ -49,6 +49,35 @@ export function parseDeepSeekBalance(raw: unknown, source: string): Quota {
   return { kind: 'balance', source, currency: info.currency, total: info.total_balance, granted: info.granted_balance, toppedUp: info.topped_up_balance };
 }
 
+const wallet = z.object({ currency: z.enum(['CNY', 'USD']), balance: z.string().max(256).regex(/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i) });
+const accountBalance = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('ready'), value: z.array(wallet), bonusWallets: z.array(wallet) }),
+  z.object({ status: z.literal('failed') }),
+]).nullable();
+/** Add wallet decimals exactly, including the scientific zero returned by Platform. */
+function sumBalances(values: string[]): string {
+  const parts = values.map(value => {
+    const [mantissa, exponent = '0'] = value.toLowerCase().split('e');
+    const scale = (mantissa!.split('.')[1]?.length ?? 0) - Number(exponent);
+    if (!Number.isInteger(scale) || Math.abs(scale) > 1000) throw new Error('账户金额精度超出范围');
+    return { units: BigInt(mantissa!.replace('.', '')), scale };
+  });
+  const scale = Math.max(2, ...parts.map(part => part.scale));
+  const units = parts.reduce((total, part) => total + part.units * 10n ** BigInt(scale - part.scale), 0n);
+  const digits = (units < 0n ? -units : units).toString().padStart(scale + 1, '0');
+  return `${units < 0n ? '-' : ''}${digits.slice(0, -scale)}.${digits.slice(-scale).replace(/0+$/, '').padEnd(2, '0')}`;
+}
+export function parseAccountBalance(raw: unknown, source: string): Quota {
+  const result = accountBalance.parse(raw);
+  if (!result || result.status === 'failed') return null;
+  const currencies = new Set([...result.value, ...result.bonusWallets].map(wallet => wallet.currency));
+  return parseDeepSeekBalance({ is_available: true, balance_infos: [...currencies].map(currency => {
+    const normal = result.value.filter(wallet => wallet.currency === currency).map(wallet => wallet.balance);
+    const bonus = result.bonusWallets.filter(wallet => wallet.currency === currency).map(wallet => wallet.balance);
+    return { currency, total_balance: sumBalances([...normal, ...bonus]), topped_up_balance: sumBalances(normal), granted_balance: sumBalances(bonus) };
+  }) }, source);
+}
+
 export type NativeRoute = { provider?: string; baseURL?: string; apiKey: string; source: string };
 /**
  * Default endpoint and credential variable each supported provider already carries, keyed by provider route id.

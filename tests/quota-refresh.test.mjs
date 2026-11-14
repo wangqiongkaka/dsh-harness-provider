@@ -21,6 +21,94 @@ async function clientBundle() {
  return bundle.outputFiles[0].text;
 }
 
+test('外部模型切换立即刷新当前账户，旧结果不覆盖订阅用量与余额', async () => {
+ const script = await clientBundle(), browser = await chromium.launch({ headless: true });
+ try {
+  const page = await browser.newPage({ viewport: { width: 1000, height: 700 } });
+  await page.setContent('<style>:root{--dsw-alias-label-primary:#eee;--dsw-alias-label-secondary:#bbb;--dsw-alias-label-tertiary:#999;--dsw-alias-label-caption:#aaa;--dsw-alias-border-l2:#444;--dsw-alias-bg-layer-3:#29292c;--dsw-specific-menu:#29292c;--dsw-alias-interactive-bg-hover:#333;--dsw-alias-state-success-primary:#22c55e;--dsw-alias-state-warn-primary:#eab308;--dsw-alias-state-error-primary:#ef4444}body{margin:24px;background:#1b1b1b;color:#eee;font:14px sans-serif}#root{position:fixed;left:24px;right:24px;bottom:30px}</style><div id="root"></div>');
+  await page.addScriptTag({ content: script });
+  await page.evaluate(() => {
+   const { createElement, createRoot, HarnessSelect, styles, zh } = window.HarnessProvider;
+   document.head.append(Object.assign(document.createElement('style'), { textContent: styles }));
+   const listeners = new Set(), state = { harness: 'claude-code', locked: false, model: 'dsh~balance', configs: {}, recoveryRequired: false };
+   const api = { reads: 0, pending: [], state, listeners, sessionId: 's1', useSessions: pick => pick({ byId: {} }),
+    read: async () => { api.reads++; return { ...state }; }, select: async () => state,
+    changed: () => { for (const l of listeners) l(); }, subscribe: l => { listeners.add(l); return () => listeners.delete(l); },
+    secretStatus: async () => null, recover: async () => state, viewing: async () => null, modelProvider: () => null,
+    quota: async () => new Promise(resolve => api.pending.push({ model: state.model, resolve })),
+    t: (key, params = {}) => Object.entries(params).reduce((text, [name, value]) => text.replaceAll('{' + name + '}', value), zh[key] ?? key) };
+   window.__externalQuota = api;
+   createRoot(document.getElementById('root')).render(createElement(HarnessSelect, api));
+  });
+  await page.waitForFunction(() => window.__externalQuota.pending.some(item => item.model === 'dsh~balance'));
+  await page.evaluate(() => { const a = window.__externalQuota; a.state.model = 'dsh~subscription'; for (const l of a.listeners) l(); });
+  await page.waitForFunction(() => window.__externalQuota.pending.some(item => item.model === 'dsh~subscription'), undefined, { timeout: 2000 });
+  await page.evaluate(() => { for (const item of window.__externalQuota.pending.filter(item => item.model === 'dsh~subscription')) item.resolve({ kind: 'windows', source: '订阅账户', plan: 'Coding Plan', windows: [
+   { id: 'seven_day', label: 'seven_day', usedPercent: 47, resetsAt: '2026-11-17T03:00:00Z' },
+   { id: 'product:fable', label: 'Fable · 7-day', usedPercent: 98, resetsAt: '2026-11-17T03:00:00Z' },
+   { id: 'five_hour', label: 'five_hour', usedPercent: 23, resetsAt: null } ] }); });
+  const aria = await page.evaluate(() => window.HarnessProvider.zh.quotaAria);
+  const button = page.getByRole('button', { name: aria, exact: true });
+  await button.waitFor(); assert.match(await button.textContent(), /5 小时 77%/);
+  assert.doesNotMatch(await button.textContent(), /本周|已用|47%/);
+  assert.equal(await button.evaluate(node => node.classList.contains('hp-danger')), false);
+  assert.ok(Math.abs(Number(await button.locator('.hp-fill').getAttribute('stroke-dashoffset')) - 2 * Math.PI * 5.5 * .23) < .001);
+  await page.evaluate(() => { for (const item of window.__externalQuota.pending.filter(item => item.model === 'dsh~balance')) item.resolve({ kind: 'balance', source: '旧账户', currency: 'CNY', total: '99.99', granted: '0', toppedUp: '99.99' }); });
+  await button.click(); assert.equal(await page.getByText('99.99', { exact: false }).count(), 0);
+  assert.match(await page.getByRole('dialog').textContent(), /5 小时.*剩余 77%.*本周.*剩余 53%.*已用.*47%.*重置.*Fable 本周.*剩余 2%/);
+  const { mkdir } = await import('node:fs/promises'); await mkdir('.cache', { recursive: true });
+  for (const width of [1000, 390]) {
+   await page.setViewportSize({ width, height: 700 });
+   await page.waitForFunction(() => { const box = document.querySelector('.hp-panel')?.getBoundingClientRect(); return box && box.left >= 0 && box.right <= innerWidth; }, undefined, { timeout: 1000 });
+   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+   assert.equal(await button.evaluate(node => [...node.querySelectorAll('span')].every(span => span.scrollWidth <= span.clientWidth)), true, 'five-hour quota must remain visible');
+   assert.equal(await page.evaluate(() => document.querySelector('.hp-panel').getBoundingClientRect().bottom <= document.querySelector('.hp-root').getBoundingClientRect().top), true, 'quota panel must stay above the entire control row');
+   const bounds = await page.locator('.hp-panel').boundingBox();
+   await page.screenshot({ path: resolve('.cache/external-subscription-' + width + '.png'), clip: { x: 12, y: bounds.y - 12, width: width - 24, height: 700 - bounds.y } });
+  }
+  await button.click();
+  await page.evaluate(() => { const a = window.__externalQuota; a.state.model = 'dsh~wallet'; for (const l of a.listeners) l(); });
+  await page.waitForFunction(() => window.__externalQuota.pending.some(item => item.model === 'dsh~wallet'));
+  await page.evaluate(() => { for (const item of window.__externalQuota.pending.filter(item => item.model === 'dsh~wallet')) item.resolve({ kind: 'balance', source: '余额账户', currency: 'CNY', total: '12.30', granted: '0.20', toppedUp: '12.10' }); });
+  await page.waitForFunction(label => document.querySelector('[aria-label="' + label + '"]')?.textContent.includes('12.30'), aria);
+  await button.click();
+  const bounds = await page.locator('.hp-panel').boundingBox();
+  await page.screenshot({ path: resolve('.cache/external-balance-mobile.png'), clip: { x: 12, y: bounds.y - 12, width: 366, height: 700 - bounds.y } });
+  assert.ok(await page.evaluate(() => window.__externalQuota.reads) < 15, 'selection notifications must not loop');
+ } finally { await browser.close(); }
+});
+
+test('余额入口和明细固定两位小数，补零及四舍五入不修改原始金额', async () => {
+ const script = await clientBundle(), browser = await chromium.launch({ headless: true });
+ try {
+  const page = await browser.newPage();
+  await page.setContent('<div id="root"></div>');
+  await page.addScriptTag({ content: script });
+  await page.evaluate(() => {
+   const { createElement, createRoot, QuotaChip, zh } = window.HarnessProvider;
+   const root = createRoot(document.getElementById('root'));
+   window.__balance = value => {
+    const quota = { kind: 'balance', source: '账户', currency: 'CNY', total: value, toppedUp: '1.005', granted: '0' };
+    window.__rawBalance = quota;
+    root.render(createElement(QuotaChip, { quota, t: key => zh[key] }));
+   };
+   window.__balance('12.3');
+  });
+  const button = page.getByRole('button', { name: '额度', exact: true });
+  await button.waitFor();
+  for (const [input, expected] of [['12.3', '12.30'], ['12.345', '12.35'], ['12.34499999999999999999', '12.34'], ['123456789012345678.125', '123456789012345678.13'], ['1e-8', '0.00'], ['-1.005', '-1.01']]) {
+   await page.evaluate(value => window.__balance(value), input);
+   await page.waitForFunction(expected => document.querySelector('button').textContent.includes('¥' + expected), expected, { timeout: 1000 });
+   assert.equal(await page.evaluate(() => window.__rawBalance.total), input);
+  }
+  await button.click();
+  const detail = page.getByRole('dialog');
+  assert.match(await detail.textContent(), /CNY -1\.01/);
+  assert.equal(await detail.locator('dd').nth(0).textContent(), '1.01');
+  assert.equal(await detail.locator('dd').nth(1).textContent(), '0.00');
+ } finally { await browser.close(); }
+});
+
 test('switching the session model provider re-reads account quota immediately', async () => {
  const script = await clientBundle();
  const browser = await chromium.launch({ headless: true });
@@ -175,9 +263,11 @@ test('the quota panel footer stays on one line for an external Harness plan', as
    const { createElement, createRoot, QuotaChip, styles, zh } = window.HarnessProvider;
    const style = document.createElement('style'); style.textContent = styles; document.head.append(style);
    const t = (key, params = {}) => zh[key].replace(/\{(\w+)\}/g, (_, name) => params[name]);
-   const quota = { kind: 'windows', source: 'claude-code', plan: 'max', windows: [{ id: 'five_hour', label: '5 小时', usedPercent: 7, resetsAt: null }] };
+   const quota = { kind: 'windows', source: 'claude-code', plan: 'max', windows: [{ id: 'seven_day', label: '本周', usedPercent: 50, resetsAt: null }, { id: 'five_hour', label: '5 小时', usedPercent: 7, resetsAt: null }] };
    createRoot(document.getElementById('root')).render(createElement(QuotaChip, { quota, t }));
   });
+  assert.match(await page.locator('.hp-chip').textContent(), /5 小时 93%/);
+  assert.doesNotMatch(await page.locator('.hp-chip').textContent(), /本周/);
   await page.locator('.hp-chip').click();
   const foot = page.locator('.hp-foot');
   const box = await foot.evaluate(element => ({ height: element.clientHeight - parseFloat(getComputedStyle(element).paddingTop) - parseFloat(getComputedStyle(element).paddingBottom), line: parseFloat(getComputedStyle(element).lineHeight),

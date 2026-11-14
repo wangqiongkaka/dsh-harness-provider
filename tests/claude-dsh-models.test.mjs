@@ -254,7 +254,7 @@ test('external reasoning is not forged into signed Claude history, and provider 
   assert.doesNotMatch(content, /message_stop|thinking|signature|内部推理/);
 });
 
-test('Claude 对话栏只显示模型名，桌面与窄屏均能选择真实推理档位', async () => {
+test('Claude 对话栏展示模型与推理强度，桌面与窄屏均能选择真实档位', async () => {
   const { readFile, mkdir } = await import('node:fs/promises');
   const { resolve } = await import('node:path');
   const { createRequire } = await import('node:module');
@@ -266,7 +266,8 @@ import { createRoot } from 'react-dom/client';
 document.head.append(Object.assign(document.createElement('style'), { textContent: styles }));
 let state = { harness: 'claude-code', model: 'sonnet', thinking: null, configs: {}, recoveryRequired: false };
 const catalog = { models: [{ id: 'sonnet', label: 'Claude Sonnet', resolved: null, thinkingOptionIds: null },
-  { id: ${JSON.stringify(model)}, label: 'DeepSeek-V4.1-Flash', resolved: '服务商 (DSH)', thinkingOptionIds: ['dsh~off', 'dsh~high'] }],
+  { id: ${JSON.stringify(model)}, label: 'DeepSeek-V4.1-Flash', resolved: '服务商 (DSH)', thinkingOptionIds: ['dsh~off', 'dsh~high'] },
+  { id: 'dsh~plain', label: '无推理模型', thinkingOptionIds: [] }],
   defaultModel: { id: 'sonnet', label: 'Claude Sonnet' }, defaultThinkingOptionId: 'dsh~high',
   thinkingOptions: [{ id: 'dsh~off', label: '关闭' }, { id: 'dsh~high', label: '高' }], configOptions: [
     { id: 'fast', label: 'Fast mode', currentValue: false, choices: null }, { id: 'ultracode', label: 'Ultracode', currentValue: false, choices: null },
@@ -290,6 +291,7 @@ createRoot(document.querySelector('#root')).render(<HarnessModel sessionId="sour
     await mkdir('.cache', { recursive: true });
     for (const width of [900, 390]) {
       await page.setViewportSize({ width, height: 620 });
+      await page.locator('#root').evaluate((node, narrow) => { node.style.maxWidth = narrow ? '190px' : 'none'; }, width === 390);
       await page.locator('.hp-chip').click();
       await page.locator('.hp-menu .hp-cell').first().click();
       await expect(page.getByRole('menuitemradio', { name: /DeepSeek-V4.1-Flash.*服务商 \(DSH\)/ })).toBeVisible();
@@ -298,7 +300,8 @@ createRoot(document.querySelector('#root')).render(<HarnessModel sessionId="sour
         clip: { x: Math.max(0, width - 420), y: 350, width: Math.min(420, width), height: 270 } });
       await page.getByRole('menuitemradio', { name: /DeepSeek-V4.1-Flash/ }).click();
       assert.equal(await page.evaluate(() => window.selected), model);
-      await expect(page.locator('.hp-chip')).toHaveText('DeepSeek-V4.1-Flash');
+      await expect(page.locator('.hp-chip')).toHaveText('DeepSeek-V4.1-Flash· ' + (width === 900 ? '高' : '关闭'));
+      assert.equal(await page.locator('.hp-chip-effort').evaluate(node => node.scrollWidth <= node.clientWidth), true);
       await page.locator('.hp-chip').click();
       await expect(page.getByRole('menuitem').filter({ hasText: '快速模式' })).toHaveCount(0);
       await expect(page.getByRole('menuitem').filter({ hasText: 'Ultracode' })).toHaveCount(0);
@@ -314,9 +317,18 @@ createRoot(document.querySelector('#root')).render(<HarnessModel sessionId="sour
       await expect(page.getByRole('menuitemradio', { name: '高', exact: true })).toBeVisible();
       await page.screenshot({ path: resolve('.cache/claude-dsh-reasoning-' + (width === 390 ? 'mobile' : 'desktop') + '.png'),
         clip: { x: Math.max(0, width - 420), y: 350, width: Math.min(420, width), height: 270 } });
-      await page.getByRole('menuitemradio', { name: '关闭', exact: true }).click();
-      assert.equal(await page.evaluate(() => window.selectedThinking), 'dsh~off');
-      await expect(page.locator('.hp-chip')).toHaveText('DeepSeek-V4.1-Flash');
+      const choice = width === 900 ? '关闭' : '高';
+      await page.getByRole('menuitemradio', { name: choice, exact: true }).click();
+      assert.equal(await page.evaluate(() => window.selectedThinking), width === 900 ? 'dsh~off' : 'dsh~high');
+      await expect(page.locator('.hp-chip')).toHaveText('DeepSeek-V4.1-Flash· ' + choice);
+      assert.equal(await page.locator('.hp-chip-effort').evaluate(node => node.scrollWidth <= node.clientWidth), true);
+      await page.screenshot({ path: resolve('.cache/claude-dsh-effort-chip-' + (width === 390 ? 'mobile' : 'desktop') + '.png'),
+        clip: { x: Math.max(0, width - 330), y: 550, width: Math.min(330, width), height: 70 } });
     }
+    await page.locator('.hp-chip').click();
+    await page.locator('.hp-menu .hp-cell').first().click();
+    await page.getByRole('menuitemradio', { name: '无推理模型', exact: true }).click();
+    await expect(page.locator('.hp-chip')).toHaveText('无推理模型');
+    await expect(page.locator('.hp-chip-effort')).toHaveCount(0);
   } finally { await browser.close(); }
 });

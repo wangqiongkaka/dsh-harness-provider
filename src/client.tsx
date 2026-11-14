@@ -326,9 +326,14 @@ function useOnScreen<E extends HTMLElement>(deps: unknown[]) {
   useLayoutEffect(() => {
     const node = ref.current;
     if (!node) return;
-    node.style.left = '0px';
-    const over = node.getBoundingClientRect().right - (document.documentElement.clientWidth - 16);
-    if (over > 0) node.style.left = `${-over}px`;
+    const fit = () => {
+      node.style.left = '0px';
+      const over = node.getBoundingClientRect().right - (document.documentElement.clientWidth - 16);
+      if (over > 0) node.style.left = `${-over}px`;
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
   }, deps);
   return ref;
 }
@@ -879,44 +884,45 @@ function DelegationDock(props: DelegationDockProps) {
 
 const RADIUS = 5.5, CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 
-// ---- quota chip: one 28px chip after the Harness chip, showing the tightest window (or the balance) ----
+// ---- quota chip: five-hour remaining capacity (or the balance), with all windows in the panel ----
 /** Classify consumed capacity: quota remaining <=30% / <=10%, context used >=70% / >=90%. */
 const tier = (percent: number) => percent >= 90 ? ' hp-danger' : percent >= 70 ? ' hp-warn' : '';
+const balanceFormat = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2, useGrouping: false });
+// Intl accepts decimal strings directly, preserving precision when rounding the display.
+const balanceText = (value: string) => balanceFormat.format(value as `${number}`);
 function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const close = useCallback(() => setOpen(false), []);
   useDismiss(open, close, root);
-  const popover = useOnScreen<HTMLDivElement>([open]);
+  const popover = useOnScreen<HTMLDivElement>([open, quota?.kind]);
   if (!quota) return null;
   let trigger: ReactNode, panel: ReactNode, level = '';
   if (quota.kind === 'balance') {
-    trigger = <>{icons.wallet}<span>{t('balance')} {quota.currency === 'CNY' ? '¥' : '$'}{quota.total}</span></>;
+    const total = balanceText(quota.total);
+    trigger = <>{icons.wallet}<span>{t('balance')} {quota.currency === 'CNY' ? '¥' : '$'}{total}</span></>;
     panel = <>
-      <div className="hp-panel-head"><span className="hp-panel-icon">{icons.wallet}</span><span className="hp-panel-title">{t('balanceTotal')}</span><span className="hp-figure">{quota.currency} {quota.total}</span></div>
-      <dl className="hp-rows"><div className="hp-row"><dt>{t('balanceTopped')}</dt><dd>{quota.toppedUp}</dd></div><div className="hp-row"><dt>{t('balanceGranted')}</dt><dd>{quota.granted}</dd></div></dl>
+      <div className="hp-panel-head"><span className="hp-panel-icon">{icons.wallet}</span><span className="hp-panel-title">{t('balanceTotal')}</span><span className="hp-figure">{quota.currency} {total}</span></div>
+      <dl className="hp-rows"><div className="hp-row"><dt>{t('balanceTopped')}</dt><dd>{balanceText(quota.toppedUp)}</dd></div><div className="hp-row"><dt>{t('balanceGranted')}</dt><dd>{balanceText(quota.granted)}</dd></div></dl>
     </>;
   } else {
     if (!quota.windows.length) return null;
     const tight = quota.windows.reduce((a, b) => (b.usedPercent > a.usedPercent ? b : a));
-    level = tier(tight.usedPercent);
+    const shown = quota.windows.find(window => window.id === 'five_hour')
+      ?? quota.windows.find(window => !window.id.startsWith('product:')) ?? tight;
+    level = tier(shown.usedPercent);
     // Windows read as what is left: the chip and bars shrink toward empty as the quota runs out.
     const left = (percent: number) => Math.max(0, 100 - Math.round(percent));
-    // The chip lists the plan-wide windows (5-hour, weekly); per-model windows stay in the panel. Color follows the tightest.
-    const headline = quota.windows.filter(window => !window.id.startsWith('product:')).slice(0, 2);
-    const shown = headline.length ? headline : [tight];
-    // The ring draws the tightest window printed beside it, so arc and percentage agree.
-    const ring = shown.reduce((a, b) => (b.usedPercent > a.usedPercent ? b : a));
     trigger = <>
-      {windowIcon(shown[0]!.id)}
-      {shown.map((window, index) => <span key={window.id} className={index ? 'hp-chip-effort' : undefined}>{index ? '· ' : ''}{windowLabel(t, window.id, window.label)} {left(window.usedPercent)}%</span>)}
+      {windowIcon(shown.id)}
+      <span>{windowLabel(t, shown.id, shown.label)} {left(shown.usedPercent)}%</span>
       <svg className={`hp-quota-ring${level}`} width="14" height="14" viewBox="0 0 14 14" aria-hidden>
         <circle className="hp-track" cx="7" cy="7" r={RADIUS} />
         <circle className="hp-fill" cx="7" cy="7" r={RADIUS} strokeDasharray={CIRCUMFERENCE}
-          strokeDashoffset={CIRCUMFERENCE * ring.usedPercent / 100} transform="rotate(-90 7 7)" />
+          strokeDashoffset={CIRCUMFERENCE * shown.usedPercent / 100} transform="rotate(-90 7 7)" />
       </svg>
     </>;
-    panel = quota.windows.map((window, index) => {
+    panel = [shown, ...quota.windows.filter(window => window !== shown)].map((window, index) => {
       const reset = clock(window.resetsAt);
       return <div key={window.id} className={index ? 'hp-section' : undefined}>
         <div className="hp-panel-head"><span className="hp-panel-icon">{windowIcon(window.id)}</span><span className="hp-panel-title">{windowLabel(t, window.id, window.label)}</span>
@@ -1047,8 +1053,11 @@ export function SecretPanel({ sessionId, read, answer }: { sessionId: string; re
 
 // ---- left slot: Harness chip + quota chip ----
 const names: Record<State['harness'], string> = { dsh: '', codex: 'Codex', 'claude-code': 'Claude Code' };
-export function HarnessSelect({ sessionId, useSessions, read, select, quota, viewing, modelProvider, changed, secretStatus, answerSecret, recover, confirmRewind, t }: LeftProps) {
+export function HarnessSelect({ sessionId, useSessions, read, select, quota, viewing, modelProvider, changed, subscribe, secretStatus, answerSecret, recover, confirmRewind, t }: LeftProps) {
   const [state,setState] = useState<State>();
+  const [revision, setRevision] = useState(0);
+  useEffect(() => subscribe?.(() => setRevision(value => value + 1)), [subscribe]);
+  const reported = useRef('');
   const [error,setError] = useState<string>();
   const [busy,setBusy] = useState(false);
   const [open,setOpen] = useState(false);
@@ -1060,17 +1069,21 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
   useEffect(() => {
     const version = ++generation.current;
     setError(undefined);
-    void read(sessionId).then(next => { if (generation.current === version) { setState(next); changed(sessionId, next.harness); } })
+    void read(sessionId).then(next => { if (generation.current === version) {
+      setState(next);
+      const key = `${sessionId}\0${next.harness}`;
+      if (reported.current !== key) { reported.current = key; changed(sessionId, next.harness); }
+    } })
       .catch(error => { if (generation.current === version) setError(error instanceof Error ? error.message : String(error)); });
     return () => { generation.current++; };
-  }, [sessionId,summary?.running,summary?.blank,read,changed]);
+  }, [sessionId,summary?.running,summary?.blank,read,changed,revision]);
   // Switching the session's model provider changes whose account the quota describes, so the provider joins the
   // dependencies: a switch re-reads at once, while the interval still covers a window moving on its own.
   const provider = useModelProvider(modelProvider, sessionId);
   const authStatus = usePolled(() => state?.harness && state.harness !== 'dsh' ? read(sessionId).then(next => next.authStatus ?? null) : Promise.resolve(null), 15_000, [sessionId, state?.harness]);
   // The login itself, as the host compares it: a status still loading or absent is not another account.
   const account = authStatus ? `${authStatus.kind}\0${authStatus.account?.email ?? authStatus.detail ?? ''}` : '';
-  const quotaView = usePolled(() => quota(sessionId), 60_000, [sessionId, state?.harness, summary?.running, provider, account], [sessionId, state?.harness, provider, account]);
+  const quotaView = usePolled(() => quota(sessionId), 60_000, [sessionId, state?.harness, state?.model, summary?.running, provider, account], [sessionId, state?.harness, state?.model, provider, account]);
   useViewing(viewing, sessionId, state !== undefined && state.harness !== 'dsh' && (summary?.retainedBy.mainView ?? 0) > 0);
   async function choose(next: State['harness']) {
     const version = generation.current; setBusy(true); setError(undefined); setOpen(false);
@@ -1216,7 +1229,7 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
       <button type="button" className="hp-chip" aria-label={t('model')} aria-haspopup="menu" aria-expanded={open} title={effortText ? `${modelTitle} · ${effortText}` : modelTitle}
         disabled={disabled} onClick={() => { if (open) close(); else { setPane('root'); setOpen(true); } }}>
         <span className="hp-chip-label">{modelLabel}</span>
-        {effortText && !(state.harness === 'claude-code' && modelEntry?.id.startsWith('dsh~')) && <span className="hp-chip-effort">· {effortText}</span>}
+        {effortText && <span className="hp-chip-effort">· {effortText}</span>}
         <Chevron open={open} />
       </button>
       {open && <div className="hp-menu hp-menu-right" role="menu" aria-label={t('model')} aria-busy={!catalog}>
@@ -1501,6 +1514,7 @@ const styles = `
 .hp-option-icon{display:inline-flex;flex:none;width:16px;height:16px;align-items:center;justify-content:center;color:var(--dsw-alias-label-tertiary)}
 .hp-chip-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hp-chip-effort{flex-shrink:1000;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-caption)}
+.hp-model-seat .hp-chip-effort{flex-shrink:0}
 .hp-chip.hp-warn,.hp-figure.hp-warn{color:var(--dsw-alias-state-warn-label)}.hp-chip.hp-danger,.hp-figure.hp-danger{color:var(--dsw-alias-state-error-primary)}
 .hp-chevron{flex:none;color:var(--dsw-alias-label-caption);transition:transform 120ms ease}
 .hp-chevron-open{transform:rotate(180deg)}
@@ -1947,7 +1961,7 @@ export async function apply(ctx: Context): Promise<void> {
       read:id=>value(scope.remote.harness.state({sessionId:id})),
       select:(id,harness)=>value(scope.remote.harness.select({sessionId:id,harness})),
       models:id=>value(scope.remote.harness.models({sessionId:id})),
-      selectModel:(id,model)=>value(scope.remote.harness.selectModel({sessionId:id,model})),
+      selectModel:async(id,model)=>{ const next = await value(scope.remote.harness.selectModel({sessionId:id,model})); for (const listener of listeners) listener(); return next; },
       selectThinking:(id,thinking)=>value(scope.remote.harness.selectThinking({sessionId:id,thinking})),
       selectPermission:(id,permission)=>value(scope.remote.harness.selectPermission({sessionId:id,permission})),
       selectConfig:(id,configId,value_)=>value(scope.remote.harness.selectConfig({sessionId:id,configId,value:value_})),

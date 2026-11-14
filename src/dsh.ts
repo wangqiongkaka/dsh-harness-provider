@@ -16,6 +16,8 @@ import type { HarnessAdapter, HarnessAuthStatus, HarnessInspection, ManagedSessi
 import type {} from '@deepseek-ai/dsh-session-projection';
 import type {} from '@deepseek-ai/dsh-settings';
 import type {} from '@deepseek-ai/dsh-credentials';
+import type {} from '@deepseek-ai/dsh-deepseek-account';
+import hostPackage from '@deepseek-ai/dsh-agent/package.json' with { type: 'json' };
 import type {} from '@deepseek-ai/dsh-permission-presets';
 import type {} from '@deepseek-ai/dsh-shell';
 import type {} from '@deepseek-ai/dsh-workspace';
@@ -36,10 +38,10 @@ import { z } from 'zod';
 import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT } from './acp-adapter.js';
 import { claudeProfile, codexProfile } from './acp-profiles.js';
-import { ClaudeDshModels, isDshModel } from './claude-dsh-models.js';
+import { ClaudeDshModels, isDshModel, dshModelRoute } from './claude-dsh-models.js';
 import { DshRunner, linkedDirectories, linkedWorkspaces, unwrap } from './dsh-runner.js';
 import { QueuedTurns } from './queued-turns.js';
-import { fetchNativeQuota, nativeQuotaRoute, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
+import { fetchNativeQuota, nativeQuotaRoute, parseAccountBalance, type NativeRoute, type Quota, type QuotaWindow } from './native-quota.js';
 import { address, contribution, selectRequest, modelPick, modelRequest, modelsRequest, thinkingRequest, permissionRequest, configRequest, linkRequest, directoriesRequest, secretAnswerRequest, recoveryRequest, harnessesRequest, editRequest, delegateFromUserRequest, startDiscussionFromUserRequest, SETTINGS_ENTRY, updateSettingsRequest } from './remote.js';
 import { DelegationBridge, delegationRequest, delegationReadRequest, discussionRequest, renameRequest, directoryRequest } from './delegation.js';
 import { completionProjection } from './completion-projection.js';
@@ -1519,21 +1521,30 @@ export class HarnessService extends TypertRemoteService {
     const { sessionId } = address.parse(raw);
     const agent = await this.agent(sessionId);
     const binding = await this.bindings.read(sessionId);
+    let provider: string | undefined;
     if (binding) {
-      if (binding.harness === 'claude-code' && isDshModel(binding.model)) return null;
+      if (binding.harness === 'claude-code' && isDshModel(binding.model)) provider = dshModelRoute(binding.model!.id)[0];
       // An external Harness probe spawns a throwaway CLI process, so reads answer the cached snapshot and only a
       // missing or reset snapshot, or a finished turn of a Harness that pushes nothing (in the background), starts a probe.
-      return this.harnessQuota(binding.harness)?.read() ?? null;
+      else return this.harnessQuota(binding.harness)?.read() ?? null;
     }
-    const route = await this.nativeRoute(agent);
+    if (provider === 'deepseek-account') {
+      const account = this.ctx.get('deepseekAccount');
+      if (!account) return null;
+      return parseAccountBalance(await account.getBalance({ version: hostPackage.version, locale: Intl.DateTimeFormat().resolvedOptions().locale,
+        timezoneOffsetSeconds: -new Date().getTimezoneOffset() * 60 }), provider);
+    }
+    const route = await this.nativeRoute(agent, provider);
     if (!route) return null;
-    return this.cachedQuota(`native\0${route.source}\0${route.baseURL}`, () => fetchNativeQuota(route));
+    const account = createHash('sha256').update(route.apiKey).digest('hex');
+    return this.cachedQuota(`native\0${route.source}\0${route.baseURL}\0${account}`, () => fetchNativeQuota(route));
   }
 
   /** A finished turn is the moment an external Harness's account usage actually changed; refresh its cached quota unless sessions push it. */
   private async refreshHarnessQuota(sessionId: string): Promise<void> {
-    const harness = (await this.bindings.read(sessionId))?.harness;
-    if (harness) this.harnessQuota(harness)?.invalidate();
+    const binding = await this.bindings.read(sessionId);
+    if (binding?.harness === 'claude-code' && isDshModel(binding.model)) return;
+    if (binding) this.harnessQuota(binding.harness)?.invalidate();
   }
 
   /** The shared quota cache of one external Harness; undefined when its adapter cannot inspect the account. */
@@ -1554,10 +1565,10 @@ export class HarnessService extends TypertRemoteService {
   }
 
   /** Endpoint and key of the native provider the session currently routes to; null when the host exposes neither. */
-  private async nativeRoute(agent: Awaited<ReturnType<HarnessService['agent']>>): Promise<NativeRoute | null> {
+  private async nativeRoute(agent: Awaited<ReturnType<HarnessService['agent']>>, selectedProvider?: string): Promise<NativeRoute | null> {
     const ctx = this.ctx;
     const selection = ctx.get('sessionProjections')?.stateOf(agent.session, 'modelSelection');
-    const provider = selection?.pending?.provider ?? selection?.lastUsed?.provider ?? agent.session.requestHeader()?.config.provider
+    const provider = selectedProvider ?? selection?.pending?.provider ?? selection?.lastUsed?.provider ?? agent.session.requestHeader()?.config.provider
       ?? ctx.get('agentDefaultModel')?.currentSelection().provider;
     const settings = ctx.get('settings');
     if (!provider || !settings) return null;

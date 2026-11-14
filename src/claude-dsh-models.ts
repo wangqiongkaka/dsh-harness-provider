@@ -10,6 +10,12 @@ import { harnessModelRefSchema, harnessThinkingOptionIdSchema, type HarnessModel
 const PREFIX = 'dsh~';
 export const isDshModel = (model?: HarnessModelRef) => model?.id.startsWith(PREFIX) === true;
 export const dshModelId = (provider: string, model: string) => PREFIX + Buffer.from(JSON.stringify([provider, model])).toString('base64url');
+export function dshModelRoute(id: string): [string, string] {
+  try {
+    if (!id.startsWith(PREFIX)) throw new Error('Invalid external model');
+    return z.tuple([z.string().min(1), z.string().min(1)]).parse(JSON.parse(Buffer.from(id.slice(PREFIX.length), 'base64url').toString('utf8')));
+  } catch { throw new GatewayError(404, 'DSH 未配置这个模型'); }
+}
 export const dshThinkingId = (provider: string, model: string, effort: string) => harnessThinkingOptionIdSchema.parse(PREFIX + createHash('sha256').update(JSON.stringify([provider, model, effort])).digest('base64url'));
 const blockSchema = z.object({ type: z.string() }).loose();
 const requestSchema = z.object({
@@ -58,10 +64,7 @@ export class ClaudeDshModels {
     return { models: entries.map(entry => entry.model), thinkingOptions: entries.flatMap(entry => entry.thinkingOptions) };
   }
   async #model(id: string): Promise<LlmResolvedModelInfo> {
-    let route: [string, string];
-    try { route = z.tuple([z.string(), z.string()]).parse(JSON.parse(Buffer.from(id.slice(PREFIX.length), 'base64url').toString('utf8'))); }
-    catch { throw new GatewayError(404, 'DSH 未配置这个模型'); }
-    const [provider, model] = route;
+    const [provider, model] = dshModelRoute(id);
     if (!id.startsWith(PREFIX) || !this.llm.listProviders().some(entry => entry.id === provider)
       || !(await this.llm.listModels(provider)).some(entry => entry.id === model)) throw new GatewayError(404, 'DSH 未配置这个模型');
     return this.llm.resolveModelInfo(provider, model);
