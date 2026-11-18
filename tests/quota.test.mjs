@@ -239,3 +239,17 @@ test('外部 Harness 额度缓存：会话内推送更新对应窗口，此后�
  await drain();
  assert.equal(probes, 5);
 });
+
+test('Kimi Code 读取订阅实际提供的窗口，保留零用量', async () => {
+ const route = { ...nativeQuotaRoute('kimi-coding'), apiKey: 'test', source: 'kimi-coding' };
+ const probe = usages => fetchNativeQuota(route, async (url, init) => {
+  assert.equal(url, 'https://api.kimi.com/coding/v1/usages');
+  assert.equal(init.headers.Authorization, 'Bearer test');
+  return { ok: true, json: async () => ({ usages }) };
+ });
+ const quota = await probe({ limit_5h: { used_ratio: 0.25, reset_time: '2026-11-18T16:00:00Z' },
+  limit_month_total: { used_ratio: 0 }, limit_month_code: { used_ratio: 1 }, limit_7d: { used_ratio: 0.5 } });
+ assert.deepEqual(quota?.windows.map(w => [w.id, w.usedPercent]), [['five_hour', 25], ['seven_day', 50], ['month_total', 0], ['month_code', 100]]);
+ assert.equal(quota.windows[0].resetsAt, '2026-11-18T16:00:00Z');
+ assert.equal(await probe({}), null);
+});

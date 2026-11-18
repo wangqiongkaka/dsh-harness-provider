@@ -33,6 +33,21 @@ export function parseZaiQuota(raw: unknown, source: string): Quota {
   return windows.length ? { kind: 'windows', source, plan: body.data.level ?? null, windows } : null;
 }
 
+const kimiUsage = z.object({
+  used_ratio: z.number().min(0).max(1),
+  reset_time: z.iso.datetime({ offset: true }).nullish(),
+});
+const kimiWindows = { limit_5h: 'five_hour', limit_7d: 'seven_day', limit_month_total: 'month_total', limit_month_code: 'month_code' };
+function parseKimiQuota(raw: unknown, source: string): Quota {
+  const { usages } = z.object({ usages: z.record(z.string(), z.unknown()).optional() }).parse(raw);
+  const windows: QuotaWindow[] = [];
+  for (const [key, id] of Object.entries(kimiWindows)) {
+    const row = kimiUsage.safeParse(usages?.[key]);
+    if (row.success) windows.push({ id, label: id, usedPercent: row.data.used_ratio * 100, resetsAt: row.data.reset_time ?? null });
+  }
+  return windows.length ? { kind: 'windows', source, plan: null, windows } : null;
+}
+
 // DeepSeek 开放平台：GET https://api.deepseek.com/user/balance（Bearer），balance_infos[] 每项是一个币种钱包。
 const deepseekBalance = z.object({
   is_available: z.boolean(),
@@ -87,6 +102,7 @@ export type NativeRoute = { provider?: string; baseURL?: string; apiKey: string;
  * `@deepseek-ai/dsh-llm-deepseek` src/config.ts.
  */
 const providerDefaults: Record<string, { baseURL: string; apiKeyEnv: string }> = {
+  'kimi-coding': { baseURL: 'https://api.kimi.com/coding/v1', apiKeyEnv: 'KIMI_CODING_API_KEY' },
   'zai-coding-cn': { baseURL: 'https://open.bigmodel.cn/api/coding/paas/v4', apiKeyEnv: 'ZAI_CODING_CN_API_KEY' },
   zai: { baseURL: 'https://api.z.ai/api/coding/paas/v4', apiKeyEnv: 'ZAI_API_KEY' },
   deepseek: { baseURL: 'https://api.deepseek.com', apiKeyEnv: 'DEEPSEEK_API_KEY' },
@@ -110,6 +126,7 @@ export async function fetchNativeQuota(route: NativeRoute, fetchImpl: typeof fet
     return response.json();
   };
   if (host === 'open.bigmodel.cn') return parseZaiQuota(await get('https://open.bigmodel.cn/api/monitor/usage/quota/limit', route.apiKey), route.source);
+  if (host === 'api.kimi.com') return parseKimiQuota(await get('https://api.kimi.com/coding/v1/usages', `Bearer ${route.apiKey}`), route.source);
   if (host === 'api.z.ai') return parseZaiQuota(await get('https://api.z.ai/api/monitor/usage/quota/limit', `Bearer ${route.apiKey}`), route.source);
   if (host === 'api.deepseek.com') return parseDeepSeekBalance(await get('https://api.deepseek.com/user/balance', `Bearer ${route.apiKey}`), route.source);
   return null;
