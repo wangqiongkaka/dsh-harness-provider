@@ -23,11 +23,18 @@ test('plugin peers accept DSH 0.2.0-rc.1, rc.2, 0.2.1-rc.2 and 0.2.1-rc.3 and rc
   assert.ok(evaluatePluginCompatibility(manifest, {}, '0.2.1-rc.6'));
 });
 
-test('plugin peers accept DSH 0.2.2-rc.2 and rc.3 but reject the untested rc.4', async () => {
+test('plugin peers accept DSH 0.2.2-rc.2, rc.3 and rc.5 but reject the untested rc.4', async () => {
   const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
   assert.equal(evaluatePluginCompatibility(manifest, {}, '0.2.2-rc.2'), undefined);
   assert.equal(evaluatePluginCompatibility(manifest, {}, '0.2.2-rc.3'), undefined);
   assert.ok(evaluatePluginCompatibility(manifest, {}, '0.2.2-rc.4'));
+  assert.equal(evaluatePluginCompatibility(manifest, {}, '0.2.2-rc.5'), undefined);
+});
+
+test('plugin peers include the Cordis and Schemastery versions bundled with DSH 0.2.2-rc.5', async () => {
+  const { peerDependencies } = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.ok(peerDependencies['@deepseek-ai/cordis'].split(' || ').includes('4.1.0'));
+  assert.ok(peerDependencies['@deepseek-ai/schemastery'].split(' || ').includes('3.19.0'));
 });
 
 // DSH routes a linked plugin's imports to its own packages only for names the plugin declares as peers.

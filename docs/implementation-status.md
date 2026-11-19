@@ -1,5 +1,11 @@
 # Harness 能力补齐
 
+## 兼容 DSH 0.2.2-rc.5（2026-11-19，插件 0.2.8）
+
+- 9 个 DSH peer 精确加入 `0.2.2-rc.5`，并声明发行包使用的 Cordis `4.1.0` 和 Schemastery `3.19.0`。两个兼容回归均先在旧声明上失败，未验证的 `0.2.2-rc.4` 仍被拒绝。
+- 默认开发参考环境的 `npm run check` 通过类型检查、构建及全部 320 项测试。使用 rc.5 的 npm 依赖通过 9 项宿主与清单兼容测试。额外尝试的完整检查遇到 rc.5 投影声明与开发参考环境的类型差异，以及缺失的浏览器夹具依赖。
+- 使用 macOS rc.5 自带 CLI，在隔离 Web Profile 验证离线安装、Codex 和 Claude Code 连续对话与跨重启恢复、Codex 编辑重生成、回滚、分支和未确认请求保护，以及工作目录面板和侧栏会话图标。模型响应来自本地夹具，原生桌面窗口、Windows 和 Linux 未验证。
+
 ## Claude v2 子代理生命周期转换（2026-11-14）
 
 - 复现截图中的 `The ACP v2 surface does not translate subagent_spawned session updates yet`。Claude ACP 0.98.0 的 `node_modules/@agentclientprotocol/claude-agent-acp/dist/v2/session-update.js` 缺少 `subagent_spawned` 和 `subagent_state_update` 的转换；`dist/acp-agent.js` 的原生子代理历史回放会发布这两类事件，导致恢复也可能失败。
