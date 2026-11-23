@@ -45,7 +45,7 @@ const bindingSchema = z.object({
   linkedPaths: z.array(z.string().min(1)).optional(),
 }).strict().refine(value => !value.nativeRef || value.nativeRef.harnessId === value.harness, 'Harness identity mismatch');
 export type Binding = z.infer<typeof bindingSchema>;
-export const DISCUSSION_PERMISSION = { antigravity: undefined, codex: 'read-only', 'claude-code': 'plan' } as const;
+export const DISCUSSION_PERMISSION = { antigravity: 'plan', codex: 'read-only', 'claude-code': 'plan' } as const;
 const nativeDelegationSchema = z.object({
   version: z.literal(1), sessionId: z.string().min(1), harness: z.literal('dsh'), cwd: z.string().min(1), locked: z.boolean(), delegation: delegationSchema,
 }).strict();

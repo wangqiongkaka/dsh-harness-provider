@@ -1442,16 +1442,16 @@ test('工单 MCP 配置通过实际 ACP 请求传给创建和恢复，普通会�
  }finally{await adapter.close();await f.close();}
 });
 
-test('Antigravity 在未授权和只读讨论时均拒绝启动进程', async () => {
+test('Antigravity 在未授权或讨论权限不匹配时拒绝启动进程', async () => {
   let launches = 0;
   const adapter = new AcpAdapter({ environment: {}, profile: {
     harnessId: 'antigravity', spawn() { launches++; throw new Error('unexpected spawn'); },
   } });
   try {
-    for (const hints of [{}, {permissionModeId: 'plan'}, {permissionModeId: 'default', discussion: true}]) {
+    for (const [hints, pattern] of [[{}, /完全访问/], [{permissionModeId: 'plan'}, /完全访问/], [{discussion: true}, /计划模式/], [{permissionModeId: 'default', discussion: true}, /计划模式/]]) {
       const result = await adapter.open({kind: 'create', cwd: process.cwd(), ...hints});
       assert.equal(result.ok, false);
-      assert.match(result.error.message, /完全访问/);
+      assert.match(result.error.message, pattern);
     }
     assert.equal(launches, 0);
   } finally { await adapter.close(); }

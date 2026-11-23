@@ -842,8 +842,12 @@ class AcpSession implements HarnessSession {
 
   static async open(options: SessionOptions): Promise<AcpSession> {
     const { profile, input } = options;
-    if (profile.harnessId === 'antigravity' && (input.discussion || input.permissionModeId !== 'default')) {
-      throw new Error('Antigravity 自动批准工具调用，请先选择完全访问');
+    if (profile.harnessId === 'antigravity') {
+      if (input.discussion) {
+        if (input.permissionModeId !== 'plan') throw new Error('Antigravity 讨论会话需要计划模式');
+      } else if (input.permissionModeId !== 'default') {
+        throw new Error('Antigravity 自动批准工具调用，请先选择完全访问');
+      }
     }
     const modelEnvironment = await profile.modelEnvironment?.(input.model, input.thinkingOptionId);
     options = { ...options, environment: { ...options.environment, ...modelEnvironment }, additionalCatalog: await profile.modelCatalog?.() };
@@ -903,7 +907,12 @@ class AcpSession implements HarnessSession {
     if (!external && thinking && this.#catalogs.thinkingConfigId && thinking !== this.#catalogs.currentThinking && this.#catalogs.catalog.thinkingOptions.some(option => option.id === thinking)) await this.#setConfig(this.#catalogs.thinkingConfigId, thinking);
     const mode = input.permissionModeId ? profile.legacyPermissionModes?.[input.permissionModeId] ?? input.permissionModeId : undefined;
     // agy-acp persists a new session binding on set_config_option, even before its first prompt.
-    if (profile.harnessId === 'antigravity') await this.#setConfig('mode', 'default');
+    if (profile.harnessId === 'antigravity') {
+      await this.#setConfig('mode', input.discussion ? 'plan' : 'default');
+      if (input.discussion && this.#catalogs.configOptions.get('sandbox')?.currentValue === false) {
+        await this.#setConfig('sandbox', true);
+      }
+    }
     else if (mode && this.#catalogs.permissionModes?.modes.some(entry => entry.id === mode) && mode !== this.#catalogs.currentMode) await this.#setMode(mode);
     for (const [id, value] of Object.entries(input.configValues ?? {})) {
       if (!supportsModelConfig(this.harnessId, this.#state.effectiveModel?.id ?? input.model?.id, id)) continue;

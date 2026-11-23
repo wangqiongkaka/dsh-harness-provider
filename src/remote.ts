@@ -3,8 +3,8 @@ import type { InvocationDescriptor } from '@deepseek-ai/dsh-typert-protocol';
 
 /** The profile entry id `cordis.patch.yml` installs this plugin under; DSH Settings addresses its form by it. */
 export const SETTINGS_ENTRY = 'harness-plugin';
-const delegationTarget = z.enum(['dsh', 'codex', 'claude-code']);
-export const selection = z.enum([...delegationTarget.options, 'antigravity']);
+const externalHarness = z.enum(['codex', 'claude-code', 'antigravity']);
+export const selection = z.enum(['dsh', ...externalHarness.options]);
 export const address = z.object({ sessionId: z.string().min(1) }).strict();
 export const stateSchema = z.object({
   harness: selection, locked: z.boolean(), model: z.string().nullable(), thinking: z.string().nullable(), permission: z.string().nullable(),
@@ -25,7 +25,7 @@ export const stateSchema = z.object({
 export const selectRequest = address.extend({ harness: selection });
 export const modelRequest = address.extend({ model: z.string().min(1) });
 /** Without `harness`, the session's own Harness; with it, that Harness in the session's workspace, or in `workspaceId` (delegation picks). */
-export const modelsRequest = address.extend({ harness: z.enum(['codex', 'claude-code']).optional(), workspaceId: z.string().min(1).optional() });
+export const modelsRequest = address.extend({ harness: externalHarness.optional(), workspaceId: z.string().min(1).optional() });
 export const thinkingRequest = address.extend({ thinking: z.string().min(1) });
 export const permissionRequest = address.extend({ permission: z.string().min(1) });
 export const configRequest = address.extend({ configId: z.string().min(1), value: z.union([z.string(), z.boolean()]) });
@@ -72,21 +72,21 @@ const delegationAttachmentSchema = z.discriminatedUnion('type', [
 /** A model / thinking picked for one delegated session; omitted fields keep the Harness's last pick. */
 export const modelPick = z.object({ model: z.string().min(1).max(200).optional(), thinking: z.string().min(1).max(100).optional() }).strict();
 export const delegateFromUserRequest = address.extend({
-  requestId: z.string().min(1).max(128), harness: delegationTarget.optional(),
-  harnesses: z.array(delegationTarget).min(1, '至少选择一个 Harness').max(3).refine(values => new Set(values).size === values.length, '不能重复选择 Harness').optional(),
+  requestId: z.string().min(1).max(128), harness: selection.optional(),
+  harnesses: z.array(selection).min(1, '至少选择一个 Harness').max(4).refine(values => new Set(values).size === values.length, '不能重复选择 Harness').optional(),
   prompt: z.string().max(64_000), title: z.string().trim().min(1).max(80).optional(),
   reportBack: z.boolean().default(false), worktree: z.boolean().default(false), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
-  picks: z.partialRecord(z.enum(['codex', 'claude-code']), modelPick).default({}),
+  picks: z.partialRecord(externalHarness, modelPick).default({}),
   /** The project the delegated sessions run in; omitted keeps the source session's project. */
   workspaceId: z.string().min(1).optional(),
 }).refine(request => request.harnesses || request.harness, { message: '至少选择一个 Harness' })
   .refine(request => !request.harnesses || !request.harness, { message: '不能同时指定 harness 和 harnesses' })
   .transform(({ harness, harnesses, ...request }) => ({ ...request, harnesses: harnesses ?? [harness!] }))
   .refine(request => request.prompt.trim() || request.attachments.length, { message: '请输入任务或上传附件' })
-  .refine(request => !request.worktree || !request.harnesses.includes('dsh'), { message: '独立 worktree 仅支持 Codex / Claude Code' });
+  .refine(request => !request.worktree || !request.harnesses.includes('dsh'), { message: '独立 worktree 仅支持 Codex / Claude Code / Antigravity' });
 export const startDiscussionFromUserRequest = address.extend({
   requestId: z.string().min(1).max(128), prompt: z.string().max(64_000), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
-  harnesses: z.array(z.enum(['codex', 'claude-code'])).min(1, '至少选择一个 Harness').max(2)
+  harnesses: z.array(externalHarness).min(1, '至少选择一个 Harness').max(3)
     .refine(values => new Set(values).size === values.length, '不能重复选择 Harness').optional(),
 }).refine(request => request.prompt.trim() || request.attachments.length, { message: '请输入讨论任务或上传附件' });
 // No sessionId yet when a leading skill of the source session runs first; the delegation starts after that turn.

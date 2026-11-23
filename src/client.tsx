@@ -100,9 +100,9 @@ const zh = {
   project: '项目', projectCurrent: '当前项目', pickProject: '选择委派的目标项目',
   linkBrowse: '选择其他目录…', linkHere: '关联此目录', linkUp: '上一级', linkNoFolders: '没有子文件夹', linkTruncated: '文件夹过多，仅显示前 500 个',
   linked: '关联项目', pickLinked: '选择本会话关联的项目', linkedNone: '没有其他已添加的项目', linkedHint: 'Harness 可按当前权限直接读写关联项目的目录，下一轮生效',
-  worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code',
+  worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code / Antigravity',
   pickModel: '{harness} 的模型与推理强度', pickDefault: '默认',
-  settingsNav: 'Harness', settingsIntro: '接入 Codex / Claude Code 的默认行为。修改立即保存到当前 Profile 的配置文件；进展反馈说明、讨论等待上限和调试输出在原生进程下次启动时生效。',
+  settingsNav: 'Harness', settingsIntro: '接入 Codex / Claude Code / Antigravity 的默认行为。修改立即保存到当前 Profile 的配置文件；进展反馈说明、讨论等待上限和调试输出在原生进程下次启动时生效。',
   settingsReadOnly: '当前连接不能修改配置，以下内容只读。', settingsUnavailable: '当前 Profile 没有提供本插件的配置。', settingsReset: '恢复默认',
   settingsRejected: '未保存：取值无效或超出范围。',
   'settingsGroup.sessions': '会话', 'settingsGroup.delegation': '委派与讨论', 'settingsGroup.feedback': '进展反馈', 'settingsGroup.advanced': '高级',
@@ -111,7 +111,7 @@ const zh = {
   'setting.idleCloseSeconds': '空闲回收（秒）', 'setting.idleCloseSeconds.hint': '会话不在屏幕上且空闲超过该时长后关闭原生进程，下一轮按原生会话恢复；仍有后台任务时保留。',
   'setting.delegateHarnesses': '委派默认目标', 'setting.delegateHarnesses.hint': '进入委派模式时预选的 Harness。',
   'setting.delegateReportBack': '委派默认回传', 'setting.delegateReportBack.hint': '进入委派模式时预选“完成后回传到当前会话”。',
-  'setting.delegateWorktree': '委派默认使用独立 worktree', 'setting.delegateWorktree.hint': '仅对 Codex / Claude Code 生效；默认目标包含 DSH 原生时不预选。',
+  'setting.delegateWorktree': '委派默认使用独立 worktree', 'setting.delegateWorktree.hint': '仅对 Codex / Claude Code / Antigravity 生效；默认目标包含 DSH 原生时不预选。',
   'setting.discussHarnesses': '讨论默认参与者', 'setting.discussHarnesses.hint': '进入讨论模式时预选的 Harness。',
   'setting.progressFeedback': '注入进展反馈说明', 'setting.progressFeedback.hint': '要求 Codex / Claude Code 在执行过程中用中文汇报进展。',
   'setting.progressFeedbackText': '进展反馈说明', 'setting.progressFeedbackText.hint': '作为系统说明交给新启动的原生会话，不进入用户消息。',
@@ -166,9 +166,9 @@ const en: Record<keyof typeof zh,string> = {
   project:'Project', projectCurrent:'Current project', pickProject:'Choose the project to delegate to',
   linkBrowse:'Choose another folder…', linkHere:'Link this folder', linkUp:'Parent folder', linkNoFolders:'No subfolders', linkTruncated:'Too many folders; showing the first 500',
   linked:'Linked projects', pickLinked:'Choose the projects linked to this session', linkedNone:'No other projects added', linkedHint:'The Harness can read and write linked project directories under the current permission mode, from the next turn',
-  worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex and Claude Code only',
+  worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex, Claude Code, and Antigravity only',
   pickModel:'{harness} model and effort', pickDefault:'Default',
-  settingsNav:'Harness', settingsIntro:'Defaults for Codex and Claude Code. Changes save to this profile\'s configuration at once; the progress feedback contract, the discussion wait and debug output apply when a native process next starts.',
+  settingsNav:'Harness', settingsIntro:'Defaults for Codex, Claude Code, and Antigravity. Changes save to this profile\'s configuration at once; the progress feedback contract, the discussion wait and debug output apply when a native process next starts.',
   settingsReadOnly:'This connection cannot change configuration; the values below are read-only.', settingsUnavailable:'This profile does not serve the plugin\'s configuration.', settingsReset:'Reset',
   settingsRejected:'Not saved: the value is invalid or out of range.',
   'settingsGroup.sessions':'Sessions', 'settingsGroup.delegation':'Delegation and discussion', 'settingsGroup.feedback':'Progress feedback', 'settingsGroup.advanced':'Advanced',
@@ -177,7 +177,7 @@ const en: Record<keyof typeof zh,string> = {
   'setting.idleCloseSeconds':'Idle close (seconds)', 'setting.idleCloseSeconds.hint':'An off-screen session idle this long closes its native process and resumes on the next turn; background tasks keep it open.',
   'setting.delegateHarnesses':'Default delegation targets', 'setting.delegateHarnesses.hint':'Harnesses preselected when delegation mode opens.',
   'setting.delegateReportBack':'Report back by default', 'setting.delegateReportBack.hint':'Preselects "Report back to this session when complete".',
-  'setting.delegateWorktree':'Isolated worktree by default', 'setting.delegateWorktree.hint':'Codex and Claude Code only; not preselected while the targets include native DSH.',
+  'setting.delegateWorktree':'Isolated worktree by default', 'setting.delegateWorktree.hint':'Codex, Claude Code, and Antigravity only; not preselected while the targets include native DSH.',
   'setting.discussHarnesses':'Default discussion participants', 'setting.discussHarnesses.hint':'Harnesses preselected when discussion mode opens.',
   'setting.progressFeedback':'Progress feedback contract', 'setting.progressFeedback.hint':'Asks Codex and Claude Code to report progress in Chinese while they work.',
   'setting.progressFeedbackText':'Contract text', 'setting.progressFeedbackText.hint':'Given to newly started native sessions as system instructions, never as a user message.',
@@ -593,7 +593,7 @@ function setTaskMode(sessionId: string, task?: CommandClaim) {
 function TaskHarnessSelector({ selected, onChange, discussion = false, disabled = false, t }: { selected: State['harness'][]; onChange: (selected: State['harness'][]) => void; discussion?: boolean; disabled?: boolean; t: T }) {
   const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code', antigravity: 'Antigravity' };
   return <div className="hp-delegate-harness" role="group" aria-label={t('harness')}>
-    {(Object.keys(names) as State['harness'][]).filter(id => id !== 'antigravity').map(harness => <button key={harness} type="button" role="checkbox" aria-checked={selected.includes(harness)}
+    {(Object.keys(names) as State['harness'][]).map(harness => <button key={harness} type="button" role="checkbox" aria-checked={selected.includes(harness)}
       disabled={disabled || (discussion && harness === 'dsh')} title={discussion && harness === 'dsh' ? t('discussNative') : undefined}
       onClick={() => { const next = selected.includes(harness) ? selected.filter(value => value !== harness) : [...selected, harness]; if (next.length) onChange(next); }}>
       {selected.includes(harness) && <Check />}{names[harness]}
@@ -616,7 +616,7 @@ function DelegatePick({ harness, pick, load, disabled, onChange, t }: { harness:
       defaultThinkingOptionId: null, permissionModes: [], defaultPermissionModeId: null, configOptions: [], error: error instanceof Error ? error.message : String(error) }); });
     return () => { live = false; };
   }, [open, catalog, load, harness]);
-  const name = harness === 'codex' ? 'Codex' : 'Claude Code';
+  const name = names[harness];
   const model = catalog?.models.find(entry => entry.id === pick.model);
   const modelLabel = pick.model ? model?.label ?? pick.model : t('pickDefault');
   // Without a pick the session starts on the catalog's default, so its thinking levels and default level are the ones offered.
@@ -935,7 +935,7 @@ function QuotaChip({ quota, t }: { quota: Quota | undefined; t: T }) {
   // External Harness quota is served stale-while-revalidate (a probe spawns a CLI process): it follows turns, not the poll.
   // One line in the panel; a longer plan name ends in an ellipsis, with the whole text on hover.
   const foot = t('quotaSource', { source: quota.kind === 'windows' && quota.plan ? `${quota.source} · ${quota.plan}` : quota.source,
-    sync: quota.source === 'codex' || quota.source === 'claude-code' ? t('sync.turn') : t('sync.poll') });
+    sync: quota.source === 'codex' || quota.source === 'claude-code' || quota.source === 'antigravity' ? t('sync.turn') : t('sync.poll') });
   return <div ref={root} className="hp-anchor">
     <button type="button" className={`hp-chip${level}`} aria-label={t('quotaAria')} aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(v => !v)}>
       {trigger}<Chevron open={open} />
@@ -1645,8 +1645,8 @@ ${nativeContextColors}
 .hp-delegate[data-hp-mode]>strong{color:var(--hp-mode-color);white-space:nowrap}
 /* Task modes ring the composer card of the same seat in their command color. */
 [data-composer-seat]:has(.hp-delegate[data-hp-mode]) [data-composer-card]{--dsw-elevation-stroke-color:var(--hp-mode-color);box-shadow:0 0 0 1.5px var(--hp-mode-color),var(--dsw-elevation-soft,0 0 #0000)}
-.hp-delegate-harness{display:flex;padding:2px;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover)}
-.hp-delegate-harness button{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;cursor:pointer}
+.hp-delegate-harness{display:flex;flex-wrap:wrap;padding:2px;border-radius:9px;background:var(--dsw-alias-interactive-bg-hover)}
+.hp-delegate-harness button{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 9px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;white-space:nowrap;cursor:pointer}
 .hp-delegate-harness button:disabled{opacity:.4;cursor:not-allowed}
 .hp-delegate-harness button svg{width:13px;height:13px;flex:none}
 .hp-delegate-harness button[aria-checked=true]{background:var(--dsw-specific-menu);color:var(--dsw-alias-label-primary)}

@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { modelPick } from './remote.js';
 
 export const delegationRequest = z.object({
-  requestId: z.string().min(1).max(128), harness: z.enum(['dsh', 'codex', 'claude-code']),
+  requestId: z.string().min(1).max(128), harness: z.enum(['dsh', 'codex', 'claude-code', 'antigravity']),
   prompt: z.string().trim().min(1).max(64_000), title: z.string().trim().min(1).max(80).optional(), reportBack: z.boolean().default(false),
 }).extend(modelPick.shape).strict();
 
@@ -15,7 +15,7 @@ export const directoryRequest = z.object({ path: z.string().min(1).refine(isAbso
 
 export const delegationReadRequest = z.object({ sessionId: z.string().min(1), offset: z.number().int().nonnegative().default(0), limit: z.number().int().min(1).max(64_000).default(32_000), throughSeq: z.number().int().nonnegative().optional() }).strict();
 export const discussionRequest = z.object({ assignments: z.array(z.object({
-  harness: z.enum(['dsh', 'codex', 'claude-code']), role: z.string().trim().min(1).max(80).optional(), task: z.string().trim().min(1).max(64_000),
+  harness: z.enum(['dsh', 'codex', 'claude-code', 'antigravity']), role: z.string().trim().min(1).max(80).optional(), task: z.string().trim().min(1).max(64_000),
 }).extend(modelPick.shape).strict()).min(1, '至少分配给 1 个参与者').max(4, '讨论最多支持 4 个参与者') }).strict();
 
 /** Loopback-only, per-source credentials; no Host Runtime or global CLI configuration. */
@@ -99,7 +99,7 @@ export function delegationInstructions(): string {
   return `\n\n[DSH 会话能力，由宿主提供]
 仅当用户明确要求修改当前 DSH 会话标题时，根据上下文选择简洁标题，调用 ${command} rename '{"title":"简洁标题"}'。只修改当前 DSH 标题，不修改原生会话标题；参数只能有 title，不要传 sessionId。等待返回接受的 title 和 seq 后才能声称成功；失败时如实告知，不要声称已改名。
 只有用户可以通过界面中的委派指令创建独立会话；不要自行创建或建议调用创建入口。
-仅当用户在当前轮明确使用 /discuss 开启讨论模式时，调用 ${command} discuss '{"assignments":[{"harness":"codex","role":"角色","task":"分工"}]}'。根据任务并发性自行选择 1–4 个 Codex 或 Claude Code 参与者（harness 为 codex 或 claude-code，DSH 原生暂不支持只读讨论）；一个参与者直接执行，多个参与者会自动互评一轮。参与者只读，不能修改代码。每轮只调用一次，等待返回后综合结论。
+仅当用户在当前轮明确使用 /discuss 开启讨论模式时，调用 ${command} discuss '{"assignments":[{"harness":"codex","role":"角色","task":"分工"}]}'。根据任务并发性自行选择 1–4 个 Codex、Claude Code 或 Antigravity 参与者（harness 为 codex、claude-code 或 antigravity，DSH 原生暂不支持只读讨论）；一个参与者直接执行，多个参与者会自动互评一轮。参与者只读，不能修改代码。每轮只调用一次，等待返回后综合结论。
 可按每项分工的复杂度为参与者加上 model 与 thinking：先运行 ${command} models 查询各 Harness 可用的模型与推理强度，简单分工选较轻的模型或较低强度，复杂分工选更强的模型或更高强度；省略时沿用该 Harness 上次的选择。
 仅在收到委派完成通知后，使用 ${command} read '<sessionId>' 读取状态与回复；不要执行 sleep 或定时 read 轮询。结果按字符分页；nextOffset 非空时，用 read '{"sessionId":"目标 ID","offset":下一偏移,"throughSeq":首次返回的 throughSeq}' 继续读取，直到 nextOffset 为 null 才算读完。
 状态为 not-started 或 interrupted 时，提醒用户进入目标会话检查和处理，不要自动重发。

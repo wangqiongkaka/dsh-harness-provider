@@ -124,6 +124,7 @@ const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>
 /** Full access on either side maps to full access on the other. */
 const FULL_ACCESS: Record<Binding['harness'], string> = { antigravity: 'default', codex: 'agent-full-access', 'claude-code': 'bypassPermissions' };
 const AUTOMATIC_PERMISSION: Record<Binding['harness'], string> = { antigravity: 'blocked', codex: 'agent', 'claude-code': 'auto' };
+const HARNESS_NAMES: Record<'dsh' | Binding['harness'], string> = { dsh: 'DSH 原生', codex: 'Codex', 'claude-code': 'Claude Code', antigravity: 'Antigravity' };
 
 /**
  * One DSH child session as a sidebar subagent: its first prompt is the task, its messages, reasoning and tool calls the
@@ -326,16 +327,16 @@ export class HarnessService extends TypertRemoteService {
         execute: async (args, exec) => { if (!exec.agent) throw new Error('查询需要来源会话'); return JSON.stringify(await this.readDelegation(exec.agent.id, args)); },
       }));
       scope.tools.register(defineTool({
-        name: 'harness_discussion_dispatch', description: '仅当用户在当前轮明确使用 /discuss 开启讨论模式时调用一次。根据任务并发性选择 1–4 个 Codex 或 Claude Code 只读参与者并给出各自分工；DSH 原生暂不支持。1 个直接执行，多个会话会自动互评一轮。等待返回后由你综合最终答案。普通委派不得调用此入口。可按每项分工的复杂度填写 model 与 thinking（取值先用 harness_models 查询；简单分工选较轻的模型或较低强度，复杂分工选更强的模型或更高强度），省略时沿用该 Harness 上次的选择。',
+        name: 'harness_discussion_dispatch', description: '仅当用户在当前轮明确使用 /discuss 开启讨论模式时调用一次。根据任务并发性选择 1–4 个 Codex、Claude Code 或 Antigravity 只读参与者并给出各自分工；DSH 原生暂不支持。1 个直接执行，多个会话会自动互评一轮。等待返回后由你综合最终答案。普通委派不得调用此入口。可按每项分工的复杂度填写 model 与 thinking（取值先用 harness_models 查询；简单分工选较轻的模型或较低强度，复杂分工选更强的模型或更高强度），省略时沿用该 Harness 上次的选择。',
         parameters: { assignments: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
-          harness: { type: 'string', required: true, enum: ['dsh', 'codex', 'claude-code'] }, role: { type: 'string' }, task: { type: 'string', required: true },
+          harness: { type: 'string', required: true, enum: ['dsh', 'codex', 'claude-code', 'antigravity'] }, role: { type: 'string' }, task: { type: 'string', required: true },
           model: { type: 'string' }, thinking: { type: 'string' },
         } } } },
         output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
         execute: async (args, exec) => { if (!exec.agent) throw new Error('讨论需要来源会话'); return JSON.stringify(await this.discuss(exec.agent.id, args)); },
       }));
       scope.tools.register(defineTool({
-        name: 'harness_models', description: '查询 Codex / Claude Code 在当前工作区可用的模型与推理强度，供 harness_discussion_dispatch 为参与者填写 model 与 thinking。',
+        name: 'harness_models', description: '查询 Codex / Claude Code / Antigravity 在当前工作区可用的模型与推理强度，供 harness_discussion_dispatch 为参与者填写 model 与 thinking。',
         parameters: {},
         output: { schema: { type: 'string' }, render: (_args, text) => [{ type: 'text', text }] },
         execute: async (_args, exec) => { if (!exec.agent) throw new Error('查询需要来源会话'); return JSON.stringify(await this.delegationModels(exec.agent.id)); },
@@ -709,13 +710,15 @@ export class HarnessService extends TypertRemoteService {
             preset = current && presets.names.includes(current) ? current : presets.names.find(name => presets.resolve(name).sandbox === sandbox);
             if (!preset) throw new Error('DSH 原生不支持来源会话的权限模式');
           }
-          if (admitted?.worktree && request.harness === 'dsh') throw new Error('独立 worktree 仅支持 Codex / Claude Code');
+          if (admitted?.worktree && request.harness === 'dsh') throw new Error('独立 worktree 仅支持 Codex / Claude Code / Antigravity');
           if (request.harness !== 'dsh') {
             const inspection = await this.inspection({ version: 1, sessionId, harness: request.harness, cwd, locked: false });
             if ('error' in inspection) throw new Error(inspection.error);
             const parentBinding = await this.bindings.read(source);
             const nativeSandbox = this.ctx.get('sessionProjections')?.stateOf(parent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
-            const permission = admitted?.discussion ? DISCUSSION_PERMISSION[request.harness] : !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox] ?? AUTOMATIC_PERMISSION[request.harness]
+            const permission = admitted?.discussion ? DISCUSSION_PERMISSION[request.harness]
+              : request.harness === 'antigravity' ? FULL_ACCESS.antigravity
+              : !parentBinding && nativeSandbox ? NATIVE_PERMISSION_MODES[request.harness][nativeSandbox] ?? AUTOMATIC_PERMISSION[request.harness]
               : parentBinding?.harness === request.harness ? parentBinding.permission ?? AUTOMATIC_PERMISSION[request.harness]
               : parentBinding && parentBinding.permission === FULL_ACCESS[parentBinding.harness] ? FULL_ACCESS[request.harness] : AUTOMATIC_PERMISSION[request.harness];
             if (permission && !inspection.permissionModes?.modes.some(mode => mode.id === permission)) throw new Error('目标 Harness 不支持来源会话的权限模式');
@@ -741,7 +744,7 @@ export class HarnessService extends TypertRemoteService {
               ...(worktree ? { cwd: worktree.cwd } : {}),
             });
             if (this.ctx.get('sessionTitle')) await this.ctx.sessionController.rename({ sessionId,
-              title: request.title ?? `${request.harness === 'dsh' ? 'DSH 原生' : request.harness === 'codex' ? 'Codex' : 'Claude Code'} · ${request.prompt.split('\n').find(line => line.trim())!.trim().slice(0, 40)}` });
+              title: request.title ?? `${HARNESS_NAMES[request.harness]} · ${request.prompt.split('\n').find(line => line.trim())!.trim().slice(0, 40)}` });
           });
         }
         if (request.harness === 'dsh') {
@@ -1191,7 +1194,7 @@ export class HarnessService extends TypertRemoteService {
    */
   private async startingModel(harness: Binding['harness'], cwd: string, pick: z.infer<typeof modelPick>): Promise<Pick<Binding, 'model' | 'thinking'> | undefined> {
     if (!pick.model && !pick.thinking) return undefined;
-    const name = harness === 'codex' ? 'Codex' : 'Claude Code';
+    const name = HARNESS_NAMES[harness];
     const catalog = await this.catalog({ version: 1, sessionId: '', harness, cwd, locked: false });
     if ('error' in catalog) throw new Error(catalog.error);
     if (pick.model && !catalog.models.some(model => model.ref.id === pick.model)) {
@@ -1213,7 +1216,8 @@ export class HarnessService extends TypertRemoteService {
   async delegationModels(source: string) {
     const cwd = (await this.agent(source)).session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
-    return Object.fromEntries(await Promise.all((['codex', 'claude-code'] as const).map(async harness => {
+    const targets = (['codex', 'claude-code', 'antigravity'] as const).filter(harness => Boolean(this.adapters[harness]));
+    return Object.fromEntries(await Promise.all(targets.map(async harness => {
       const catalog = await this.catalog({ version: 1, sessionId: source, harness, cwd, locked: false })
         .catch(error => ({ error: error instanceof Error ? error.message : String(error) }));
       if ('error' in catalog) return [harness, { error: catalog.error }];
