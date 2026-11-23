@@ -196,13 +196,16 @@ export function antigravityAccountSnapshot(raw: string): HarnessAccountSnapshot 
     if (!group || !metric || !remaining || !/^\d+(?:\.\d+)?%$/.test(remaining)) return [];
     const percent = Number.parseFloat(remaining);
     if (percent > 100) return [];
-    return [{ product: group + ' · ' + metric.replace(/ Remaining$/i, ''), usagePercent: 100 - percent,
+    return [{ group, metric, product: group + ' · ' + metric.replace(/ Remaining$/i, ''), usagePercent: 100 - percent,
       ...(resetsAt && Number.isFinite(Date.parse(resetsAt)) ? { resetsAt } : {}) }];
   });
-  const [first, ...productUsage] = rows;
-  if (!first) return null;
+  if (!rows.length) return null;
+  const geminiFiveHour = rows.findIndex(row => /^gemini models\b/i.test(row.group) && /five hour/i.test(row.metric));
+  const fallbackGemini = geminiFiveHour >= 0 ? geminiFiveHour : rows.findIndex(row => /gemini/i.test(row.group) && /five hour/i.test(row.metric));
+  const first = rows[fallbackGemini >= 0 ? fallbackGemini : 0]!;
+  const productUsage = rows.filter(row => row !== first).map(({ product, usagePercent, resetsAt }) => ({ product, usagePercent, ...(resetsAt ? { resetsAt } : {}) }));
   return { credits: { label: first.product, usedPercent: first.usagePercent,
-    periodType: /weekly/i.test(first.product) ? 'seven_day' : /five hour/i.test(first.product) ? 'five_hour' : 'unknown',
+    periodType: /five hour/i.test(first.metric) ? 'five_hour' : /weekly/i.test(first.metric) ? 'seven_day' : 'unknown',
     ...(first.resetsAt ? { resetsAt: first.resetsAt } : {}), productUsage } };
 }
 

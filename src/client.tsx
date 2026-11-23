@@ -84,6 +84,8 @@ const zh = {
   'window.five_hour': '5 小时', 'window.seven_day': '本周', 'window.weekly': '本周', 'window.monthly': '本月', 'window.month_total': '月度总额度', 'window.month_code': '月度编程额度', 'window.unknown': '额度',
   'window.5-hour window': '5 小时', 'window.7-day window': '本周', 'window.Opus · 7-day': 'Opus 本周', 'window.Sonnet · 7-day': 'Sonnet 本周',
   'window.OAuth apps · 7-day': 'OAuth 应用本周',
+  'window.Gemini Models · Five Hour Limit': 'Gemini 5 小时', 'window.Gemini Models · Weekly Limit': 'Gemini 本周',
+  'window.Claude and GPT models · Five Hour Limit': 'Claude / GPT 5 小时', 'window.Claude and GPT models · Weekly Limit': 'Claude / GPT 本周',
   subagents: '子代理', subagentsDescription: '查看子代理的运行状态和内容',
   subagentsEmpty: '当前会话还没有子代理活动。Codex / Claude Code 会话在本次运行中打开后才会显示其子代理。', subagentNoActivity: '暂无内容',
   'subagent.running': '运行中', 'subagent.completed': '已完成', 'subagent.failed': '失败', 'subagent.cancelled': '已取消',
@@ -150,6 +152,8 @@ const en: Record<keyof typeof zh,string> = {
   'window.five_hour':'5-hour', 'window.seven_day':'Weekly', 'window.weekly':'Weekly', 'window.monthly':'Monthly', 'window.month_total':'Monthly total', 'window.month_code':'Monthly coding', 'window.unknown':'Quota',
   'window.5-hour window':'5-hour', 'window.7-day window':'Weekly', 'window.Opus · 7-day':'Opus weekly', 'window.Sonnet · 7-day':'Sonnet weekly',
   'window.OAuth apps · 7-day':'OAuth apps weekly',
+  'window.Gemini Models · Five Hour Limit':'Gemini 5-hour', 'window.Gemini Models · Weekly Limit':'Gemini weekly',
+  'window.Claude and GPT models · Five Hour Limit':'Claude / GPT 5-hour', 'window.Claude and GPT models · Weekly Limit':'Claude / GPT weekly',
   subagents:'Subagents', subagentsDescription:'Status and activity of subagents',
   subagentsEmpty:'No subagent activity in this session yet. Codex / Claude Code subagents appear once the session is open in this run.', subagentNoActivity:'Nothing yet',
   'subagent.running':'Running', 'subagent.completed':'Completed', 'subagent.failed':'Failed', 'subagent.cancelled':'Cancelled',
@@ -274,10 +278,17 @@ const icons: Record<string, ReactNode> = {
 };
 const windowIcon = (id: string) => id === 'five_hour' ? icons.clock : id.startsWith('product:') && !id.includes('7-day window') ? icons.sparkle : icons.calendar;
 const windowLabel = (t: T, id: string, label: string) => {
+  const named = `window.${label}` as Key;
+  if (named in zh) return t(named);
   const key = `window.${id.startsWith('product:') ? label : id}` as Key;
   if (key in zh) return t(key);
   const generic = label.match(/^(.*) · 7-day$/);
-  return generic ? `${generic[1]} ${t('window.seven_day')}` : label;
+  if (generic) return `${generic[1]} ${t('window.seven_day')}`;
+  const antigravity = label.match(/^(.*) · (?:(.*) )?(Weekly|Five Hour) Limit$/i);
+  if (antigravity && (!antigravity[2] || antigravity[2].toLowerCase() === antigravity[1]!.toLowerCase())) {
+    return `${antigravity[1]} ${t(antigravity[3]!.toLowerCase() === 'weekly' ? 'window.seven_day' : 'window.five_hour')}`;
+  }
+  return label;
 };
 const effortLabel = (t: T, id: string, fallback: string) => { const key = `effort.${id.startsWith('dsh~') ? fallback.toLowerCase() : id}` as Key; return key in zh ? t(key) : fallback; };
 const modeLabel = (t: T, id: string, fallback: string) => { const key = `mode.${id}` as Key; return key in zh ? t(key) : fallback; };

@@ -428,3 +428,60 @@ createRoot(document.querySelector('#root')).render(<App />);`,
     await browser.close();
   }
 });
+
+test('Antigravity 账户额度默认优先展示 Gemini 5 小时窗口并在面板保留其余分组', async () => {
+  const { antigravityAccountSnapshot } = await import('../dist/acp-profiles.js');
+  const { accountQuota } = await import('../dist/dsh.js');
+  const raw = [
+    'Gemini Models\tWeekly Limit Remaining\t93%\t2026-11-30T09:50:04Z',
+    'Gemini Models\tFive Hour Limit Remaining\t74%\t2026-11-23T14:50:04Z',
+    'Claude and GPT models\tWeekly Limit Remaining\t46%\t2026-11-30T10:26:13Z',
+    'Claude and GPT models\tFive Hour Limit Remaining\t0%\t2026-11-23T15:26:13Z',
+    'Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t94%\t2026-11-30T10:27:15Z',
+  ].join('\n');
+  const account = antigravityAccountSnapshot(raw);
+  assert.equal(account.credits.label, 'Gemini Models · Five Hour Limit');
+  assert.equal(account.credits.periodType, 'five_hour');
+  assert.equal(account.credits.usedPercent, 26);
+  assert.equal(account.credits.resetsAt, '2026-11-23T14:50:04Z');
+  assert.deepEqual(account.credits.productUsage.map(item => item.product), [
+    'Gemini Models · Weekly Limit',
+    'Claude and GPT models · Weekly Limit',
+    'Claude and GPT models · Five Hour Limit',
+    'Gemini 4 Argon · Gemini 4 Argon Weekly Limit',
+  ]);
+  const quota = accountQuota(account, 'antigravity');
+
+  const require = createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+  const nodePaths = [dirname(dirname(require.resolve('react/package.json'))), dirname(dirname(require.resolve('react-dom/package.json')))];
+  const bundle = await build({
+    stdin: {
+      contents: `${await readFile('src/client.tsx', 'utf8')}
+import { createRoot } from 'react-dom/client';
+document.head.append(Object.assign(document.createElement('style'), { textContent: styles }));
+const t = (key, params = {}) => Object.entries(params).reduce((text, [name, value]) => text.replaceAll('{' + name + '}', value), zh[key] ?? key);
+createRoot(document.querySelector('#root')).render(<QuotaChip quota={${JSON.stringify(quota)}} t={t} />);`,
+      resolveDir: resolve('src'), loader: 'tsx',
+    },
+    bundle: true, write: false, platform: 'browser', format: 'iife', jsx: 'automatic', nodePaths, logLevel: 'warning',
+    external: ['@deepseek-ai/dsh-client-ui-primitives'],
+  });
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent('<div id="root"></div>');
+    await page.addScriptTag({ content: bundle.outputFiles[0].text });
+    const chip = page.locator('.hp-chip');
+    assert.equal((await chip.textContent()).trim(), 'Gemini 5 小时 74%');
+    await chip.click();
+    assert.deepEqual(await page.locator('.hp-panel-title').allTextContents(), [
+      'Gemini 5 小时',
+      'Gemini 本周',
+      'Claude / GPT 本周',
+      'Claude / GPT 5 小时',
+      'Gemini 4 Argon 本周',
+    ]);
+  } finally {
+    await browser.close();
+  }
+});
