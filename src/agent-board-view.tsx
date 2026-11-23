@@ -49,8 +49,6 @@ export const agentsZh = {
   'agents.completionsLoading': '正在读取任务完成记录…',
   'agents.completionsError': '任务完成记录读取失败，请重试',
   'agents.completionsRetry': '重试',
-  'agents.expand': '展开其余 {n} 个会话',
-  'agents.collapse': '收起',
   'agents.pending.approval': '等待审批',
   'agents.pending.plan-review': '计划待审',
   'agents.pending.question': '等待回答',
@@ -95,8 +93,6 @@ export const agentsEn: Record<keyof typeof agentsZh, string> = {
   'agents.completionsLoading': 'Loading task completion records…',
   'agents.completionsError': 'Could not load completion records. Please retry.',
   'agents.completionsRetry': 'Retry',
-  'agents.expand': 'Show {n} more sessions',
-  'agents.collapse': 'Show less',
   'agents.pending.approval': 'Waiting for approval',
   'agents.pending.plan-review': 'Plan awaiting review',
   'agents.pending.question': 'Waiting for answer',
@@ -184,9 +180,6 @@ function activeRefusal(reason: unknown): boolean {
     && (reason as Error & { rpcError?: { code?: string } }).rpcError?.code === 'workspace/session-active'
 }
 
-/** Rows a collapsed group keeps in view where a phone drawer (dsh-remote-control) folds the rest. */
-const COLLAPSED_ROWS = 5
-
 /** Most Session ids one harness-provider `harnesses` call accepts. */
 const MARK_BATCH = 1000
 
@@ -233,8 +226,6 @@ const STYLE = ''
   // Five 48px rows plus the card's padding; further rows stay reachable by native scrolling.
   + '.hp-agents-group > div{padding:4px;max-height:248px;box-sizing:border-box;overflow-y:auto;'
   + 'overscroll-behavior-y:contain;scrollbar-width:thin;border-radius:16px;box-shadow:inset 0 0 0 0.5px var(--dsw-alias-border-l3)}'
-  // The desktop scrollport already reaches every row; a phone drawer shows this control and folds the rest.
-  + '.hp-agents-overflow{display:none}'
 
 /**
  * Keep a host element right after New Session in the sidebar column.
@@ -478,7 +469,6 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
   const marks = useMarks(candidates, props.harnesses)
   const resident = useMemo(() => residentRows(list, statuses, marks), [list, statuses, marks])
   const [filter, setFilter] = useState<AgentState>('running')
-  const [expanded, setExpanded] = useState(false)
   const [completionLoading, setCompletionLoading] = useState(false)
   const [completionError, setCompletionError] = useState(false)
   const [completionAttempt, retryCompletions] = useState(0)
@@ -548,7 +538,7 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
         <div className="hp-agents-tiles">
           {AGENT_STATES.map(state => (
             <Tile key={state} state={state} count={counts[state]} selected={filter === state} t={t}
-              pick={() => { setFilter(state); setExpanded(false) }} />
+              pick={() => { setFilter(state) }} />
           ))}
         </div>
         <div className="hp-agents-list" role="region" aria-label={t(`agents.${filter}`)}>
@@ -558,15 +548,9 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
           </div>}
           {shown.length === 0 && !(filter === 'done' && (completionLoading || completionError)) && <p className="hp-agents-empty">{t(`agents.empty.${filter}`)}</p>}
           {shown.length > 0 && (
-            <section className="hp-agents-group" data-collapsed={!expanded && shown.length > COLLAPSED_ROWS ? '' : undefined}>
+            <section className="hp-agents-group">
               <h3><StateDot state={DOT[filter]} size={filter === 'running' ? 12 : 10} />{t(`agents.${filter}`)}</h3>
-              <div>{shown.map(row => <Row key={row.id} row={row} mark={marks.get(row.id)} pinned={pinned.has(row.id)} unread={row.state === 'done' && statuses.get(row.id)?.completionUnread === true} now={now} t={t} open={openSession} act={act} />)}
-                {shown.length > COLLAPSED_ROWS && (
-                  <button type="button" className="hp-agents-overflow" aria-expanded={expanded} onClick={() => { setExpanded(value => !value) }}>
-                    {expanded ? t('agents.collapse') : t('agents.expand', { n: shown.length - COLLAPSED_ROWS })}
-                  </button>
-                )}
-              </div>
+              <div>{shown.map(row => <Row key={row.id} row={row} mark={marks.get(row.id)} pinned={pinned.has(row.id)} unread={row.state === 'done' && statuses.get(row.id)?.completionUnread === true} now={now} t={t} open={openSession} act={act} />)}</div>
             </section>
           )}
         </div>

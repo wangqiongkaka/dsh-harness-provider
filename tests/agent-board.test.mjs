@@ -344,49 +344,10 @@ for (const state of ['pending', 'running', 'done']) {
     expect(getComputedStyle(scroller).maxHeight).toBe('248px');
     expect(getComputedStyle(scroller).overflowY).toBe('auto');
     expect(getComputedStyle(scroller.firstElementChild).height).toBe('48px');
-    click([...scroller.querySelectorAll('.hp-agents-item')].at(-1)?.querySelector('[data-hp-agents-pick]'));
+    click(scroller.lastElementChild?.querySelector('[data-hp-agents-pick]'));
     expect(opened).toEqual(['session0']);
   }, { arg: state }));
 }
-
-test('more than five rows mark the group collapsed and offer an expand control that the desktop scrollport hides', () => inPage(async () => {
-  column();
-  const ids = Array.from({ length: 7 }, (_, index) => `session${index}`);
-  const sessions = { ...list, ids, byId: { ...list.byId, ...Object.fromEntries(ids.map((id, index) => [id, { ...list.byId.idle, displayTitle: id, updatedAt: index }])) } };
-  render(sessions, {}, new Map(ids.map(id => [id, { running: true }])));
-  await settle();
-  const group = () => host().querySelector('.hp-agents-group');
-  const toggle = () => host().querySelector('.hp-agents-overflow');
-  // All rows stay in the DOM; a phone drawer hides the sixth onward while the group is collapsed.
-  expect(group().querySelectorAll('.hp-agents-item')).toHaveLength(7);
-  expect(group().hasAttribute('data-collapsed')).toBe(true);
-  expect(toggle().parentElement).toBe(group().querySelector(':scope > div'));
-  expect(toggle().textContent).toBe('agents.expand:2');
-  expect(toggle().getAttribute('aria-expanded')).toBe('false');
-  // The desktop card keeps its five-row scrollport, so the control stays out of sight there.
-  expect(getComputedStyle(toggle()).display).toBe('none');
-  click(toggle());
-  expect(group().hasAttribute('data-collapsed')).toBe(false);
-  expect(toggle().textContent).toBe('agents.collapse');
-  expect(toggle().getAttribute('aria-expanded')).toBe('true');
-  click(toggle());
-  expect(group().hasAttribute('data-collapsed')).toBe(true);
-  // Another tile starts collapsed again.
-  click(toggle());
-  click(host().querySelector('.hp-agents-tile[data-state="pending"]'));
-  click(host().querySelector('.hp-agents-tile[data-state="running"]'));
-  expect(group().hasAttribute('data-collapsed')).toBe(true);
-}));
-
-test('five rows or fewer need no expand control', () => inPage(async () => {
-  column();
-  const ids = Array.from({ length: 5 }, (_, index) => `session${index}`);
-  render({ ...list, ids, byId: Object.fromEntries(ids.map((id, index) => [id, { ...list.byId.idle, displayTitle: id, updatedAt: index }])) },
-    {}, new Map(ids.map(id => [id, { running: true }])));
-  await settle();
-  expect(host().querySelector('.hp-agents-overflow')).toBeNull();
-  expect(host().querySelector('.hp-agents-group').hasAttribute('data-collapsed')).toBe(false);
-}));
 
 test('all completed rows remain accessible beyond the first five, newest task end first', () => inPage(async () => {
   const ids = Array.from({ length: 7 }, (_, index) => `session${index}`);
@@ -398,7 +359,7 @@ test('all completed rows remain accessible beyond the first five, newest task en
   click(host().querySelector('.hp-agents-tile[data-state="done"]'));
   const scroller = host().querySelector('.hp-agents-group > div');
   expect(scroller.querySelectorAll('.hp-agents-row')).toHaveLength(7);
-  click([...scroller.querySelectorAll('.hp-agents-item')].at(-1).querySelector('[data-hp-agents-pick]'));
+  click(scroller.lastElementChild.querySelector('[data-hp-agents-pick]'));
   expect(opened).toEqual(['session6']);
 }, { screenshot: '/tmp/dsh-completed-sorted.png' }));
 
