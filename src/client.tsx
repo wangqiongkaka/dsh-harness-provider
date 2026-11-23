@@ -74,7 +74,7 @@ const zh = {
   fastMode: '快速模式', collaborationMode: '协作模式', enabled: '开启', disabled: '关闭',
   'effort.off': '关闭', 'effort.auto': '自动', 'effort.minimal': '极低', 'effort.low': '低', 'effort.medium': '中',
   'effort.high': '高', 'effort.xhigh': '极高', 'effort.max': '最大', 'effort.ultra': '极限', 'effort.default': '默认',
-  permissionAria: '权限模式', 'mode.plan': '计划模式', 'mode.default': '默认', 'mode.acceptEdits': '接受编辑', 'mode.auto': '自动',
+  permissionAria: '权限模式', 'mode.blocked': '尚未授权', 'mode.plan': '计划模式', 'mode.default': '默认', 'mode.acceptEdits': '接受编辑', 'mode.auto': '自动',
   'mode.bypassPermissions': '完全权限', 'mode.dangerFullAccess': '完全权限', 'mode.workspaceWrite': '工作区可写', 'mode.readOnly': '只读',
   'mode.agent-full-access': '完全权限', 'mode.agent': '自动审批', 'mode.read-only': '逐项审批',
   contextAria: '上下文', contextUsed: '上下文已用', contextWindow: '模型窗口', sessionTotal: '本会话累计',
@@ -140,7 +140,7 @@ const en: Record<keyof typeof zh,string> = {
   fastMode:'Fast mode', collaborationMode:'Collaboration mode', enabled:'On', disabled:'Off',
   'effort.off':'Off', 'effort.auto':'Auto', 'effort.minimal':'Minimal', 'effort.low':'Low', 'effort.medium':'Medium',
   'effort.high':'High', 'effort.xhigh':'Extra High', 'effort.max':'Max', 'effort.ultra':'Ultra', 'effort.default':'Default',
-  permissionAria:'Permission mode', 'mode.plan':'Plan mode', 'mode.default':'Default', 'mode.acceptEdits':'Accept edits', 'mode.auto':'Auto mode',
+  permissionAria:'Permission mode', 'mode.blocked':'Access not granted', 'mode.plan':'Plan mode', 'mode.default':'Default', 'mode.acceptEdits':'Accept edits', 'mode.auto':'Auto mode',
   'mode.bypassPermissions':'Full access', 'mode.dangerFullAccess':'Full access', 'mode.workspaceWrite':'Workspace write', 'mode.readOnly':'Read-only',
   'mode.agent-full-access':'Full access', 'mode.agent':'Approve for me', 'mode.read-only':'Ask for approval',
   contextAria:'Context', contextUsed:'Context used', contextWindow:'Model window', sessionTotal:'Session total',
@@ -591,9 +591,9 @@ function setTaskMode(sessionId: string, task?: CommandClaim) {
 }
 
 function TaskHarnessSelector({ selected, onChange, discussion = false, disabled = false, t }: { selected: State['harness'][]; onChange: (selected: State['harness'][]) => void; discussion?: boolean; disabled?: boolean; t: T }) {
-  const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code' };
+  const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code', antigravity: 'Antigravity' };
   return <div className="hp-delegate-harness" role="group" aria-label={t('harness')}>
-    {(Object.keys(names) as State['harness'][]).map(harness => <button key={harness} type="button" role="checkbox" aria-checked={selected.includes(harness)}
+    {(Object.keys(names) as State['harness'][]).filter(id => id !== 'antigravity').map(harness => <button key={harness} type="button" role="checkbox" aria-checked={selected.includes(harness)}
       disabled={disabled || (discussion && harness === 'dsh')} title={discussion && harness === 'dsh' ? t('discussNative') : undefined}
       onClick={() => { const next = selected.includes(harness) ? selected.filter(value => value !== harness) : [...selected, harness]; if (next.length) onChange(next); }}>
       {selected.includes(harness) && <Check />}{names[harness]}
@@ -1052,7 +1052,7 @@ export function SecretPanel({ sessionId, read, answer }: { sessionId: string; re
 }
 
 // ---- left slot: Harness chip + quota chip ----
-const names: Record<State['harness'], string> = { dsh: '', codex: 'Codex', 'claude-code': 'Claude Code' };
+const names: Record<State['harness'], string> = { dsh: '', codex: 'Codex', 'claude-code': 'Claude Code', antigravity: 'Antigravity' };
 export function HarnessSelect({ sessionId, useSessions, read, select, quota, viewing, modelProvider, changed, subscribe, secretStatus, answerSecret, recover, confirmRewind, t }: LeftProps) {
   const [state,setState] = useState<State>();
   const [revision, setRevision] = useState(0);
@@ -1104,7 +1104,7 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
         <span className="hp-chip-label">{current === 'dsh' ? t('native') : names[current]}</span><Chevron open={open} />
       </button>
       {open && <div className="hp-menu hp-menu-left" role="menu" aria-label={t('harness')}>
-        {(['dsh', 'codex', 'claude-code'] as const).map(id => <Option key={id} label={id === 'dsh' ? t('native') : names[id]} selected={current === id} onClick={() => void choose(id)} />)}
+        {(['dsh', 'codex', 'claude-code', 'antigravity'] as const).map(id => <Option key={id} label={id === 'dsh' ? t('native') : names[id]} selected={current === id} onClick={() => void choose(id)} />)}
       </div>}
     </div>
     {/* Only "not logged in" earns composer-row space; the identity labels (plan, API key, external backend) do not. */}
@@ -1154,6 +1154,8 @@ export function HarnessPermission({ sessionId, locked, useSessions, read, models
   const current = modes.find(mode => mode.id === state.permission) ?? (state.permission ? { id: state.permission, label: state.permission, dangerous: false }
     : modes.find(mode => mode.id === catalog?.defaultPermissionModeId) ?? modes[0]);
   if (!current) return null;
+  const label = (id: string, fallback: string) => state.harness === 'antigravity' && id === 'default'
+    ? t('mode.agent-full-access') : modeLabel(t, id, fallback);
   const selectable = modes.length > 0;
   const disabled = !selectable || locked || busy || !!summary?.running || state.recoveryRequired;
   async function choose(id: string) {
@@ -1165,13 +1167,13 @@ export function HarnessPermission({ sessionId, locked, useSessions, read, models
   return <div ref={root} className="hp-root">
     <div className="hp-anchor">
       <button type="button" className="hp-chip" aria-label={t('permissionAria')} aria-haspopup={selectable ? 'menu' : undefined} aria-expanded={selectable ? open : undefined}
-        title={modeLabel(t, current.id, current.label)} disabled={disabled} onClick={() => setOpen(v => !v)}>
+        title={label(current.id, current.label)} disabled={disabled} onClick={() => setOpen(v => !v)}>
         <span className="hp-chip-icon"><Shield kind={shieldKind(current.id, current.dangerous)} /></span>
-        <span className="hp-chip-label">{modeLabel(t, current.id, current.label)}</span>
+        <span className="hp-chip-label">{label(current.id, current.label)}</span>
         {selectable && <Chevron open={open} />}
       </button>
       {open && selectable && <div className="hp-menu hp-menu-left" role="menu" aria-label={t('permissionAria')}>
-        {modes.map(mode => <Option key={mode.id} icon={<Shield kind={shieldKind(mode.id, mode.dangerous)} />} label={modeLabel(t, mode.id, mode.label)} selected={mode.id === current.id}
+        {modes.map(mode => <Option key={mode.id} icon={<Shield kind={shieldKind(mode.id, mode.dangerous)} />} label={label(mode.id, mode.label)} selected={mode.id === current.id}
           onClick={() => { if (mode.id !== current.id) void choose(mode.id); else close(); }} />)}
       </div>}
     </div>
@@ -1332,7 +1334,7 @@ export function HarnessSettingsSection({ useHarnessSettings, form, t }: Settings
       {row('defaultHarness', <select aria-label={label('defaultHarness')} disabled={disabled} value={value.defaultHarness ?? 'last'}
         onChange={event => settle('defaultHarness', form.set('defaultHarness', event.target.value))}>
         <option value="last">{t('lastHarness')}</option><option value="dsh">{t('native')}</option>
-        <option value="codex">Codex</option><option value="claude-code">Claude Code</option>
+        <option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="antigravity">Antigravity</option>
       </select>)}
       {row('idleCloseSeconds', number('idleCloseSeconds'))}
     </>)}
@@ -1807,6 +1809,7 @@ const svg = (viewBox: string, path: string) => `url("data:image/svg+xml,${encode
 const logos: Record<State['harness'], { mask: string; color: string }> = {
   dsh: { color: '#4D6BFE', mask: svg('0 0 23.16 17.04', FISH_LOGO_PATH) },
   codex: { color: '#10A37F', mask: svg('0 0 24 24', OPENAI_PATH) },
+  antigravity: { color: '#4285F4', mask: svg('0 0 24 24', 'M2 20 10 4h4l8 16h-5l-5-11-5 11z') },
   'claude-code': { color: '#D97757', mask: svg('0 0 24 24', CLAUDE_PATH) },
 };
 const delegatedMask = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><mask id="m"><circle cx="5" cy="5" r="5" fill="#fff"/><path d="M3 3l4 4M7 4v3H4" stroke="#000" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="5" cy="5" r="5" mask="url(#m)"/></svg>')}")`;

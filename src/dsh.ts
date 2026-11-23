@@ -37,7 +37,7 @@ import { harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermission
 import { z } from 'zod';
 import { Bindings, DISCUSSION_PERMISSION, type Binding } from './bindings.js';
 import { AcpAdapter, SUBAGENT_ENTRY_LIMIT, SUBAGENT_LIMIT, SUBAGENT_OUTPUT_LIMIT } from './acp-adapter.js';
-import { claudeProfile, codexProfile } from './acp-profiles.js';
+import { antigravityProfile, claudeProfile, codexProfile } from './acp-profiles.js';
 import { ClaudeDshModels, isDshModel, dshModelRoute } from './claude-dsh-models.js';
 import { DshRunner, linkedDirectories, linkedWorkspaces, unwrap } from './dsh-runner.js';
 import { QueuedTurns } from './queued-turns.js';
@@ -67,6 +67,7 @@ export async function apply(ctx: Context, config: ReturnType<typeof Config> = Co
     const settings = settingsOf(config);
     const environment = { ...process.env };
     const adapters = {
+      antigravity: new AcpAdapter({ profile: antigravityProfile(settings), environment }),
       codex: new AcpAdapter({ profile: codexProfile({ environment, settings }), environment }),
       'claude-code': new AcpAdapter({ profile: claudeProfile({ environment, settings, dshModels: new ClaudeDshModels(scope.llm, scope.attachments) }), environment }),
     };
@@ -116,12 +117,13 @@ function override<T extends object, K extends keyof T>(scope: Context, target: T
 // DSH native sandbox mode -> the Harness permission mode it most closely matches, so switching Harness keeps the
 // permission the user already picked. Claude Code has no sandbox tiers below full access; those fall to its default.
 const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>> = {
+  antigravity: { 'danger-full-access': 'default' },
   codex: { 'read-only': 'read-only', 'workspace-write': 'agent', 'danger-full-access': 'agent-full-access' },
   'claude-code': { 'danger-full-access': 'bypassPermissions' },
 };
 /** Full access on either side maps to full access on the other. */
-const FULL_ACCESS: Record<Binding['harness'], string> = { codex: 'agent-full-access', 'claude-code': 'bypassPermissions' };
-const AUTOMATIC_PERMISSION: Record<Binding['harness'], string> = { codex: 'agent', 'claude-code': 'auto' };
+const FULL_ACCESS: Record<Binding['harness'], string> = { antigravity: 'default', codex: 'agent-full-access', 'claude-code': 'bypassPermissions' };
+const AUTOMATIC_PERMISSION: Record<Binding['harness'], string> = { antigravity: 'blocked', codex: 'agent', 'claude-code': 'auto' };
 
 /**
  * One DSH child session as a sidebar subagent: its first prompt is the task, its messages, reasoning and tool calls the
@@ -183,6 +185,7 @@ export class HarnessService extends TypertRemoteService {
 
   /** Bind a plugin-owned session without changing the user's remembered Harness or model. */
   async manageSession(sessionId: string, options: { owner: string; harness: 'dsh' | Binding['harness']; context?: ManagedSession['context']; selection?: z.infer<typeof managedSelection> }): Promise<void> {
+    if (options.harness === 'antigravity') throw new Error('Antigravity 需要用户明确选择完全访问，不支持受控会话');
     if (!options.owner || (options.harness !== 'dsh' && !options.context)) throw new Error('受控会话需要管理方和上下文');
     await this.bindings.serial(sessionId, async () => {
       const agent = await this.agent(sessionId), current = await this.bindings.read(sessionId);
@@ -1067,6 +1070,7 @@ export class HarnessService extends TypertRemoteService {
       const current = await this.bindings.read(request.sessionId);
       if (await this.bindings.managedOwner(request.sessionId)) throw new Error('受控会话的 Harness 由工单管理方决定');
       if (await this.bindings.readDelegated(request.sessionId) || current?.locked || !this.unstarted(agent)) throw new Error('开始对话后不能切换 Harness，请新建会话或从消息新建分支');
+      if (request.harness === 'antigravity' && agent.session.inheritedEventCount) throw new Error('Antigravity 无法接收继承的宿主上下文，请新建会话');
       const defaults = await this.bindings.readDefaults();
       await this.bindings.writeDefaults({ ...defaults, harness: request.harness });
       // A branch keeps its forked native session while it stays on the source's Harness; on another Harness the inherited
@@ -1102,6 +1106,7 @@ export class HarnessService extends TypertRemoteService {
     const sandbox = this.ctx.get('sessionProjections')?.stateOf(agent.session, 'permissions')?.sandbox ?? this.ctx.get('shell')?.sandboxMode;
     const seeded = sandbox && NATIVE_PERMISSION_MODES[harness][sandbox];
     const remembered = (await this.bindings.readDefaults())[harness];
+    if (harness === 'antigravity') binding.permission = harnessPermissionModeIdSchema.parse(seeded ?? 'blocked');
     if (harness === 'claude-code') binding.permission = harnessPermissionModeIdSchema.parse(AUTOMATIC_PERMISSION[harness]);
     if (seeded || remembered) {
       const inspection = await this.inspection(binding);
@@ -1147,7 +1152,7 @@ export class HarnessService extends TypertRemoteService {
       defaultModel: defaultId !== undefined ? { id: defaultId, label: fallback?.label ?? defaultId, resolved: fallback?.resolvedModelLabel ?? null } : null,
       thinkingOptions: catalog.thinkingOptions.map(option => ({ id: option.id, label: option.label })),
       defaultThinkingOptionId: lastThinking ?? (defaultThinking && allowed.includes(defaultThinking) ? defaultThinking : null),
-      permissionModes: (inspection.permissionModes?.modes ?? []).map(mode => ({ id: mode.id, label: mode.label, dangerous: mode.dangerous === true })),
+      permissionModes: binding.harness === 'antigravity' ? [{ id: 'default', label: '完全访问', dangerous: true }] : (inspection.permissionModes?.modes ?? []).map(mode => ({ id: mode.id, label: mode.label, dangerous: mode.dangerous === true })),
       defaultPermissionModeId: inspection.permissionModes?.defaultModeId ?? null,
       configOptions: (catalog.configOptions ?? []).filter(option => supportsModelConfig(binding.harness, (binding.model ?? current?.ref)?.id, option.id))
         .map(option => ({ id: option.id, label: option.label, description: option.description ?? null,
@@ -1285,6 +1290,7 @@ export class HarnessService extends TypertRemoteService {
       const agent = await this.agent(request.sessionId);
       const binding = await this.bindings.read(request.sessionId);
       if (!binding) throw new Error('请使用 DSH 原生权限选择器');
+      if (binding.harness === 'antigravity' && request.permission !== 'default') throw new Error('Antigravity 仅支持完全访问');
       if (binding.delegation?.discussion) throw new Error('讨论会话权限已锁定，不能切换权限模式');
       if (agent.status === 'running' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || binding.pending || binding.fileRewind) throw new Error('请等待当前请求结束');
       const inspection = await this.inspection(binding);

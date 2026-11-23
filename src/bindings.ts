@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { nativeSessionRefSchema, harnessModelRefSchema, harnessThinkingOptionIdSchema, harnessPermissionModeIdSchema } from './contracts.js';
 
-export const harnessChoice = z.enum(['codex', 'claude-code']);
+export const harnessChoice = z.enum(['codex', 'claude-code', 'antigravity']);
 const delegationSchema = z.object({ parentSessionId: z.string(), requestHash: z.string(), reportBack: z.boolean().optional(), notifiedSeq: z.number().int().optional(),
   discussion: z.literal(true).optional(),
   /** The isolated checkout the Harness works in (binding `cwd`); `removed` once merged or discarded. */
@@ -45,7 +45,7 @@ const bindingSchema = z.object({
   linkedPaths: z.array(z.string().min(1)).optional(),
 }).strict().refine(value => !value.nativeRef || value.nativeRef.harnessId === value.harness, 'Harness identity mismatch');
 export type Binding = z.infer<typeof bindingSchema>;
-export const DISCUSSION_PERMISSION = { codex: 'read-only', 'claude-code': 'plan' } as const;
+export const DISCUSSION_PERMISSION = { antigravity: undefined, codex: 'read-only', 'claude-code': 'plan' } as const;
 const nativeDelegationSchema = z.object({
   version: z.literal(1), sessionId: z.string().min(1), harness: z.literal('dsh'), cwd: z.string().min(1), locked: z.boolean(), delegation: delegationSchema,
 }).strict();
@@ -63,6 +63,7 @@ const defaultsSchema = z.object({
   /** Harness the user picked last; new sessions start bound to it ('dsh' = native, nothing to bind). */
   harness: z.enum(['dsh', ...harnessChoice.options]).optional(),
   codex: z.object({ model: harnessModelRefSchema.optional(), thinking: harnessThinkingOptionIdSchema.optional() }).strict().optional(),
+  antigravity: z.object({ model: harnessModelRefSchema.optional(), thinking: harnessThinkingOptionIdSchema.optional() }).strict().optional(),
   'claude-code': z.object({ model: harnessModelRefSchema.optional(), thinking: harnessThinkingOptionIdSchema.optional() }).strict().optional(),
 }).strict();
 export type HarnessDefaults = z.infer<typeof defaultsSchema>;

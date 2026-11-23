@@ -303,3 +303,9 @@ DSH `0.2.2-rc.2` 的 macOS 桌面发行包已验证类型检查、构建和全�
 ## 许可证
 
 本项目采用 [MIT License](LICENSE)。第三方依赖许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+### Antigravity
+
+安装 [shubzkothekar/antigravity-acp v1.2.0](https://github.com/shubzkothekar/antigravity-acp/releases/tag/v1.2.0) 中与本机平台匹配的可执行文件。将它命名为 `agy-acp` 并加入 PATH，或在 DSH 启动环境中设置 `ANTIGRAVITY_ACP_PATH` 为绝对路径。使用已有的 `agy` 登录；可通过 `AGY_BIN` 指定其位置。
+
+在新会话中选择 **Antigravity**，然后在权限菜单选择 **完全权限**。已有的 DSH 完全访问权限会随会话选择继承。此适配器运行时自动批准工具调用；只读讨论和受控会话不提供此选项。模型目录和历史回放由适配器提供。上游没有用于传入 DSH 宿主说明的会话字段。

@@ -3,7 +3,8 @@ import type { InvocationDescriptor } from '@deepseek-ai/dsh-typert-protocol';
 
 /** The profile entry id `cordis.patch.yml` installs this plugin under; DSH Settings addresses its form by it. */
 export const SETTINGS_ENTRY = 'harness-plugin';
-export const selection = z.enum(['dsh', 'codex', 'claude-code']);
+const delegationTarget = z.enum(['dsh', 'codex', 'claude-code']);
+export const selection = z.enum([...delegationTarget.options, 'antigravity']);
 export const address = z.object({ sessionId: z.string().min(1) }).strict();
 export const stateSchema = z.object({
   harness: selection, locked: z.boolean(), model: z.string().nullable(), thinking: z.string().nullable(), permission: z.string().nullable(),
@@ -71,8 +72,8 @@ const delegationAttachmentSchema = z.discriminatedUnion('type', [
 /** A model / thinking picked for one delegated session; omitted fields keep the Harness's last pick. */
 export const modelPick = z.object({ model: z.string().min(1).max(200).optional(), thinking: z.string().min(1).max(100).optional() }).strict();
 export const delegateFromUserRequest = address.extend({
-  requestId: z.string().min(1).max(128), harness: selection.optional(),
-  harnesses: z.array(selection).min(1, '至少选择一个 Harness').max(3).refine(values => new Set(values).size === values.length, '不能重复选择 Harness').optional(),
+  requestId: z.string().min(1).max(128), harness: delegationTarget.optional(),
+  harnesses: z.array(delegationTarget).min(1, '至少选择一个 Harness').max(3).refine(values => new Set(values).size === values.length, '不能重复选择 Harness').optional(),
   prompt: z.string().max(64_000), title: z.string().trim().min(1).max(80).optional(),
   reportBack: z.boolean().default(false), worktree: z.boolean().default(false), attachments: z.array(delegationAttachmentSchema).max(20).default([]),
   picks: z.partialRecord(z.enum(['codex', 'claude-code']), modelPick).default({}),

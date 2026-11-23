@@ -827,6 +827,9 @@ class AcpSession implements HarnessSession {
 
   static async open(options: SessionOptions): Promise<AcpSession> {
     const { profile, input } = options;
+    if (profile.harnessId === 'antigravity' && (input.discussion || input.permissionModeId !== 'default')) {
+      throw new Error('Antigravity 自动批准工具调用，请先选择完全访问');
+    }
     const modelEnvironment = await profile.modelEnvironment?.(input.model, input.thinkingOptionId);
     options = { ...options, environment: { ...options.environment, ...modelEnvironment }, additionalCatalog: await profile.modelCatalog?.() };
     let session: AcpSession | undefined;
@@ -881,7 +884,9 @@ class AcpSession implements HarnessSession {
     const external = this.#additionalCatalog.models.some(model => model.ref.id === input.model?.id);
     if (!external && thinking && this.#catalogs.thinkingConfigId && thinking !== this.#catalogs.currentThinking && this.#catalogs.catalog.thinkingOptions.some(option => option.id === thinking)) await this.#setConfig(this.#catalogs.thinkingConfigId, thinking);
     const mode = input.permissionModeId ? profile.legacyPermissionModes?.[input.permissionModeId] ?? input.permissionModeId : undefined;
-    if (mode && this.#catalogs.permissionModes?.modes.some(entry => entry.id === mode) && mode !== this.#catalogs.currentMode) await this.#setMode(mode);
+    // agy-acp persists a new session binding on set_config_option, even before its first prompt.
+    if (profile.harnessId === 'antigravity') await this.#setConfig('mode', 'default');
+    else if (mode && this.#catalogs.permissionModes?.modes.some(entry => entry.id === mode) && mode !== this.#catalogs.currentMode) await this.#setMode(mode);
     for (const [id, value] of Object.entries(input.configValues ?? {})) {
       if (!supportsModelConfig(this.harnessId, this.#state.effectiveModel?.id ?? input.model?.id, id)) continue;
       const option = this.#catalogs.configOptions.get(id);
@@ -1018,6 +1023,11 @@ class AcpSession implements HarnessSession {
     this.#configChanged(response.configOptions);
   }
   async #setMode(modeId: string): Promise<void> {
+    if (this.#profile.harnessId === 'antigravity') {
+      if (modeId !== 'default') throw new Error('Antigravity 仅支持完全访问');
+      await this.#setConfig('mode', modeId);
+      return;
+    }
     if (this.#process.protocolVersion === 2) {
       if (!this.#catalogs.modeConfigId) throw new Error('ACP v2 未提供权限模式配置');
       await this.#setConfig(this.#catalogs.modeConfigId, modeId);

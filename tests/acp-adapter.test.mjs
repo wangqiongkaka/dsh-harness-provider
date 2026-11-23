@@ -1436,3 +1436,18 @@ test('工单 MCP 配置通过实际 ACP 请求传给创建和恢复，普通会�
   assert.deepEqual(notes.find(note=>note.load).load.mcpServers,servers);
  }finally{await adapter.close();await f.close();}
 });
+
+test('Antigravity 在未授权和只读讨论时均拒绝启动进程', async () => {
+  let launches = 0;
+  const adapter = new AcpAdapter({ environment: {}, profile: {
+    harnessId: 'antigravity', spawn() { launches++; throw new Error('unexpected spawn'); },
+  } });
+  try {
+    for (const hints of [{}, {permissionModeId: 'plan'}, {permissionModeId: 'default', discussion: true}]) {
+      const result = await adapter.open({kind: 'create', cwd: process.cwd(), ...hints});
+      assert.equal(result.ok, false);
+      assert.match(result.error.message, /完全访问/);
+    }
+    assert.equal(launches, 0);
+  } finally { await adapter.close(); }
+});

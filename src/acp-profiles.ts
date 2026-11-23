@@ -188,6 +188,17 @@ export function codexProfile(options: { command?: string; environment: NodeJS.Pr
   };
 }
 
+export function antigravityProfile(settings: SettingsSource = defaultSettings): AcpProfile {
+  return {
+    harnessId: 'antigravity',
+    spawn: raw => {
+      const env = withUserShellEnvironment({ ...raw });
+      return { command: env.ANTIGRAVITY_ACP_PATH || 'agy-acp', args: [], env };
+    },
+    limits: limitsOf(settings),
+  };
+}
+
 // ── Claude Code ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** Native plan limits only; session cost is not account quota. */

@@ -14,7 +14,7 @@ import { Config, defaultSettings, settingsOf } from '../dist/settings.js';
 
 test('新会话默认 Harness 配置保留沿用上次，并校验可选值', () => {
   assert.equal(defaultSettings().defaultHarness, 'last');
-  for (const defaultHarness of ['last', 'dsh', 'codex', 'claude-code']) {
+  for (const defaultHarness of ['last', 'dsh', 'codex', 'claude-code', 'antigravity']) {
     assert.equal(settingsOf(Config({ defaultHarness }))().defaultHarness, defaultHarness);
   }
   assert.ok(Config['~standard'].validate({ defaultHarness: 'invalid' }).issues?.length);
@@ -95,11 +95,11 @@ createRoot(document.querySelector('#root')).render(<App />);
     await page.addScriptTag({content: bundle.outputFiles[0].text});
     const select = page.getByRole('combobox', {name: '新会话默认 Harness'});
     await expect(select).toHaveValue('last');
-    assert.deepEqual(await select.locator('option').allTextContents(), ['沿用上次选择', 'DSH 原生', 'Codex', 'Claude Code']);
+    assert.deepEqual(await select.locator('option').allTextContents(), ['沿用上次选择', 'DSH 原生', 'Codex', 'Claude Code', 'Antigravity']);
     for (const width of [390, 1280]) {
       await page.setViewportSize({width, height: 850});
-      await select.selectOption('codex');
-      await expect(select).toHaveValue('codex');
+      await select.selectOption('antigravity');
+      await expect(select).toHaveValue('antigravity');
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
       await mkdir('.cache', {recursive: true});
       await page.screenshot({path: resolve('.cache/default-harness-' + (width === 390 ? 'mobile' : 'desktop') + '.png')});
