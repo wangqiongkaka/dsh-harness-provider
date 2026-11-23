@@ -3,6 +3,8 @@
  * Code CLI. ACP has no account quota, so each profile keeps a native probe for it; Claude Code also pushes its plan
  * windows through `_meta` while a session runs.
  */
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -188,9 +190,30 @@ export function codexProfile(options: { command?: string; environment: NodeJS.Pr
   };
 }
 
-export function antigravityProfile(settings: SettingsSource = defaultSettings): AcpProfile {
+export function antigravityAccountSnapshot(raw: string): HarnessAccountSnapshot | null {
+  const rows = raw.trim().split(/\r?\n/).flatMap(line => {
+    const [group, metric, remaining, resetsAt] = line.split('\t').map(field => field.trim());
+    if (!group || !metric || !remaining || !/^\d+(?:\.\d+)?%$/.test(remaining)) return [];
+    const percent = Number.parseFloat(remaining);
+    if (percent > 100) return [];
+    return [{ product: group + ' · ' + metric.replace(/ Remaining$/i, ''), usagePercent: 100 - percent,
+      ...(resetsAt && Number.isFinite(Date.parse(resetsAt)) ? { resetsAt } : {}) }];
+  });
+  const [first, ...productUsage] = rows;
+  if (!first) return null;
+  return { credits: { label: first.product, usedPercent: first.usagePercent,
+    periodType: /weekly/i.test(first.product) ? 'seven_day' : /five hour/i.test(first.product) ? 'five_hour' : 'unknown',
+    ...(first.resetsAt ? { resetsAt: first.resetsAt } : {}), productUsage } };
+}
+
+export function antigravityProfile(settings: SettingsSource = defaultSettings, environment = process.env): AcpProfile {
   return {
     harnessId: 'antigravity',
+    inspectAccount: async () => {
+      const env = withUserShellEnvironment({ ...environment });
+      const { stdout } = await promisify(execFile)(env.AGY_BIN || 'agy', ['-p', '/usage'], { env, timeout: settings().requestTimeoutSeconds * 1000 });
+      return antigravityAccountSnapshot(stdout);
+    },
     spawn: raw => {
       const env = withUserShellEnvironment({ ...raw });
       return { command: env.ANTIGRAVITY_ACP_PATH || 'agy-acp', args: [], env };

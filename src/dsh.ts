@@ -67,7 +67,7 @@ export async function apply(ctx: Context, config: ReturnType<typeof Config> = Co
     const settings = settingsOf(config);
     const environment = { ...process.env };
     const adapters = {
-      antigravity: new AcpAdapter({ profile: antigravityProfile(settings), environment }),
+      antigravity: new AcpAdapter({ profile: antigravityProfile(settings, environment), environment }),
       codex: new AcpAdapter({ profile: codexProfile({ environment, settings }), environment }),
       'claude-code': new AcpAdapter({ profile: claudeProfile({ environment, settings, dshModels: new ClaudeDshModels(scope.llm, scope.attachments) }), environment }),
     };

@@ -45,7 +45,12 @@ const commands = () => update({ sessionUpdate: 'available_commands_update', avai
 let counter = 0;
 const app = agent({ name: 'peer' })
   .onRequest('initialize', ({ params, client }) => { ctx = client; note({ initialize: params.clientCapabilities, instructions: process.env.PEER_INSTRUCTIONS ?? null }); return { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true }, sessionCapabilities: { fork: {}, resume: {}, close: {} } }, authMethods: [], _meta: { steering: { supported: true } } }; })
-  .onRequest('session/new', async ({ params, client }) => { ctx = client; note({ new: params }); setTimeout(commands, 10); return { sessionId, ...opened() }; })
+  .onRequest('session/new', async ({ params, client }) => { ctx = client; note({ new: params }); setTimeout(commands, 10);
+    if (process.env.DELAY_MODELS) {
+      setTimeout(() => update({sessionUpdate: 'config_option_update', configOptions: options()}), 80);
+      return {sessionId, configOptions: []};
+    }
+    return { sessionId, ...opened() }; })
   .onRequest('session/load', async ({ params, client }) => {
     ctx = client;
     if (params.sessionId !== sessionId) process.exit(22);
@@ -1450,4 +1455,25 @@ test('Antigravity 在未授权和只读讨论时均拒绝启动进程', async ()
     }
     assert.equal(launches, 0);
   } finally { await adapter.close(); }
+});
+
+test('Antigravity 冷启动等待异步模型目录并应用首轮选型', async () => {
+  const f = await fixture();
+  const adapter = new AcpAdapter({profile: {...f.profile, harnessId: 'antigravity'}, environment: {DELAY_MODELS: '1'}});
+  try {
+    assert.ok((await adapter.inspect({cwd: f.root})).catalog.models.some(model => model.ref.id === 'gpt-5.5-mini'));
+    const session = value(await adapter.open({kind: 'create', cwd: f.root, permissionModeId: 'default', model: modelRef('gpt-5.5-mini')}));
+    assert.equal(session.initialState.effectiveModel.id, 'gpt-5.5-mini');
+  } finally { await adapter.close(); await f.close(); }
+});
+
+test('Antigravity 用量窗口保留分组并转换剩余比例', async () => {
+  const {antigravityAccountSnapshot: parse} = await import('../dist/acp-profiles.js');
+  const stamp = '2026-11-30T09:00:00Z';
+  const account = parse(['Gemini Models\tWeekly Limit Remaining\t72%\t' + stamp,
+    'Claude and GPT models\tFive Hour Limit Remaining\t100%\t' + stamp].join('\n'));
+  assert.equal(account.credits.usedPercent, 28);
+  assert.equal(account.credits.periodType, 'seven_day');
+  assert.deepEqual(account.credits.productUsage, [{product:'Claude and GPT models · Five Hour Limit', usagePercent:0, resetsAt:stamp}]);
+  assert.equal(parse('login required'), null);
 });

@@ -400,6 +400,21 @@ async function waitFor<T>(work: () => T | undefined, timeoutMs: number): Promise
   return work();
 }
 
+/** agy-acp discovers models after startup and publishes the catalog to its active session. */
+function pendingModels(profile: AcpProfile) {
+  let pushed: acp.SessionNotification | undefined;
+  return {
+    observe(event: acp.SessionNotification) {
+      if (event.update.sessionUpdate === 'config_option_update' && event.update.configOptions.some(option => option.category === 'model')) pushed = event;
+    },
+    async apply(opened: Opened, sessionId: string) {
+      if (profile.harnessId !== 'antigravity' || opened.configOptions?.some(option => option.category === 'model')) return;
+      const event = await waitFor(() => pushed?.sessionId === sessionId ? pushed : undefined, Math.min(limitsOf(profile).requestTimeoutMs, 15_000));
+      if (event?.update.sessionUpdate === 'config_option_update') opened.configOptions = event.update.configOptions;
+    },
+  };
+}
+
 // ── Transcript: replayed history plus live turns, the source of snapshots and fork points ───────────────────────────
 
 interface TranscriptTurn {
@@ -835,11 +850,13 @@ class AcpSession implements HarnessSession {
     let session: AcpSession | undefined;
     const replay: acp.SessionNotification[] = [];
     let commands: acp.AvailableCommand[] | undefined;
+    const models = pendingModels(profile);
     let authStatus: unknown;
     let sessionId = input.kind === 'resume' ? input.nativeRef.nativeSessionId : undefined;
     const process_ = await AcpProcess.connect(profile, { ...options.environment, DSH_DISCUSSION_READ_ONLY: input.discussion ? '1' : undefined }, input.cwd, {
       update: notification => {
         if (session) { session.#notify(notification); return; }
+        models.observe(notification);
         if (sessionId === undefined) return;
         if (notification.sessionId === sessionId && notification.update.sessionUpdate === 'available_commands_update') commands = notification.update.availableCommands;
         else replay.push(notification);
@@ -863,6 +880,7 @@ class AcpSession implements HarnessSession {
         opened = await request<acp.LoadSessionResponse>(process_, process_.protocolVersion === 2 ? 'session/resume' : 'session/load', { sessionId, cwd: input.cwd, mcpServers: input.mcpServers ?? [], ...roots,
           ...(process_.protocolVersion === 2 ? { replayFrom: { type: 'start' } } : {}), ...(meta ? { _meta: meta } : {}) }, limitsOf(profile).loadTimeoutMs);
       }
+      await models.apply(opened, sessionId);
       const catalogs = catalogsOf(opened, options.additionalCatalog, input.thinkingOptionId);
       const responseCommands = record(opened).availableCommands;
       const skills = (Array.isArray(responseCommands) ? responseCommands as acp.AvailableCommand[] : await waitFor(() => commands, 3_000)) ?? [];
@@ -1790,15 +1808,16 @@ export class AcpAdapter implements HarnessAdapter {
   }
   async #probeModel<T>(cwd: string, work: (process_: AcpProcess, opened: acp.NewSessionResponse, commands: { value?: acp.AvailableCommand[] }) => Promise<T>, model?: HarnessModelRef): Promise<T> {
     if (this.#closing) throw error('invalidState', 'Harness adapter is closing');
+    const models = pendingModels(this.#options.profile);
     const commands: { value?: acp.AvailableCommand[] } = {};
     const modelEnvironment = await this.#options.profile.modelEnvironment?.(model);
     const process_ = await AcpProcess.connect(this.#options.profile, { ...this.#options.environment, ...modelEnvironment }, cwd, { ...IDLE_HANDLERS,
-      update: notification => { if (notification.update.sessionUpdate === 'available_commands_update') commands.value = notification.update.availableCommands; } });
+      update: notification => { models.observe(notification); if (notification.update.sessionUpdate === 'available_commands_update') commands.value = notification.update.availableCommands; } });
     try {
       const meta = this.#options.profile.sessionMeta?.('create', undefined, undefined, modelEnvironment);
       const opened = await request<acp.NewSessionResponse>(process_, 'session/new', { cwd, mcpServers: [], ...(meta ? { _meta: meta } : {}) });
       if (commands.value === undefined && Array.isArray(record(opened).availableCommands)) commands.value = record(opened).availableCommands as acp.AvailableCommand[];
-      try { return await work(process_, opened, commands); }
+      try { await models.apply(opened, opened.sessionId); return await work(process_, opened, commands); }
       finally { await request(process_, 'session/close', { sessionId: opened.sessionId }, 2_000).catch(() => {}); }
     } finally { await process_.close(); }
   }
