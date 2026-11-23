@@ -26,8 +26,20 @@ function subdirectories(directory: string): string[] {
   try { return fs.readdirSync(directory, { withFileTypes: true }).filter(entry => entry.isDirectory()).map(entry => entry.name); } catch { return []; }
 }
 const newestFirst = (names: string[]) => [...names].sort((left, right) => right.localeCompare(left, undefined, { numeric: true }));
+function envKey(environment: NodeJS.ProcessEnv, name: string): string | undefined {
+  return Object.keys(environment).find(key => key.toLowerCase() === name.toLowerCase());
+}
 function envValue(environment: NodeJS.ProcessEnv, name: string): string | undefined {
-  return Object.entries(environment).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+  const key = envKey(environment, name);
+  return key === undefined ? undefined : environment[key];
+}
+function isReclaudeName(name: string): boolean {
+  const base = path.basename(name).replace(/\.(?:exe|cmd|bat)$/iu, '').toLowerCase();
+  return base === 'reclaude' || base === 'rec';
+}
+function isReclaudeExecutable(executable: string): boolean {
+  if (isReclaudeName(executable)) return true;
+  try { return isReclaudeName(fs.realpathSync(executable)); } catch { return false; }
 }
 
 /** Where Node.js version managers keep global binaries: a Claude Code installed under an inactive runtime is not on PATH. */
@@ -86,6 +98,9 @@ export function resolveClaudeExecutable(environment: NodeJS.ProcessEnv, command?
         ? [path.join(appData, 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin'), path.join(appData, 'npm'), path.join(home, '.local', 'bin'), ...versionManagerDirectories(environment, home)]
         : [path.join(home, '.npm-global', 'bin'), path.join(home, '.local', 'bin'), path.join(home, '.claude', 'local'), ...versionManagerDirectories(environment, home), '/opt/homebrew/bin', '/usr/local/bin'];
       for (const root of roots) for (const extension of windows ? ['.exe', '.cmd'] : ['']) candidates.push(path.join(root, 'claude' + extension));
+    } else if (isReclaudeName(name)) {
+      const home = envValue(environment, 'HOME') ?? envValue(environment, 'USERPROFILE');
+      if (home) for (const extension of extensions) candidates.push(path.join(home, '.local', 'bin', name + extension));
     }
   }
   for (const candidate of candidates) {
@@ -95,6 +110,29 @@ export function resolveClaudeExecutable(environment: NodeJS.ProcessEnv, command?
     if (isExecutable(runnable)) return path.resolve(runnable);
   }
   throw new ClaudeNotInstalledError('Claude Code is not installed');
+}
+
+/**
+ * reclaude isolates each bound account's Claude Code config and session transcripts under
+ * `<data_dir>/claude/accounts/<device_id>/config`. Forward that directory as `CLAUDE_CONFIG_DIR` so claude-agent-acp
+ * reads the same transcripts and settings as the managed CLI; an explicit `CLAUDE_CONFIG_DIR` always wins.
+ */
+export function withReclaudeEnvironment(executable: string, environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (!isReclaudeExecutable(executable) || envValue(environment, 'CLAUDE_CONFIG_DIR')?.trim()) return environment;
+  try {
+    const result = spawnSync(executable, ['status', '--json'], {
+      env: environment, encoding: 'utf8', timeout: 3_000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (result.status !== 0 || !result.stdout) return environment;
+    const status = JSON.parse(result.stdout) as { global?: { data_dir?: unknown }; claude?: { current?: { device_id?: unknown } } };
+    const dataDir = typeof status?.global?.data_dir === 'string' ? status.global.data_dir.trim() : '';
+    const rawDevice = status?.claude?.current?.device_id;
+    const accountId = typeof rawDevice === 'number' && Number.isSafeInteger(rawDevice) && rawDevice >= 0 ? String(rawDevice)
+      : typeof rawDevice === 'string' && /^[A-Za-z0-9._-]+$/u.test(rawDevice) && rawDevice !== '.' && rawDevice !== '..' ? rawDevice : '';
+    if (!dataDir || !accountId) return environment;
+    const key = envKey(environment, 'CLAUDE_CONFIG_DIR') ?? 'CLAUDE_CONFIG_DIR';
+    return { ...environment, [key]: path.join(dataDir, 'claude', 'accounts', accountId, 'config') };
+  } catch { return environment; }
 }
 
 /** A `#!/usr/bin/env node` entrypoint needs `node` on PATH, which a GUI-launched host rarely has. */
@@ -206,12 +244,13 @@ export class ClaudeInspector {
 
   #create(): Query {
     const { options } = this;
+    const executable = resolveClaudeExecutable(options.environment, options.command);
     return this.#query = (options.queryFactory ?? query)({
       prompt: this.#input,
       options: {
-        cwd: options.cwd, pathToClaudeCodeExecutable: resolveClaudeExecutable(options.environment, options.command),
+        cwd: options.cwd, pathToClaudeCodeExecutable: executable,
         settingSources: ['user'], permissionMode: 'default', tools: [], persistSession: false, includePartialMessages: false,
-        env: withNodeOnPath({ ...options.environment, CLAUDE_AGENT_SDK_CLIENT_APP: CLIENT_APP }),
+        env: withNodeOnPath({ ...withReclaudeEnvironment(executable, options.environment), CLAUDE_AGENT_SDK_CLIENT_APP: CLIENT_APP }),
         spawnClaudeCodeProcess: (spawnOptions: SpawnOptions) => {
           const child = spawn(spawnOptions.command, spawnOptions.args, { cwd: spawnOptions.cwd, env: spawnOptions.env, signal: spawnOptions.signal, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
           child.stderr.resume();

@@ -13,7 +13,7 @@ export const Config = Schema.object({
   /** Plugin state directory; not live, since sidecars would have to move with it. */
   root: Schema.string(),
   codexCommand: Schema.string().default('codex').volatile(),
-  /** Unset: `CLAUDE_COMMAND_PATH`, then `claude` on PATH and the usual install locations. */
+  /** Unset: `CLAUDE_COMMAND_PATH`, then `claude` on PATH and the usual install locations; supports `reclaude`. */
   claudeCommand: Schema.string().volatile(),
   defaultHarness: Schema.union(['last', 'dsh', 'codex', 'claude-code', 'antigravity']).default('last').volatile(),
   idleCloseSeconds: count(5, 60),

@@ -196,7 +196,7 @@ Claude 原生连接丢失或报告会话已结束时，插件会关闭失效连�
 | 配置项 | 默认值 | 说明 |
 | --- | --- | --- |
 | `codexCommand` | `codex` | Codex 可执行文件，也用于额度、插件和轮次记录查询；原生进程下次启动时生效 |
-| `claudeCommand` | 自动查找 | Claude Code 可执行文件；未设置时使用环境变量 `CLAUDE_COMMAND_PATH`，再从 PATH、常见安装目录和版本管理器目录中查找；原生进程下次启动时生效 |
+| `claudeCommand` | 自动查找 | Claude Code 可执行文件；未设置时使用环境变量 `CLAUDE_COMMAND_PATH`，再从 PATH、常见安装目录和版本管理器目录中查找；原生进程下次启动时生效。指向 `reclaude` 时自动同步其当前绑定账号的 `CLAUDE_CONFIG_DIR` |
 | `root` | `$DSH_HOME/harness-plugin` | 插件状态目录；未设置 `DSH_HOME` 时为 `~/.dsh/harness-plugin`；修改后插件重新加载 |
 
 ```yaml

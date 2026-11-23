@@ -16,7 +16,7 @@ import type { HarnessAccountSnapshot, HarnessPlugin, HostTurnSnapshot } from './
 import { defaultSettings, feedbackOf, type SettingsSource } from './settings.js';
 import { interactionInstructions } from './feedback.js';
 import { CodexRpc } from './codex-rpc.js';
-import { ClaudeInspector, ClaudeNotInstalledError, resolveClaudeExecutable, withNodeOnPath, withUserShellEnvironment } from './claude-sdk.js';
+import { ClaudeInspector, ClaudeNotInstalledError, resolveClaudeExecutable, withNodeOnPath, withReclaudeEnvironment, withUserShellEnvironment } from './claude-sdk.js';
 import type { AcpLimits, AcpProfile } from './acp-adapter.js';
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -299,9 +299,10 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
     protocolVersion: 2,
     spawn: raw => {
       const env = withUserShellEnvironment({ ...raw });
+      const cli = executable(env);
       // The SDK spawns the CLI as CLAUDE_CODE_ENTRYPOINT=sdk-ts, which drops the Artifact tools (and with them /design's
       // canvas) unless CLAUDE_CODE_ARTIFACT is truthy. Default it on; a user-set value still wins.
-      return { command: process.execPath, args: [bundled('claude-agent-acp.mjs')], env: withNodeOnPath({ CLAUDE_CODE_ARTIFACT: '1', ...env, CLAUDE_AGENT_ACP_PROTOCOL: 'v2', CLAUDE_CODE_EXECUTABLE: executable(env), CLAUDE_AGENT_SDK_CLIENT_APP: `${pkg.name}/${pkg.version}` }) };
+      return { command: process.execPath, args: [bundled('claude-agent-acp.mjs')], env: withNodeOnPath({ CLAUDE_CODE_ARTIFACT: '1', ...withReclaudeEnvironment(cli, env), CLAUDE_AGENT_ACP_PROTOCOL: 'v2', CLAUDE_CODE_EXECUTABLE: cli, CLAUDE_AGENT_SDK_CLIENT_APP: `${pkg.name}/${pkg.version}` }) };
     },
     // The same system-prompt append the SDK adapter used; ACP forwards it through the agent's own options channel. Host
     // instructions (delegation) ride along, so they stay out of the user's messages and survive context compaction.
