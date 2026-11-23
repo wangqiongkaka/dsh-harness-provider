@@ -219,8 +219,14 @@ export function antigravityProfile(settings: SettingsSource = defaultSettings, e
     },
     spawn: raw => {
       const env = withUserShellEnvironment({ ...raw });
-      return { command: env.ANTIGRAVITY_ACP_PATH || 'agy-acp', args: [], env };
+      if (env.ANTIGRAVITY_ACP_PATH) return { command: env.ANTIGRAVITY_ACP_PATH, args: [], env };
+      const flag = env.DSH_DISCUSSION_READ_ONLY === '1' ? '--sandbox' : '--dangerously-skip-permissions';
+      return { command: env.AGY_BIN || 'agy', args: ['acp', '--stdio', flag], env };
     },
+    // Native `agy acp` advertises `_meta.antigravity.systemPrompt.append`; keep progress feedback and host instructions out of user turns.
+    sessionMeta: (_kind, instructions) => ({
+      antigravity: { systemPrompt: { append: interactionInstructions + '\n\n' + feedbackOf(settings()) + (instructions ?? '') } },
+    }),
     limits: limitsOf(settings),
   };
 }

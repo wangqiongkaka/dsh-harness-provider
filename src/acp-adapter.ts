@@ -184,16 +184,37 @@ export function catalogsOf(opened: Opened, additional: HarnessModelCatalog = { m
   const auxiliary = options.filter(option => option !== model && option !== thinking && option.category !== 'mode');
   const mode = options.filter(isSelect).find(option => option.category === 'mode');
   const modes = mode ? { currentModeId: mode.currentValue, availableModes: selectOptions(mode).map(option => ({ id: option.value, name: option.name, description: option.description, _meta: option._meta })) } : opened.modes;
-  const efforts = new Map<string, Set<string>>();
-  for (const entry of record(record(opened as unknown).models).availableModels as unknown[] ?? []) {
-    const match = /^(.+)\[([^\]]+)\]$/u.exec(String(record(entry).modelId ?? ''));
-    if (match) (efforts.get(match[1]!) ?? efforts.set(match[1]!, new Set()).get(match[1]!)!).add(match[2]!);
-  }
   const rawModels = model ? selectOptions(model) : [];
-  const parsedModels = splitModelEfforts && !thinking ? rawModels.map(option => ({ option, ...parseCompoundModel(option.value, option.name) })) : [];
+  const rawModelValues = new Set(rawModels.map(option => option.value));
+  const available = record(record(opened as unknown).models).availableModels as unknown[] ?? [];
+  // Native `agy acp` already splits `configOptions.model` into base ids while keeping `<base>-<effort>` in `models.availableModels`.
+  // When a non-thinking model (e.g. orchestrator) is active, `thought_level` is omitted from `configOptions`, so avoid
+  // misreading a standalone model like `gpt-oss-120b-medium` as a flat compound catalog.
+  const nativeSplit = splitModelEfforts && available.some(entry => {
+    const id = String(record(entry).modelId ?? '');
+    const parsed = parseCompoundModel(id, String(record(entry).name ?? id));
+    return parsed.effort !== undefined && !rawModelValues.has(id) && rawModelValues.has(parsed.model);
+  });
+  const efforts = new Map<string, Set<string>>();
+  const seenNativeEfforts = new Set<string>();
+  for (const entry of available) {
+    const modelId = String(record(entry).modelId ?? '');
+    const match = /^(.+)\[([^\]]+)\]$/u.exec(modelId);
+    if (match) { (efforts.get(match[1]!) ?? efforts.set(match[1]!, new Set()).get(match[1]!)!).add(match[2]!); continue; }
+    if (splitModelEfforts && (thinking || nativeSplit)) {
+      if (rawModelValues.has(modelId)) { if (!efforts.has(modelId)) efforts.set(modelId, new Set()); continue; }
+      const parsed = parseCompoundModel(modelId, String(record(entry).name ?? modelId));
+      if (parsed.effort && rawModelValues.has(parsed.model)) {
+        (efforts.get(parsed.model) ?? efforts.set(parsed.model, new Set()).get(parsed.model)!).add(parsed.effort);
+        seenNativeEfforts.add(parsed.effort);
+      }
+    }
+  }
+  const parsedModels = splitModelEfforts && !thinking && !nativeSplit ? rawModels.map(option => ({ option, ...parseCompoundModel(option.value, option.name) })) : [];
   const useCompound = parsedModels.some(entry => entry.effort !== undefined);
   let compoundModels: CompoundModels | undefined;
-  let thinkingOptions = thinking ? selectOptions(thinking).map(option => ({ id: harnessThinkingOptionIdSchema.parse(option.value), label: option.name })) : [];
+  let thinkingOptions = thinking ? selectOptions(thinking).map(option => ({ id: harnessThinkingOptionIdSchema.parse(option.value), label: option.name }))
+    : nativeSplit ? COMPOUND_EFFORTS.filter(([id]) => seenNativeEfforts.has(id)).map(([id, label]) => ({ id: harnessThinkingOptionIdSchema.parse(id), label })) : [];
   let models: HarnessModelCatalog['models'];
   let defaultModel: string | undefined;
   let currentModel: string | undefined;
@@ -641,8 +662,13 @@ function terminalUpdate<T extends acp.ToolCallUpdate>(call: T, previousOutput: s
     ...(typeof exitCode === 'number' ? { exitCode } : {}) } };
 }
 const commandOf = (raw: unknown): string | undefined => {
-  const value = record(raw).command;
+  const fields = record(raw);
+  const value = fields.command ?? fields.CommandLine;
   return typeof value === 'string' && value.trim() ? value : Array.isArray(value) && value.every(part => typeof part === 'string') && value.length ? value.join(' ') : undefined;
+};
+const exitCodeOf = (raw: unknown): number | undefined => {
+  const fields = record(raw);
+  return typeof fields.exitCode === 'number' ? fields.exitCode : typeof fields.exit_code === 'number' ? fields.exit_code : undefined;
 };
 const hasInput = (value: unknown) => value !== undefined && value !== null && (typeof value !== 'object' || Object.keys(record(value)).length > 0);
 const jsonOf = (value: unknown): JsonValue => JSON.parse(JSON.stringify(value ?? null)) as JsonValue;
@@ -654,10 +680,11 @@ const fileRow = (item: HostItem): boolean => item.type === 'toolExecution' && (i
 function toolItem(call: acp.ToolCall | acp.ToolCallUpdate): HostItemOf<'commandExecution'> | HostItemOf<'toolExecution'> {
   const command = call.kind === 'execute' ? commandOf(call.rawInput) : undefined;
   const title = text(call.title, 200);
-  // Claude Code's Bash carries the user-facing purpose in `description`; the activity card shows it ahead of the command.
-  const description = text(record(call.rawInput).description, 200) ?? (title && title !== command ? title : undefined);
+  // Claude Code's Bash (`description`) and Antigravity's `run_command` (`toolSummary`) carry the user-facing purpose ahead of the command.
+  const description = text(record(call.rawInput).description, 200) ?? text(record(call.rawInput).toolSummary, 200) ?? (title && title !== command ? title : undefined);
+  const exitCode = exitCodeOf(call.rawOutput);
   if (command) return { type: 'commandExecution', itemId: hostItemIdSchema.parse(call.toolCallId), command,
-    ...(typeof record(call.rawOutput).exitCode === 'number' ? { exitCode: record(call.rawOutput).exitCode as number } : {}),
+    ...(exitCode !== undefined ? { exitCode } : {}),
     ...(description ? { description } : {}), ...(text(record(call.rawInput).cwd, 1000) ? { cwd: text(record(call.rawInput).cwd, 1000)! } : {}) };
   const native = dshTool(call);
   return { type: 'toolExecution', itemId: hostItemIdSchema.parse(call.toolCallId), toolName: native?.toolName ?? text(call.name, 120) ?? title ?? call.kind ?? 'tool',
@@ -665,7 +692,7 @@ function toolItem(call: acp.ToolCall | acp.ToolCallUpdate): HostItemOf<'commandE
 }
 /**
  * DSH renders `read`, `grep`, `glob`, `edit`, `write`, `web_fetch` and `web_search` as dedicated rows keyed by those names and
- * their DSH arguments. Claude Code names its tools with inputs of nearly the same shape; Codex describes read/search commands
+ * their DSH arguments. Claude Code and Antigravity name their tools with structured inputs; Codex describes read/search commands
  * only by kind, title and locations.
  */
 function dshTool(call: acp.ToolCall | acp.ToolCallUpdate): { toolName: string; arguments: JsonValue } | undefined {
@@ -674,18 +701,32 @@ function dshTool(call: acp.ToolCall | acp.ToolCallUpdate): { toolName: string; a
   const row = (toolName: string, args: Record<string, unknown>) => ({ toolName, arguments: jsonOf(args) });
   switch (call.name) {
     case 'Read': return text(input.file_path) ? row('read', { file_path: input.file_path, offset: input.offset, limit: input.limit }) : undefined;
+    case 'read_file': {
+      const path = text(input.Path) ?? text(input.file_path) ?? call.locations?.[0]?.path;
+      const offset = typeof input.StartLine === 'number' ? input.StartLine : undefined;
+      const limit = typeof input.EndLine === 'number' ? input.EndLine - (offset ?? 1) + 1 : undefined;
+      return path ? row('read', { file_path: path, ...(offset !== undefined ? { offset } : {}), ...(limit !== undefined && limit > 0 ? { limit } : {}) }) : undefined;
+    }
     case 'Grep': return typeof input.pattern === 'string' ? row('grep', { pattern: input.pattern, path: input.path, include: input.glob }) : undefined;
     case 'Glob': return typeof input.pattern === 'string' ? row('glob', { pattern: input.pattern, path: input.path }) : undefined;
     case 'Edit': return diff?.type === 'diff' ? row('edit', { file_path: diff.path, old_string: diff.oldText ?? '', new_string: diff.newText, replace_all: input.replace_all })
       : text(input.file_path) && typeof input.new_string === 'string' ? row('edit', { file_path: input.file_path, old_string: input.old_string, new_string: input.new_string, replace_all: input.replace_all }) : undefined;
+    case 'edit_file': return diff?.type === 'diff' ? row('edit', { file_path: diff.path, old_string: diff.oldText ?? '', new_string: diff.newText })
+      : text(input.Path) && typeof input.Replacement === 'string' ? row('edit', { file_path: input.Path, old_string: input.Target, new_string: input.Replacement }) : undefined;
     case 'Write': {
       const path = typeof input.file_path === 'string' ? input.file_path : input.path;
       const content = input.content ?? input.file_text ?? input.file_content;
       return diff?.type === 'diff' ? row('write', { file_path: diff.path, content: diff.newText })
         : text(path) && typeof content === 'string' ? row('write', { file_path: path, content }) : undefined;
     }
+    case 'write_file': {
+      const path = text(input.Path) ?? text(input.file_path) ?? text(input.path);
+      const content = input.Content ?? input.content;
+      return diff?.type === 'diff' ? row('write', { file_path: diff.path, content: diff.newText })
+        : path && typeof content === 'string' ? row('write', { file_path: path, content }) : undefined;
+    }
     case 'WebFetch': return text(input.url) ? row('web_fetch', { url: input.url }) : undefined;
-    case 'WebSearch': return text(input.query) ? row('web_search', { queries: [input.query] }) : undefined;
+    case 'WebSearch': case 'search_web': return text(input.query) ? row('web_search', { queries: [input.query] }) : undefined;
   }
   if (input.type === 'webSearch' || (call.kind === 'search' && ['search', 'openPage', 'findInPage'].includes(String(record(input.action).type)))) {
     const action = record(input.action);
@@ -971,9 +1012,19 @@ class AcpSession implements HarnessSession {
       const target = this.#resolveCompoundModel(input.model ? modelValue(input.model) : undefined, thinking);
       if (target && target !== this.#catalogs.currentRawModel) await this.#setConfig(this.#catalogs.modelConfigId, target);
     } else {
-      if (input.model && this.#catalogs.modelConfigId && modelValue(input.model) !== this.#catalogs.currentModel) await this.#setConfig(this.#catalogs.modelConfigId, modelValue(input.model));
+      let requestedModel = input.model ? modelValue(input.model) : undefined;
+      let requestedThinking = thinking;
+      // Legacy bindings saved under `agy-acp` may hold a compound model id like `gemini-4-neon-medium`.
+      if (profile.harnessId === 'antigravity' && requestedModel && !this.#catalogs.catalog.models.some(model => modelValue(model.ref) === requestedModel)) {
+        const parsed = parseCompoundModel(requestedModel, requestedModel);
+        if (parsed.effort && this.#catalogs.catalog.models.some(model => modelValue(model.ref) === parsed.model)) {
+          requestedModel = parsed.model;
+          requestedThinking ??= parsed.effort;
+        }
+      }
+      if (requestedModel && this.#catalogs.modelConfigId && requestedModel !== this.#catalogs.currentModel) await this.#setConfig(this.#catalogs.modelConfigId, requestedModel);
       const external = this.#additionalCatalog.models.some(model => model.ref.id === input.model?.id);
-      if (!external && thinking && this.#catalogs.thinkingConfigId && thinking !== this.#catalogs.currentThinking && this.#catalogs.catalog.thinkingOptions.some(option => option.id === thinking)) await this.#setConfig(this.#catalogs.thinkingConfigId, thinking);
+      if (!external && requestedThinking && this.#catalogs.thinkingConfigId && requestedThinking !== this.#catalogs.currentThinking && this.#catalogs.catalog.thinkingOptions.some(option => option.id === requestedThinking)) await this.#setConfig(this.#catalogs.thinkingConfigId, requestedThinking);
     }
     const mode = input.permissionModeId ? profile.legacyPermissionModes?.[input.permissionModeId] ?? input.permissionModeId : undefined;
     // agy-acp persists a new session binding on set_config_option, even before its first prompt.
@@ -1439,7 +1490,7 @@ class AcpSession implements HarnessSession {
     const body = typeof output.output === 'string' ? output.output : typeof output.aggregatedOutput === 'string' ? output.aggregatedOutput
       : typeof call?.rawOutput === 'string' ? call.rawOutput : undefined;
     const details = { ...task, ...(command ? { command } : {}), ...(body !== undefined ? { output: body } : {}),
-      ...(typeof output.exitCode === 'number' ? { exitCode: output.exitCode } : {}) };
+      ...(exitCodeOf(call?.rawOutput) !== undefined ? { exitCode: exitCodeOf(call?.rawOutput)! } : {}) };
     this.#taskDetails.set(task.id, details);
     if (task.status === 'completed' && task.toolCallId && !task.outputFilePath && call?.status !== 'completed' && call?.status !== 'failed') {
       // Codex publishes the task end before the completed command's output/exit metadata.
@@ -1629,7 +1680,8 @@ class AcpSession implements HarnessSession {
           }
           active.tools.set(update.toolCallId, item);
         }
-        if (item.type === 'commandExecution' && typeof record(update.rawOutput).exitCode === 'number') { item = { ...item, exitCode: record(update.rawOutput).exitCode as number }; active.tools.set(update.toolCallId, item); }
+        const exitCode = exitCodeOf(update.rawOutput);
+        if (item.type === 'commandExecution' && exitCode !== undefined) { item = { ...item, exitCode }; active.tools.set(update.toolCallId, item); }
         if (update.status === 'completed' || update.status === 'failed') {
           active.tools.delete(update.toolCallId);
           active.announced.delete(update.toolCallId);

@@ -485,3 +485,188 @@ createRoot(document.querySelector('#root')).render(<QuotaChip quota={${JSON.stri
     await browser.close();
   }
 });
+
+test('Antigravity 原生 agy acp 透传进展反馈系统提示、流式过程事件、工具映射、原生模型强度与恢复轮次一致性', async () => {
+  const { antigravityProfile } = await import('../dist/acp-profiles.js');
+  const root = await mkdtemp(join(tmpdir(), 'dsh-agy-native-acp-'));
+  const script = join(root, 'native-agy-peer.mjs');
+  const log = join(root, 'log.jsonl');
+  const historyFile = join(root, 'history.jsonl');
+  await writeFile(script, `
+import { agent, ndJsonStream } from '${import.meta.resolve('@agentclientprotocol/sdk/unstable')}';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { Readable, Writable } from 'node:stream';
+const note = value => appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n');
+const saveHistory = update => appendFileSync(${JSON.stringify(historyFile)}, JSON.stringify(update) + '\\n');
+const loadHistory = () => existsSync(${JSON.stringify(historyFile)}) ? readFileSync(${JSON.stringify(historyFile)}, 'utf8').trim().split('\\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+let mode = 'default', model = 'gemini-4-neon', effort = 'high';
+const availableModels = [
+  { modelId: 'gemini-4-neon-high', name: 'Gemini 4 Neon (High)' },
+  { modelId: 'gemini-4-neon-xhigh', name: 'Gemini 4 Neon (XHigh)' },
+  { modelId: 'gemini-4-neon-medium', name: 'Gemini 4 Neon (Medium)' },
+  { modelId: 'gemini-4-neon-low', name: 'Gemini 4 Neon (Low)' },
+  { modelId: 'gemini-4-argon-low', name: 'Gemini 4 Argon (Low)' },
+  { modelId: 'gemini-4-argon-medium', name: 'Gemini 4 Argon (Medium)' },
+  { modelId: 'gemini-4-argon-high', name: 'Gemini 4 Argon (High)' },
+  { modelId: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+  { modelId: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' },
+];
+const effortOpts = () => model === 'gemini-4-neon'
+  ? [{ value: 'low', name: 'Low' }, { value: 'medium', name: 'Medium' }, { value: 'high', name: 'High' }, { value: 'xhigh', name: 'Extra' }]
+  : model === 'gemini-4-argon'
+    ? [{ value: 'low', name: 'Low' }, { value: 'medium', name: 'Medium' }, { value: 'high', name: 'High' }]
+    : [];
+const configOptions = () => [
+  { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: model, options: [
+    { value: 'gemini-4-neon', name: 'Gemini 4 Neon' },
+    { value: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+    { value: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+    { value: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' },
+  ] },
+  ...(effortOpts().length ? [{ id: 'thought_level', name: 'Thinking Level', category: 'thought_level', type: 'select', currentValue: effort, options: effortOpts() }] : []),
+  { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: mode, options: [
+    { value: 'default', name: 'Default' }, { value: 'plan', name: 'Plan' },
+  ] },
+];
+const conn = agent({ name: 'Antigravity ACP Server' })
+  .onRequest('initialize', () => ({
+    protocolVersion: 1,
+    agentCapabilities: { loadSession: true, sessionCapabilities: { load: {}, close: {} }, _meta: { antigravity: { systemPrompt: { append: true } } } },
+    authMethods: [],
+  }))
+  .onRequest('session/new', ({ params }) => {
+    note({ newMeta: params._meta });
+    return { sessionId: 'agy-native-1', models: { availableModels, currentModelId: 'gemini-4-neon-high' }, configOptions: configOptions() };
+  })
+  .onRequest('session/load', async ({ params }) => {
+    note({ loadMeta: params._meta });
+    for (const update of loadHistory()) await conn.client.notify('session/update', { sessionId: params.sessionId, update });
+    return { sessionId: params.sessionId, models: { availableModels, currentModelId: 'gemini-4-neon-high' }, configOptions: configOptions() };
+  })
+  .onRequest('session/set_config_option', ({ params }) => {
+    note({ set: params });
+    if (params.configId === 'model') {
+      model = params.value;
+      const allowed = effortOpts().map(o => o.value);
+      if (allowed.length && !allowed.includes(effort)) effort = allowed[allowed.length - 1];
+    }
+    if (params.configId === 'thought_level') effort = params.value;
+    if (params.configId === 'mode') mode = params.value;
+    return { configOptions: configOptions() };
+  })
+  .onRequest('session/prompt', async ({ params }) => {
+    const promptText = params.prompt.filter(b => b.type === 'text').map(b => b.text).join('');
+    saveHistory({ sessionUpdate: 'user_message_chunk', content: { type: 'text', text: promptText } });
+    const send = async update => {
+      if (update.sessionUpdate !== 'agent_thought_chunk' && update.sessionUpdate !== 'usage_update') saveHistory(update);
+      await conn.client.notify('session/update', { sessionId: params.sessionId, update });
+    };
+    await send({ sessionUpdate: 'usage_update', used: 1200, size: 1048576 });
+    await send({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: '先检查文件并执行命令。' } });
+    await send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '先查看 package.json 并运行检查命令。' } });
+    await send({ sessionUpdate: 'tool_call', toolCallId: 'c-read', name: 'read_file', kind: 'read', status: 'in_progress', title: 'File package.json', locations: [{ path: '/repo/package.json' }], rawInput: { Path: '/repo/package.json', StartLine: 5, EndLine: 14 } });
+    await send({ sessionUpdate: 'tool_call_update', toolCallId: 'c-read', name: 'read_file', kind: 'read', status: 'completed', rawOutput: { output: '{"version":"0.2.8"}' } });
+    await send({ sessionUpdate: 'tool_call', toolCallId: 'c-cmd', name: 'run_command', kind: 'execute', status: 'in_progress', title: 'echo ok', rawInput: { CommandLine: 'echo ok', toolSummary: '输出验证文本' } });
+    await send({ sessionUpdate: 'tool_call_update', toolCallId: 'c-cmd', name: 'run_command', kind: 'execute', status: 'completed', rawOutput: { output: 'ok\\n', exit_code: 0 } });
+    await send({ sessionUpdate: 'tool_call', toolCallId: 'c-edit', name: 'edit_file', kind: 'edit', status: 'in_progress', title: 'Edit a.ts', rawInput: { Path: '/repo/a.ts', Target: 'old', Replacement: 'new' } });
+    await send({ sessionUpdate: 'tool_call_update', toolCallId: 'c-edit', name: 'edit_file', kind: 'edit', status: 'completed', rawOutput: { output: 'edited' } });
+    await send({ sessionUpdate: 'tool_call', toolCallId: 'c-write', name: 'write_file', kind: 'edit', status: 'in_progress', title: 'Write b.ts', rawInput: { Path: '/repo/b.ts', Content: 'export const b = 1;' } });
+    await send({ sessionUpdate: 'tool_call_update', toolCallId: 'c-write', name: 'write_file', kind: 'edit', status: 'completed', rawOutput: { output: 'written' } });
+    await send({ sessionUpdate: 'tool_call', toolCallId: 'c-web', name: 'search_web', kind: 'search', status: 'in_progress', title: 'Search docs', rawInput: { query: 'dsh harness' } });
+    await send({ sessionUpdate: 'tool_call_update', toolCallId: 'c-web', name: 'search_web', kind: 'search', status: 'completed', rawOutput: { output: 'results' } });
+    await send({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '已完成全部检查。' } });
+    return { stopReason: 'end_turn', usage: { inputTokens: 1000, outputTokens: 80, cachedReadTokens: 200, cachedWriteTokens: 0 } };
+  })
+  .onRequest('session/close', () => ({}))
+  .connect(ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)));
+`);
+  await chmod(script, 0o755);
+  const base = antigravityProfile(defaultSettings, {});
+  const adapter = new AcpAdapter({
+    environment: {},
+    profile: { ...base, spawn: env => ({ command: process.execPath, args: [script], env }) },
+  });
+  try {
+    // 1. 原生拆分目录按模型列出各自支持的推理强度，不误拆 gpt-oss-120b-medium
+    const inspected = await adapter.inspect({ cwd: root });
+    assert.equal(inspected.status, 'ready');
+    assert.deepEqual(inspected.catalog.models.map(m => [m.ref.id, m.supportedThinkingOptionIds]), [
+      ['gemini-4-neon', ['low', 'medium', 'high', 'xhigh']],
+      ['gemini-4-argon', ['low', 'medium', 'high']],
+      ['gemini-pro-orchestrator-neon', []],
+      ['gpt-oss-120b-medium', []],
+    ]);
+
+    // 2. 打开会话（带旧复合模型 ID 归一化 + 宿主说明），验证 sessionMeta 与流式过程事件
+    const opened = await adapter.open({
+      kind: 'create', cwd: root, permissionModeId: 'default',
+      model: modelRef('gemini-4-neon-medium'), instructions: '\n\n[HOST-INSTR]',
+    });
+    assert.equal(opened.ok, true, opened.ok ? '' : opened.error.message);
+    const session = opened.value;
+    assert.equal(session.initialState.effectiveModel.id, 'gemini-4-neon');
+    assert.equal(session.initialState.effectiveThinkingOptionId, 'medium');
+
+    // 切到无 thought_level 的 orchestrator 不应误把 gpt-oss-120b-medium 当复合目录拆开
+    assert.equal((await session.execute({ type: 'model.select', model: modelRef('gemini-pro-orchestrator-neon') })).ok, true);
+    assert.equal(session.inspect().catalog.models.some(m => m.ref.id === 'gpt-oss-120b-medium'), true);
+    assert.equal((await session.execute({ type: 'model.select', model: modelRef('gemini-4-neon') })).ok, true);
+
+    const events = [];
+    const reader = (async () => {
+      for await (const out of session.outputs) {
+        if (out.kind === 'event') events.push(out.event);
+      }
+    })();
+    const started = await session.execute({ type: 'turn.start', turnId: 'dsh:test:1', input: [{ type: 'text', text: '检查项目状态' }] });
+    assert.equal(started.ok, true);
+    while (!events.some(e => e.type === 'turn.completed')) await new Promise(r => setTimeout(r, 15));
+
+    const completedItems = events.filter(e => e.type === 'item.completed').map(e => e.snapshot.item);
+    assert.equal(completedItems[0].type, 'reasoning');
+    assert.match(completedItems[0].text, /先检查文件/);
+    assert.equal(completedItems[1].type, 'agentMessage');
+    assert.equal(completedItems[1].text, '先查看 package.json 并运行检查命令。');
+    const readItem = completedItems.find(i => i.type === 'toolExecution' && i.toolName === 'read');
+    assert.deepEqual(readItem.arguments, { file_path: '/repo/package.json', offset: 5, limit: 10 });
+    const cmdItem = completedItems.find(i => i.type === 'commandExecution');
+    assert.equal(cmdItem.command, 'echo ok');
+    assert.equal(cmdItem.description, '输出验证文本');
+    assert.equal(cmdItem.exitCode, 0);
+    const editItem = completedItems.find(i => i.type === 'toolExecution' && i.toolName === 'edit');
+    assert.deepEqual(editItem.arguments, { file_path: '/repo/a.ts', old_string: 'old', new_string: 'new' });
+    const writeItem = completedItems.find(i => i.type === 'toolExecution' && i.toolName === 'write');
+    assert.deepEqual(writeItem.arguments, { file_path: '/repo/b.ts', content: 'export const b = 1;' });
+    const webItem = completedItems.find(i => i.type === 'toolExecution' && i.toolName === 'web_search');
+    assert.deepEqual(webItem.arguments, { queries: ['dsh harness'] });
+    assert.equal(completedItems.at(-1).type, 'agentMessage');
+    assert.equal(completedItems.at(-1).text, '已完成全部检查。');
+
+    const usageEvent = events.filter(e => e.type === 'session.usage.changed').at(-1);
+    assert.equal(usageEvent.usage.contextWindowTokens, 1048576);
+    assert.equal(usageEvent.usage.outputTokens, 80);
+
+    const liveTurnKey = events.find(e => e.type === 'turn.completed').nativeTurnRef.nativeTurnKey;
+    const nativeRef = session.initialState.nativeRef;
+    await session.close();
+    await reader;
+
+    // 3. 关掉再恢复会话后，轮次标识必须与实时轮次一致，且 session/new 与 session/load 均传入进展反馈系统提示
+    const resumed = await adapter.open({ kind: 'resume', cwd: root, nativeRef, permissionModeId: 'default' });
+    assert.equal(resumed.ok, true, resumed.ok ? '' : resumed.error.message);
+    const snapshot = await resumed.value.readSnapshot();
+    assert.equal(snapshot.ok, true, snapshot.ok ? '' : snapshot.error.message);
+    assert.equal(snapshot.value.turns.length, 1);
+    assert.equal(snapshot.value.turns[0].nativeTurnRef.nativeTurnKey, liveTurnKey);
+    await resumed.value.close();
+
+    const notes = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    const newMeta = notes.filter(n => n.newMeta).at(-1)?.newMeta;
+    assert.match(newMeta?.antigravity?.systemPrompt?.append ?? '', /\[DSH 进展反馈\][\s\S]*\[HOST-INSTR\]/);
+    const loadMeta = notes.find(n => n.loadMeta)?.loadMeta;
+    assert.match(loadMeta?.antigravity?.systemPrompt?.append ?? '', /\[DSH 进展反馈\]/);
+  } finally {
+    await adapter.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

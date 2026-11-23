@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { Config, defaultSettings, settingsOf } from '../dist/settings.js';
 import { Config as PluginConfig } from '../dist/dsh.js';
-import { claudeProfile, codexProfile } from '../dist/acp-profiles.js';
+import { antigravityProfile, claudeProfile, codexProfile } from '../dist/acp-profiles.js';
 import { DelegationBridge } from '../dist/delegation.js';
 
 // The built-in progress contract, as the profiles injected it before it became a setting.
@@ -50,6 +50,25 @@ test('both profiles retain the interaction contract while reading live settings'
   assert.match(claude.sessionMeta('resume').systemPrompt.append, questionContract);
   // An explicit command still pins the executable over the setting.
   assert.equal(codexProfile({ command: 'pinned', environment: {}, settings }).spawn({}).env.CODEX_PATH, 'pinned');
+
+  // Antigravity defaults to native `agy acp` with live feedback/interaction instructions via sessionMeta.
+  current = { ...current, progressFeedback: true, progressFeedbackText: '[AGY-FEEDBACK]' };
+  const agy = antigravityProfile(settings, {});
+  const full = agy.spawn({ AGY_BIN: '/opt/agy' });
+  assert.equal(full.command, '/opt/agy');
+  assert.deepEqual(full.args, ['acp', '--stdio', '--dangerously-skip-permissions']);
+  const discuss = agy.spawn({ AGY_BIN: '/opt/agy', DSH_DISCUSSION_READ_ONLY: '1' });
+  assert.equal(discuss.command, '/opt/agy');
+  assert.deepEqual(discuss.args, ['acp', '--stdio', '--sandbox']);
+  const custom = agy.spawn({ ANTIGRAVITY_ACP_PATH: '/custom/agy-acp' });
+  assert.equal(custom.command, '/custom/agy-acp');
+  assert.deepEqual(custom.args, []);
+  const agyAppend = agy.sessionMeta('create', '\n\n[HOST]').antigravity.systemPrompt.append;
+  assert.match(agyAppend, questionContract);
+  assert.ok(agyAppend.endsWith('[AGY-FEEDBACK]\n\n[HOST]'));
+  current = { ...current, progressFeedback: false };
+  assert.match(agy.sessionMeta('resume').antigravity.systemPrompt.append, questionContract);
+  assert.doesNotMatch(agy.sessionMeta('resume').antigravity.systemPrompt.append, /\[AGY-FEEDBACK\]/);
 });
 
 test('the delegation CLI waits for a discussion as long as the setting said when its session process started', async () => {
