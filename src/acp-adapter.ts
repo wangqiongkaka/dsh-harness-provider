@@ -147,10 +147,29 @@ const v2Commands = (commands: unknown[]): unknown[] => commands.map(value => {
 // ── Catalogs from session/new ───────────────────────────────────────────────────────────────────────────────────────
 
 type Opened = acp.NewSessionResponse | acp.LoadSessionResponse;
+interface CompoundModels {
+  variants: Map<string, Map<string, string>>;
+  defaultVariant: Map<string, string>;
+  parts: Map<string, { model: string; thinking?: string }>;
+}
 interface Catalogs {
   catalog: HarnessModelCatalog; permissionModes?: HarnessPermissionModeCatalog;
-  modelConfigId?: string; thinkingConfigId?: string; modeConfigId?: string; currentModel?: string; currentThinking?: string; currentMode?: string;
+  modelConfigId?: string; thinkingConfigId?: string; modeConfigId?: string;
+  currentModel?: string; currentRawModel?: string; currentThinking?: string; currentMode?: string;
+  compoundModels?: CompoundModels;
   configOptions: Map<string, acp.SessionConfigOption>;
+}
+const COMPOUND_EFFORTS = [
+  ['off', 'Off'], ['minimal', 'Minimal'], ['low', 'Low'], ['medium', 'Medium'],
+  ['high', 'High'], ['xhigh', 'XHigh'], ['max', 'Max'], ['ultra', 'Ultra'],
+] as const;
+const COMPOUND_EFFORT_PATTERN = new RegExp(`^(.+)-(${COMPOUND_EFFORTS.map(([id]) => id).join('|')})$`, 'iu');
+function parseCompoundModel(value: string, name: string): { model: string; label: string; effort?: string } {
+  const match = COMPOUND_EFFORT_PATTERN.exec(value);
+  if (!match) return { model: value, label: name };
+  const effort = match[2]!.toLowerCase();
+  const label = name.replace(new RegExp(`\\s*\\(${effort}\\)$`, 'iu'), '').trim() || match[1]!;
+  return { model: match[1]!, label, effort };
 }
 const recommended = (option: acp.SessionConfigOption): string | undefined => text(record(record(record(option._meta).jetbrains).air).recommendedValue, 512);
 type SelectOption = acp.SessionConfigOption & { type: 'select' };
@@ -158,7 +177,7 @@ const isSelect = (option: acp.SessionConfigOption): option is SelectOption => op
 const selectOptions = (option: acp.SessionConfigOption): acp.SessionConfigSelectOption[] =>
   isSelect(option) ? option.options.flatMap(entry => 'group' in entry ? entry.options : [entry]) : [];
 /** Model, thought-level and mode selectors of the session; per-model effort support comes from the `models` extension. */
-export function catalogsOf(opened: Opened, additional: HarnessModelCatalog = { models: [], thinkingOptions: [] }, thinkingSelection?: string): Catalogs {
+export function catalogsOf(opened: Opened, additional: HarnessModelCatalog = { models: [], thinkingOptions: [] }, thinkingSelection?: string, splitModelEfforts = false): Catalogs {
   const options = opened.configOptions ?? [];
   const model = options.filter(isSelect).find(option => option.category === 'model');
   const thinking = options.filter(isSelect).find(option => option.category === 'thought_level');
@@ -170,17 +189,62 @@ export function catalogsOf(opened: Opened, additional: HarnessModelCatalog = { m
     const match = /^(.+)\[([^\]]+)\]$/u.exec(String(record(entry).modelId ?? ''));
     if (match) (efforts.get(match[1]!) ?? efforts.set(match[1]!, new Set()).get(match[1]!)!).add(match[2]!);
   }
-  const thinkingOptions = thinking ? selectOptions(thinking).map(option => ({ id: harnessThinkingOptionIdSchema.parse(option.value), label: option.name })) : [];
-  const models = model ? selectOptions(model).map(option => ({
-    ref: modelRef(option.value), label: option.name, ...(text(option.description, 256) ? { resolvedModelLabel: text(option.description, 256)! } : {}),
-    ...(efforts.has(option.value) ? { supportedThinkingOptionIds: thinkingOptions.filter(entry => efforts.get(option.value)!.has(entry.id)).map(entry => entry.id) }
-      : additional.thinkingOptions.length ? { supportedThinkingOptionIds: thinkingOptions.map(entry => entry.id) } : {}),
-  })) : [];
-  const defaultModel = model ? recommended(model) ?? model.currentValue : undefined;
-  const external = model && additional.models.find(entry => entry.ref.id === modelRef(model.currentValue).id);
-  const defaultThinking = external ? external.defaultThinkingOptionId : thinking ? recommended(thinking) ?? thinking.currentValue : undefined;
-  const currentThinking = external ? thinkingSelection && external.supportedThinkingOptionIds?.includes(harnessThinkingOptionIdSchema.parse(thinkingSelection))
-    ? thinkingSelection : external.defaultThinkingOptionId : thinking?.currentValue;
+  const rawModels = model ? selectOptions(model) : [];
+  const parsedModels = splitModelEfforts && !thinking ? rawModels.map(option => ({ option, ...parseCompoundModel(option.value, option.name) })) : [];
+  const useCompound = parsedModels.some(entry => entry.effort !== undefined);
+  let compoundModels: CompoundModels | undefined;
+  let thinkingOptions = thinking ? selectOptions(thinking).map(option => ({ id: harnessThinkingOptionIdSchema.parse(option.value), label: option.name })) : [];
+  let models: HarnessModelCatalog['models'];
+  let defaultModel: string | undefined;
+  let currentModel: string | undefined;
+  let defaultThinking: string | undefined;
+  let currentThinking: string | undefined;
+  if (useCompound && model) {
+    const variants = new Map<string, Map<string, string>>();
+    const defaultVariant = new Map<string, string>();
+    const parts = new Map<string, { model: string; thinking?: string }>();
+    const groups = new Map<string, { label: string; description?: string }>();
+    const seenEfforts = new Set<string>();
+    for (const entry of parsedModels) {
+      if (!groups.has(entry.model)) {
+        groups.set(entry.model, { label: entry.label, ...(text(entry.option.description, 256) ? { description: text(entry.option.description, 256)! } : {}) });
+        defaultVariant.set(entry.model, entry.option.value);
+      }
+      const map = variants.get(entry.model) ?? variants.set(entry.model, new Map()).get(entry.model)!;
+      map.set(entry.effort ?? '', entry.option.value);
+      parts.set(entry.option.value, { model: entry.model, ...(entry.effort ? { thinking: entry.effort } : {}) });
+      if (entry.effort) seenEfforts.add(entry.effort);
+    }
+    compoundModels = { variants, defaultVariant, parts };
+    thinkingOptions = COMPOUND_EFFORTS.filter(([id]) => seenEfforts.has(id)).map(([id, label]) => ({ id: harnessThinkingOptionIdSchema.parse(id), label }));
+    models = [...groups.entries()].map(([id, group]) => {
+      const map = variants.get(id)!;
+      const supported = thinkingOptions.filter(entry => map.has(entry.id)).map(entry => entry.id);
+      const firstEffort = parts.get(defaultVariant.get(id)!)?.thinking;
+      return {
+        ref: modelRef(id), label: group.label, ...(group.description ? { resolvedModelLabel: group.description } : {}),
+        supportedThinkingOptionIds: supported,
+        ...(firstEffort ? { defaultThinkingOptionId: harnessThinkingOptionIdSchema.parse(firstEffort) } : {}),
+      };
+    });
+    const rawDefault = recommended(model) ?? model.currentValue;
+    defaultModel = parts.get(rawDefault)?.model ?? rawDefault;
+    defaultThinking = parts.get(rawDefault)?.thinking;
+    currentModel = parts.get(model.currentValue)?.model ?? model.currentValue;
+    currentThinking = parts.get(model.currentValue)?.thinking;
+  } else {
+    models = rawModels.map(option => ({
+      ref: modelRef(option.value), label: option.name, ...(text(option.description, 256) ? { resolvedModelLabel: text(option.description, 256)! } : {}),
+      ...(efforts.has(option.value) ? { supportedThinkingOptionIds: thinkingOptions.filter(entry => efforts.get(option.value)!.has(entry.id)).map(entry => entry.id) }
+        : additional.thinkingOptions.length ? { supportedThinkingOptionIds: thinkingOptions.map(entry => entry.id) } : {}),
+    }));
+    defaultModel = model ? recommended(model) ?? model.currentValue : undefined;
+    currentModel = model?.currentValue;
+    const external = model && additional.models.find(entry => entry.ref.id === modelRef(model.currentValue).id);
+    defaultThinking = external ? external.defaultThinkingOptionId : thinking ? recommended(thinking) ?? thinking.currentValue : undefined;
+    currentThinking = external ? thinkingSelection && external.supportedThinkingOptionIds?.includes(harnessThinkingOptionIdSchema.parse(thinkingSelection))
+      ? thinkingSelection : external.defaultThinkingOptionId : thinking?.currentValue;
+  }
   return {
     catalog: { models: [...models.filter(model => !additional.models.some(extra => extra.ref.id === model.ref.id)), ...additional.models],
       thinkingOptions: [...thinkingOptions, ...additional.thinkingOptions], ...(defaultModel ? { defaultModel: modelRef(defaultModel) } : {}),
@@ -191,8 +255,9 @@ export function catalogsOf(opened: Opened, additional: HarnessModelCatalog = { m
     ...(modes ? { permissionModes: { modes: modes.availableModes.map(mode => ({ id: harnessPermissionModeIdSchema.parse(mode.id), label: mode.name,
       ...(text(mode.description) ? { description: text(mode.description)! } : {}), ...((record(record(record(mode._meta).jetbrains).air).kind ?? record(mode._meta).kind) === 'full_access' ? { dangerous: true } : {}) })),
       defaultModeId: harnessPermissionModeIdSchema.parse(modes.currentModeId) } } : {}),
-    ...(model ? { modelConfigId: model.id, currentModel: model.currentValue } : {}),
+    ...(model ? { modelConfigId: model.id, currentRawModel: model.currentValue, ...(currentModel ? { currentModel } : {}) } : {}),
     ...(thinking ? { thinkingConfigId: thinking.id } : {}), ...(currentThinking ? { currentThinking } : {}),
+    ...(compoundModels ? { compoundModels } : {}),
     ...(modes ? { currentMode: modes.currentModeId } : {}), ...(mode ? { modeConfigId: mode.id } : {}), configOptions: new Map(auxiliary.map(option => [option.id, option])),
   };
 }
@@ -885,7 +950,7 @@ class AcpSession implements HarnessSession {
           ...(process_.protocolVersion === 2 ? { replayFrom: { type: 'start' } } : {}), ...(meta ? { _meta: meta } : {}) }, limitsOf(profile).loadTimeoutMs);
       }
       await models.apply(opened, sessionId);
-      const catalogs = catalogsOf(opened, options.additionalCatalog, input.thinkingOptionId);
+      const catalogs = catalogsOf(opened, options.additionalCatalog, input.thinkingOptionId, profile.harnessId === 'antigravity');
       const responseCommands = record(opened).availableCommands;
       const skills = (Array.isArray(responseCommands) ? responseCommands as acp.AvailableCommand[] : await waitFor(() => commands, 3_000)) ?? [];
       session = new AcpSession(options, process_, sessionId, opened, catalogs, skillsOf(profile, skills));
@@ -901,10 +966,15 @@ class AcpSession implements HarnessSession {
   /** Requested model / thinking / permission that differ from the agent's current values are applied before the first turn. */
   async #applyHints(input: OpenSessionInput): Promise<void> {
     const { profile } = this;
-    if (input.model && this.#catalogs.modelConfigId && modelValue(input.model) !== this.#catalogs.currentModel) await this.#setConfig(this.#catalogs.modelConfigId, modelValue(input.model));
     const thinking = input.thinkingOptionId ? profile.legacyThinkingOptions?.[input.thinkingOptionId] ?? input.thinkingOptionId : undefined;
-    const external = this.#additionalCatalog.models.some(model => model.ref.id === input.model?.id);
-    if (!external && thinking && this.#catalogs.thinkingConfigId && thinking !== this.#catalogs.currentThinking && this.#catalogs.catalog.thinkingOptions.some(option => option.id === thinking)) await this.#setConfig(this.#catalogs.thinkingConfigId, thinking);
+    if (this.#catalogs.compoundModels && this.#catalogs.modelConfigId) {
+      const target = this.#resolveCompoundModel(input.model ? modelValue(input.model) : undefined, thinking);
+      if (target && target !== this.#catalogs.currentRawModel) await this.#setConfig(this.#catalogs.modelConfigId, target);
+    } else {
+      if (input.model && this.#catalogs.modelConfigId && modelValue(input.model) !== this.#catalogs.currentModel) await this.#setConfig(this.#catalogs.modelConfigId, modelValue(input.model));
+      const external = this.#additionalCatalog.models.some(model => model.ref.id === input.model?.id);
+      if (!external && thinking && this.#catalogs.thinkingConfigId && thinking !== this.#catalogs.currentThinking && this.#catalogs.catalog.thinkingOptions.some(option => option.id === thinking)) await this.#setConfig(this.#catalogs.thinkingConfigId, thinking);
+    }
     const mode = input.permissionModeId ? profile.legacyPermissionModes?.[input.permissionModeId] ?? input.permissionModeId : undefined;
     // agy-acp persists a new session binding on set_config_option, even before its first prompt.
     if (profile.harnessId === 'antigravity') {
@@ -1009,13 +1079,23 @@ class AcpSession implements HarnessSession {
         case 'model.select': {
           if (this.#active) return failed('sessionBusy', 'Model selection requires an idle session', true);
           if (!this.#catalogs.modelConfigId) return failed('unsupported', 'Harness does not select models');
-          const value = modelValue(command.model);
           if (!this.#catalogs.catalog.models.some(model => model.ref.id === command.model.id)) return failed('invalidRequest', 'Unknown model');
+          const value = this.#catalogs.compoundModels
+            ? this.#resolveCompoundModel(modelValue(command.model), this.#catalogs.currentThinking)
+            : modelValue(command.model);
+          if (!value) return failed('invalidRequest', 'Unknown model');
           await this.#setConfig(this.#catalogs.modelConfigId, value);
           return { ok: true, value: { completed: true } };
         }
         case 'thinking.select': {
           if (this.#active) return failed('sessionBusy', 'Thinking selection requires an idle session', true);
+          if (this.#catalogs.compoundModels) {
+            if (!this.#catalogs.modelConfigId) return failed('unsupported', 'Harness does not select thinking levels');
+            const value = this.#resolveCompoundModel(this.#catalogs.currentModel, command.thinkingOptionId, true);
+            if (!value) return failed('invalidRequest', 'Unknown thinking level');
+            await this.#setConfig(this.#catalogs.modelConfigId, value);
+            return { ok: true, value: { completed: true } };
+          }
           if (!this.#catalogs.thinkingConfigId) return failed('unsupported', 'Harness does not select thinking levels');
           if (!this.#catalogs.catalog.thinkingOptions.some(option => option.id === command.thinkingOptionId)) return failed('invalidRequest', 'Unknown thinking level');
           await this.#setConfig(this.#catalogs.thinkingConfigId, command.thinkingOptionId);
@@ -1069,8 +1149,21 @@ class AcpSession implements HarnessSession {
     if (this.#catalogs.permissionModes) this.#catalogs.permissionModes.defaultModeId = harnessPermissionModeIdSchema.parse(modeId);
     this.#publish({ ...this.#state, effectivePermissionModeId: harnessPermissionModeIdSchema.parse(modeId) });
   }
+  #resolveCompoundModel(model?: string, thinking?: string, strict = false): string | undefined {
+    const compound = this.#catalogs.compoundModels;
+    if (!compound) return model;
+    const legacy = model ? compound.parts.get(model) : undefined;
+    const base = legacy?.model ?? model ?? this.#catalogs.currentModel;
+    if (!base) return undefined;
+    const variants = compound.variants.get(base);
+    if (!variants) return undefined;
+    const desired = thinking ?? legacy?.thinking ?? this.#catalogs.currentThinking;
+    if (desired && variants.has(desired)) return variants.get(desired);
+    if (strict) return undefined;
+    return compound.defaultVariant.get(base);
+  }
   #configChanged(options: acp.SessionConfigOption[]): void {
-    const catalogs = this.#catalogs = catalogsOf({ configOptions: options, ...(this.#modes ? { modes: this.#modes } : {}), ...(this.#models ? { models: this.#models } : {}) } as Opened, this.#additionalCatalog, this.#requestedThinking ?? this.#state.effectiveThinkingOptionId);
+    const catalogs = this.#catalogs = catalogsOf({ configOptions: options, ...(this.#modes ? { modes: this.#modes } : {}), ...(this.#models ? { models: this.#models } : {}) } as Opened, this.#additionalCatalog, this.#requestedThinking ?? this.#state.effectiveThinkingOptionId, this.#profile.harnessId === 'antigravity');
     this.capabilities = capabilitiesOf(this.#process.initialized.agentCapabilities, catalogs);
     const { effectiveModel: _model, resolvedModelLabel: _label, effectiveThinkingOptionId: _thinking, availableThinkingOptions: _options,
       effectivePermissionModeId: _mode, configValues: _configs, ...base } = this.#state;
@@ -1757,7 +1850,7 @@ export class AcpAdapter implements HarnessAdapter {
       const startedAt = Date.now();
       try {
         return await this.#probe(input.cwd ?? process.cwd(), async (process_, opened): Promise<HarnessInspection> => {
-          const catalogs = catalogsOf(opened, await this.#options.profile.modelCatalog?.());
+          const catalogs = catalogsOf(opened, await this.#options.profile.modelCatalog?.(), undefined, this.#options.profile.harnessId === 'antigravity');
           return { status: 'ready', catalog: catalogs.catalog, ...(catalogs.permissionModes ? { permissionModes: catalogs.permissionModes } : {}),
             capabilities: capabilitiesOf(process_.initialized.agentCapabilities, catalogs) };
         });

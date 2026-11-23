@@ -20,7 +20,7 @@ import LocalAttachments from '@deepseek-ai/dsh-attachment-local';
 import Tools, { executeTool } from './tools.mjs';
 import Persistence from './session-persistence.mjs';
 import { HarnessOutputChannel } from '../dist/contracts.js';
-import { AcpAdapter, modelRef } from '../dist/acp-adapter.js';
+import { AcpAdapter, catalogsOf, modelRef } from '../dist/acp-adapter.js';
 import { HarnessService, inject } from '../dist/dsh.js';
 import { delegationInstructions } from '../dist/delegation.js';
 import { Config, defaultSettings, settingsOf } from '../dist/settings.js';
@@ -247,15 +247,103 @@ agent({ name: 'agy-fixture' })
     assert.equal(launches, 0);
 
     // 讨论会话以 plan 模式打开时，设置 mode=plan 并开启 sandbox=true
-    const opened = await adapter.open({ kind: 'create', cwd: root, discussion: true, permissionModeId: 'plan', model: modelRef('gemini-3.8-flash-low') });
+    const opened = await adapter.open({ kind: 'create', cwd: root, discussion: true, permissionModeId: 'plan', model: modelRef('gemini-3.8-flash'), thinkingOptionId: 'low' });
     assert.equal(opened.ok, true, opened.ok ? '' : opened.error.message);
     assert.equal(opened.value.initialState.effectivePermissionModeId, 'plan');
-    assert.equal(opened.value.initialState.effectiveModel.id, 'gemini-3.8-flash-low');
+    assert.equal(opened.value.initialState.effectiveModel.id, 'gemini-3.8-flash');
+    assert.equal(opened.value.initialState.effectiveThinkingOptionId, 'low');
     assert.equal(opened.value.initialState.configValues.sandbox, true);
     const sets = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line).set);
+    assert.ok(sets.some(entry => entry.configId === 'model' && entry.value === 'gemini-3.8-flash-low'));
     assert.ok(sets.some(entry => entry.configId === 'mode' && entry.value === 'plan'));
     assert.ok(sets.some(entry => entry.configId === 'sandbox' && entry.value === true && entry.type === 'boolean'));
     await opened.value.close();
+  } finally {
+    await adapter.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Antigravity 将复合模型选项拆分为模型与推理强度，并支持实时切换和旧模型 ID 兼容', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-agy-split-'));
+  const script = join(root, 'agy-split-peer.mjs');
+  const log = join(root, 'log.jsonl');
+  await writeFile(script, `
+import { agent, ndJsonStream } from '${import.meta.resolve('@agentclientprotocol/sdk/unstable')}';
+import { appendFileSync } from 'node:fs';
+import { Readable, Writable } from 'node:stream';
+const note = value => appendFileSync(${JSON.stringify(log)}, JSON.stringify(value) + '\\n');
+let mode = 'default', model = 'gemini-4-neon-high';
+const configOptions = () => [
+  { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: model, options: [
+    { value: 'gemini-4-neon-high', name: 'Gemini 4 Neon (High)' },
+    { value: 'gemini-4-neon-xhigh', name: 'Gemini 4 Neon (XHigh)' },
+    { value: 'gemini-4-neon-medium', name: 'Gemini 4 Neon (Medium)' },
+    { value: 'gemini-4-neon-low', name: 'Gemini 4 Neon (Low)' },
+    { value: 'gemini-pro-orchestrator-neon', name: 'Orchestrator (Neon)' },
+    { value: 'claude-opus-5-5-low', name: 'Claude Opus 5.5 (Low)' },
+    { value: 'claude-opus-5-5-medium', name: 'Claude Opus 5.5 (Medium)' },
+    { value: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (High)' },
+  ] },
+  { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: mode, options: [{ value: 'default', name: 'Standard' }, { value: 'plan', name: 'Plan Mode' }] },
+];
+agent({ name: 'agy-split-fixture' })
+  .onRequest('initialize', () => ({ protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { close: {} } }, authMethods: [] }))
+  .onRequest('session/new', () => ({ sessionId: 'agy-split', configOptions: configOptions() }))
+  .onRequest('session/set_config_option', ({ params }) => {
+    note({ set: params });
+    if (params.configId === 'mode') mode = params.value;
+    if (params.configId === 'model') model = params.value;
+    return { configOptions: configOptions() };
+  })
+  .onRequest('session/close', () => ({}))
+  .connect(ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)));
+`);
+  await chmod(script, 0o755);
+  const adapter = new AcpAdapter({
+    environment: {},
+    profile: { harnessId: 'antigravity', spawn: env => ({ command: process.execPath, args: [script], env }) },
+  });
+  try {
+    const inspected = await adapter.inspect({ cwd: root });
+    assert.equal(inspected.status, 'ready');
+    assert.equal(inspected.capabilities.configuration.selectThinkingOption, true);
+    assert.deepEqual(inspected.catalog.models.map(m => [m.ref.id, m.label, m.supportedThinkingOptionIds, m.defaultThinkingOptionId]), [
+      ['gemini-4-neon', 'Gemini 4 Neon', ['low', 'medium', 'high', 'xhigh'], 'high'],
+      ['gemini-pro-orchestrator-neon', 'Orchestrator (Neon)', [], undefined],
+      ['claude-opus-5-5', 'Claude Opus 5.5', ['low', 'medium', 'high'], 'low'],
+    ]);
+    assert.deepEqual(inspected.catalog.thinkingOptions.map(o => o.id), ['low', 'medium', 'high', 'xhigh']);
+    assert.equal(inspected.catalog.defaultModel?.id, 'gemini-4-neon');
+    assert.equal(inspected.catalog.defaultThinkingOptionId, 'high');
+
+    // 打开时组合基础模型与强度，实时切换强度与模型映射回底层复合 ID
+    const opened = await adapter.open({ kind: 'create', cwd: root, permissionModeId: 'default', model: modelRef('gemini-4-neon'), thinkingOptionId: 'xhigh' });
+    assert.equal(opened.ok, true, opened.ok ? '' : opened.error.message);
+    const session = opened.value;
+    assert.equal(session.initialState.effectiveModel.id, 'gemini-4-neon');
+    assert.equal(session.initialState.resolvedModelLabel, 'Gemini 4 Neon');
+    assert.equal(session.initialState.effectiveThinkingOptionId, 'xhigh');
+
+    // 切到不支持 xhigh 的 Claude Opus 5.5 时回退到该模型默认强度
+    assert.equal((await session.execute({ type: 'model.select', model: modelRef('claude-opus-5-5') })).ok, true);
+    assert.equal((await session.execute({ type: 'thinking.select', thinkingOptionId: 'high' })).ok, true);
+    // 不支持的强度被拒绝
+    assert.equal((await session.execute({ type: 'thinking.select', thinkingOptionId: 'xhigh' })).ok, false);
+    // 无强度的模型可正常选择且拒绝强度切换
+    assert.equal((await session.execute({ type: 'model.select', model: modelRef('gemini-pro-orchestrator-neon') })).ok, true);
+    assert.equal((await session.execute({ type: 'thinking.select', thinkingOptionId: 'high' })).ok, false);
+    await session.close();
+
+    // 旧版已保存的原始复合模型 ID 仍能无损打开并归一化
+    const legacy = await adapter.open({ kind: 'create', cwd: root, permissionModeId: 'default', model: modelRef('gemini-4-neon-medium') });
+    assert.equal(legacy.ok, true, legacy.ok ? '' : legacy.error.message);
+    assert.equal(legacy.value.initialState.effectiveModel.id, 'gemini-4-neon');
+    assert.equal(legacy.value.initialState.effectiveThinkingOptionId, 'medium');
+    await legacy.value.close();
+
+    const modelSets = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line).set).filter(s => s.configId === 'model').map(s => s.value);
+    assert.deepEqual(modelSets, ['gemini-4-neon-xhigh', 'claude-opus-5-5-low', 'claude-opus-5-5-high', 'gemini-pro-orchestrator-neon', 'gemini-4-neon-medium']);
   } finally {
     await adapter.close();
     await rm(root, { recursive: true, force: true });
@@ -286,9 +374,13 @@ function App() {
     },
   };
   const catalog = {
-    models: [{ id: 'gemini-4-neon-high', label: 'Gemini 4 Neon (High)', resolved: null, thinkingOptionIds: null }],
-    defaultModel: { id: 'gemini-4-neon-high', label: 'Gemini 4 Neon (High)', resolved: null },
-    thinkingOptions: [], defaultThinkingOptionId: null, permissionModes: [], defaultPermissionModeId: null, configOptions: [], error: null,
+    models: [
+      { id: 'gemini-4-neon', label: 'Gemini 4 Neon', resolved: null, thinkingOptionIds: ['low', 'medium', 'high', 'xhigh'] },
+      { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator (Neon)', resolved: null, thinkingOptionIds: [] },
+    ],
+    defaultModel: { id: 'gemini-4-neon', label: 'Gemini 4 Neon', resolved: null },
+    thinkingOptions: [{ id: 'low', label: 'Low' }, { id: 'medium', label: 'Medium' }, { id: 'high', label: 'High' }, { id: 'xhigh', label: 'XHigh' }],
+    defaultThinkingOptionId: 'high', permissionModes: [], defaultPermissionModeId: null, configOptions: [], error: null,
   };
   return <>
     <HarnessSettingsSection useHarnessSettings={pick => pick(snapshot)} form={form} t={key => zh[key] ?? key} />
@@ -329,8 +421,9 @@ createRoot(document.querySelector('#root')).render(<App />);`,
     const pickChip = page.locator('#pick-host button.hp-chip');
     assert.equal((await pickChip.textContent()).trim(), 'Antigravity · 默认');
     await pickChip.click();
-    await page.waitForFunction(() => document.querySelector('#pick-host .hp-cell-value')?.textContent === '默认 · Gemini 4 Neon (High)', undefined, { timeout: 5000 });
-    assert.deepEqual(await page.locator('#pick-host .hp-cell-label').allTextContents(), ['模型']);
+    await page.waitForFunction(() => document.querySelector('#pick-host .hp-cell-value')?.textContent === '默认 · Gemini 4 Neon', undefined, { timeout: 5000 });
+    assert.deepEqual(await page.locator('#pick-host .hp-cell-label').allTextContents(), ['模型', '强度']);
+    assert.deepEqual(await page.locator('#pick-host .hp-cell-value').allTextContents(), ['默认 · Gemini 4 Neon', '默认 · 高']);
   } finally {
     await browser.close();
   }
