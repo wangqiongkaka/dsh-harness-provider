@@ -7,7 +7,7 @@ const externalHarness = z.enum(['codex', 'claude-code', 'antigravity']);
 export const selection = z.enum(['dsh', ...externalHarness.options]);
 export const address = z.object({ sessionId: z.string().min(1) }).strict();
 export const stateSchema = z.object({
-  harness: selection, locked: z.boolean(), model: z.string().nullable(), thinking: z.string().nullable(), permission: z.string().nullable(),
+  harness: selection, availableHarnesses: z.array(selection).optional(), locked: z.boolean(), model: z.string().nullable(), thinking: z.string().nullable(), permission: z.string().nullable(),
   authStatus: z.object({ kind: z.string(), label: z.string(), detail: z.string().optional(), account: z.object({ email: z.string().optional(), plan: z.string().optional(), organization: z.string().optional() }).optional() }).optional(),
   configs: z.record(z.string(), z.union([z.string(), z.boolean()])),
   /** Ids of the other registered projects this session's Harness may also work in. */
@@ -132,7 +132,7 @@ export const descriptors: InvocationDescriptor[] = [
   ['recover', recoveryRequest, recoverySchema], ['rollback', address, stateSchema], ['edit', editRequest, stateSchema],
   ['previewRewind', rewindRequest, rewindPreviewSchema], ['confirmRewind', confirmRewindRequest, stateSchema],
   ['secretStatus', address, secretStatusSchema], ['answerSecret', secretAnswerRequest, z.object({ accepted: z.boolean() })],
-  ['state', address, stateSchema], ['select', selectRequest, stateSchema],
+  ['state', address, stateSchema], ['select', selectRequest, stateSchema], ['availableHarnesses', z.object({}).strict(), z.array(selection)],
   ['models', modelsRequest, modelsSchema], ['selectModel', modelRequest, stateSchema],
   ['selectThinking', thinkingRequest, stateSchema], ['selectPermission', permissionRequest, stateSchema], ['selectConfig', configRequest, stateSchema], ['linkProjects', linkRequest, stateSchema], ['directories', directoriesRequest, directoriesSchema],
   ['usage', address, usageSchema], ['harnesses', harnessesRequest, harnessesSchema], ['quota', address, quotaSchema],

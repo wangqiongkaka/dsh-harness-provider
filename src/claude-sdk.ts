@@ -76,6 +76,19 @@ function versionManagerDirectories(environment: NodeJS.ProcessEnv, home: string)
   return directories;
 }
 
+/** Lightweight check for whether a CLI executable (path or bare name on PATH) exists locally. */
+export function isCommandInstalled(command: string, environment: NodeJS.ProcessEnv): boolean {
+  const name = command.trim();
+  if (!name) return false;
+  if (path.isAbsolute(name) || name.includes('/') || name.includes('\\')) return isExecutable(name);
+  const windows = process.platform === 'win32';
+  const extensions = !windows || path.extname(name) ? [''] : (envValue(environment, 'PATHEXT') ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
+  for (const directory of (envValue(environment, 'PATH') ?? '').split(path.delimiter).map(entry => entry.trim().replace(/^"|"$/gu, '')).filter(Boolean)) {
+    for (const extension of extensions) if (isExecutable(path.join(directory, name + extension))) return true;
+  }
+  return false;
+}
+
 /**
  * The configured command (CLAUDE_COMMAND_PATH) when set, searched only on PATH if it is a bare name; otherwise
  * `claude` on PATH, then the usual install locations. A configured command never falls back to another installation.

@@ -38,6 +38,8 @@ export interface AcpProfile {
    * it the agent tags a subagent's events in the main session (Claude Code, which keeps the Agent call and report there).
    */
   nativeSubagents?: boolean;
+  /** Lightweight local check for whether the underlying CLI executable is installed. */
+  isInstalled?(): boolean;
   /**
    * The agent program; throws a HarnessError-like `{ code, message }` when its executable is missing. A session's process
    * gets the Host's session instructions for agents that only take them at launch (Codex's developer instructions).
@@ -1895,6 +1897,8 @@ export class AcpAdapter implements HarnessAdapter {
   readonly #pending = new Set<Promise<unknown>>();
   #closing: Promise<void> | null = null;
   constructor(options: AcpAdapterOptions) { this.#options = options; this.harnessId = harnessIdSchema.parse(options.profile.harnessId); }
+
+  isInstalled(): boolean { return this.#options.profile.isInstalled?.() ?? true; }
 
   /** A throwaway session reports the agent's catalogs; it is closed before it ever prompts, so nothing persists. */
   inspect(input: { cwd?: string } = {}): Promise<HarnessInspection> {

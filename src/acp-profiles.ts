@@ -16,7 +16,7 @@ import type { HarnessAccountSnapshot, HarnessPlugin, HostTurnSnapshot } from './
 import { defaultSettings, feedbackOf, type SettingsSource } from './settings.js';
 import { interactionInstructions } from './feedback.js';
 import { CodexRpc } from './codex-rpc.js';
-import { ClaudeInspector, ClaudeNotInstalledError, resolveClaudeExecutable, withNodeOnPath, withReclaudeEnvironment, withUserShellEnvironment } from './claude-sdk.js';
+import { ClaudeInspector, ClaudeNotInstalledError, isCommandInstalled, resolveClaudeExecutable, withNodeOnPath, withReclaudeEnvironment, withUserShellEnvironment } from './claude-sdk.js';
 import type { AcpLimits, AcpProfile } from './acp-adapter.js';
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -170,6 +170,7 @@ export function codexProfile(options: { command?: string; environment: NodeJS.Pr
     protocolVersion: 2,
     showThoughts: false,
     nativeSubagents: true,
+    isInstalled: () => isCommandInstalled(command(), environment),
     // codex-acp reads no instructions from session/new, but merges CODEX_CONFIG into every thread/start and thread/resume; as
     // developer instructions the interaction, feedback and Host instructions stay out of the user's messages and survive compaction.
     // codex-acp starts CODEX_PATH with its own environment.
@@ -212,6 +213,10 @@ export function antigravityAccountSnapshot(raw: string): HarnessAccountSnapshot 
 export function antigravityProfile(settings: SettingsSource = defaultSettings, environment = process.env): AcpProfile {
   return {
     harnessId: 'antigravity',
+    isInstalled: () => {
+      const env = withUserShellEnvironment({ ...environment });
+      return isCommandInstalled(env.ANTIGRAVITY_ACP_PATH || env.AGY_BIN || 'agy', env);
+    },
     inspectAccount: async () => {
       const env = withUserShellEnvironment({ ...environment });
       const { stdout } = await promisify(execFile)(env.AGY_BIN || 'agy', ['-p', '/usage'], { env, timeout: settings().requestTimeoutSeconds * 1000 });
@@ -291,6 +296,7 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
   };
   return {
     harnessId: 'claude-code',
+    isInstalled: () => { try { resolveClaudeExecutable(environment, command()); return true; } catch { return false; } },
     ...(options.dshModels ? {
       modelCatalog: () => options.dshModels!.catalog(),
       modelEnvironment: (model, thinking) => isDshModel(model) ? options.dshModels!.environment(model!.id, thinking) : Promise.resolve({}),

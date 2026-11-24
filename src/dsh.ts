@@ -610,6 +610,18 @@ export class HarnessService extends TypertRemoteService {
     return { accepted: true };
   }
 
+  private isHarnessInstalled(harness: Binding['harness']): boolean {
+    const adapter = this.adapters[harness];
+    return Boolean(adapter) && (adapter.isInstalled?.() ?? true);
+  }
+  private availableExternalHarnesses(): Binding['harness'][] {
+    return (['codex', 'claude-code', 'antigravity'] as const).filter(harness => this.isHarnessInstalled(harness));
+  }
+  async availableHarnesses(raw: unknown): Promise<Array<'dsh' | Binding['harness']>> {
+    z.object({}).strict().parse(raw);
+    return ['dsh', ...this.availableExternalHarnesses()];
+  }
+
   async harnesses(raw: unknown) {
     const { sessionIds } = harnessesRequest.parse(raw);
     return Object.fromEntries(await Promise.all(sessionIds.map(async id => {
@@ -647,7 +659,7 @@ export class HarnessService extends TypertRemoteService {
         if (configured !== 'last') await this.bindings.writeNativeSelection(sessionId);
         return this.view();
       }
-      if (!agent.session.header.cwd) return this.view();
+      if (!this.isHarnessInstalled(preferred) || !agent.session.header.cwd) return this.view();
       return this.view(await this.bind(agent, sessionId, preferred).catch(() => undefined));
     });
   }
@@ -669,6 +681,7 @@ export class HarnessService extends TypertRemoteService {
     const request = delegationRequest.parse(raw);
     if ((await this.bindings.readDelegated(source))?.delegation.discussion) throw new Error('讨论会话不能创建子会话');
     if (admitted?.discussion && request.harness === 'dsh') throw new Error('DSH 原生暂不支持强制只读讨论');
+    if (request.harness !== 'dsh' && !this.isHarnessInstalled(request.harness)) throw new Error(`${HARNESS_NAMES[request.harness]} 未安装，请先安装对应 CLI`);
     if (request.harness === 'dsh' && (request.model || request.thinking)) throw new Error('DSH 原生委派使用宿主当前模型，不能单独指定模型或推理强度');
     const parent = await this.agent(source);
     const target = admitted?.workspaceId ? this.workspace(admitted.workspaceId) : undefined;
@@ -888,6 +901,8 @@ export class HarnessService extends TypertRemoteService {
   async startDiscussionFromUser(raw: unknown) {
     const request = startDiscussionFromUserRequest.parse(raw);
     if ((await this.bindings.readDelegated(request.sessionId))?.delegation.discussion) throw new Error('讨论会话不能创建新讨论');
+    const unavailable = request.harnesses?.find(harness => !this.isHarnessInstalled(harness));
+    if (unavailable) throw new Error(`${HARNESS_NAMES[unavailable]} 未安装，请先安装对应 CLI`);
     const source = await this.agent(request.sessionId);
     if (source.session.snapshotEvents().some(event => event.type === 'user/message' && event.data.source.kind === 'user' && 'rpcId' in event.data.source && event.data.source.rpcId === request.requestId)) return { accepted: true as const };
     const active = this.discussions.get(request.sessionId);
@@ -1216,7 +1231,7 @@ export class HarnessService extends TypertRemoteService {
   async delegationModels(source: string) {
     const cwd = (await this.agent(source)).session.header.cwd;
     if (!cwd) throw new Error('请先连接工作目录');
-    const targets = (['codex', 'claude-code', 'antigravity'] as const).filter(harness => Boolean(this.adapters[harness]));
+    const targets = this.availableExternalHarnesses();
     return Object.fromEntries(await Promise.all(targets.map(async harness => {
       const catalog = await this.catalog({ version: 1, sessionId: source, harness, cwd, locked: false })
         .catch(error => ({ error: error instanceof Error ? error.message : String(error) }));
@@ -1599,7 +1614,7 @@ export class HarnessService extends TypertRemoteService {
 
   private view(binding?: Binding, nativeLocked = false, events: readonly SessionEvent[] = []) {
     const authStatus = binding ? this.accountStatuses.get(binding.harness) : undefined;
-    return { ...(authStatus ? { authStatus } : {}), harness: binding?.harness ?? 'dsh' as const, locked: binding?.locked ?? nativeLocked,
+    return { ...(authStatus ? { authStatus } : {}), harness: binding?.harness ?? 'dsh' as const, availableHarnesses: ['dsh' as const, ...this.availableExternalHarnesses()], locked: binding?.locked ?? nativeLocked,
       model: binding?.model?.id ?? null, thinking: binding?.thinking ?? null, permission: binding?.permission ?? null,
       configs: binding?.configs ?? {}, linked: binding ? linkedWorkspaces(this.ctx, binding).map(workspace => workspace.id as string) : [], linkedPaths: binding?.linkedPaths ?? [], recoveryRequired: !!binding?.pending, editableTurns: binding?.turns?.map(entry => entry.turn) ?? [],
       rewindRecoveryToken: binding?.fileRewind?.token ?? null,

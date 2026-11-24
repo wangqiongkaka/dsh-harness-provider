@@ -42,6 +42,7 @@ type Api = {
   secretStatus(request: {sessionId: string}): Promise<RemoteResult<SecretStatus>>;
   answerSecret(request: {sessionId: string; id: string; answers: Record<string,string[]>; cancelled?: boolean}): Promise<RemoteResult<{accepted: boolean}>>;
   state(request: {sessionId: string}): Promise<RemoteResult<State>>;
+  availableHarnesses(request: Record<string, never>): Promise<RemoteResult<State['harness'][]>>;
   select(request: {sessionId: string; harness: State['harness']}): Promise<RemoteResult<State>>;
   models(request: {sessionId: string; harness?: Exclude<State['harness'], 'dsh'>; workspaceId?: string}): Promise<RemoteResult<Models>>;
   workspaces(request: {sessionId: string}): Promise<RemoteResult<Workspaces>>;
@@ -130,7 +131,7 @@ const zh = {
   'setting.recoveryCheckSeconds': '恢复核对间隔（秒）', 'setting.recoveryCheckSeconds.hint': '暂停的会话打开时自动核对原生记录的最短间隔。',
   'setting.acpStderr': 'ACP 调试输出', 'setting.acpStderr.hint': '把 Agent 进程的 stderr 输出到 DSH 日志，仅用于排查启动问题；可能包含提示词或凭据。',
   discuss: '讨论', discussDescription: '由主 Agent 分配一个或多个会话并汇总', discussTask: '讨论任务', discussStarted: '已开始讨论',
-  discussHint: '可多选；主 Agent 为选中的 Harness 分工并汇总', discussExit: '退出讨论模式', discussNative: 'DSH 原生暂不支持只读讨论',
+  discussHint: '可多选；主 Agent 为选中的 Harness 分工并汇总', discussExit: '退出讨论模式', discussNative: 'DSH 原生暂不支持只读讨论', discussNone: '未检测到已安装的外部 Harness',
   ...agentsZh,
 };
 const en: Record<keyof typeof zh,string> = {
@@ -198,7 +199,7 @@ const en: Record<keyof typeof zh,string> = {
   'setting.recoveryCheckSeconds':'Recovery check interval (seconds)', 'setting.recoveryCheckSeconds.hint':'Minimum gap between automatic native-record checks of a paused session.',
   'setting.acpStderr':'ACP debug output', 'setting.acpStderr.hint':'Sends the agent process stderr to the DSH log, for startup problems only; it may contain prompts or credentials.',
   discuss:'Discuss', discussDescription:'Let the main agent assign one or more sessions and synthesize', discussTask:'Discussion task', discussStarted:'Discussion started',
-  discussHint:'Select one or more; the main agent assigns the selected Harnesses and synthesizes', discussExit:'Exit discussion mode', discussNative:'Native DSH does not support read-only discussions yet',
+  discussHint:'Select one or more; the main agent assigns the selected Harnesses and synthesizes', discussExit:'Exit discussion mode', discussNative:'Native DSH does not support read-only discussions yet', discussNone:'No installed external Harness detected',
   ...agentsEn,
 };
 type Key = keyof typeof zh;
@@ -546,12 +547,38 @@ function remoteSettingsForm(api: Pick<Api, 'readSettings' | 'updateSettings'>): 
     unset: field => mutate([{ op: 'unset', path: [field] }]),
   };
 }
-const freshOptions = (): DelegationOptions => {
+const ALL_HARNESSES: readonly State['harness'][] = ['dsh', 'codex', 'claude-code', 'antigravity'];
+let knownAvailableHarnesses: readonly State['harness'][] | undefined;
+const availableListeners = new Set<() => void>();
+function setKnownAvailableHarnesses(next?: readonly State['harness'][]) {
+  if (!next?.length) return;
+  if (knownAvailableHarnesses && knownAvailableHarnesses.length === next.length && knownAvailableHarnesses.every((item, index) => item === next[index])) return;
+  knownAvailableHarnesses = [...next];
+  for (const listener of availableListeners) listener();
+}
+const subscribeAvailableHarnesses = (listener: () => void) => { availableListeners.add(listener); return () => { availableListeners.delete(listener); }; };
+const currentAvailableHarnesses = (): readonly State['harness'][] => knownAvailableHarnesses ?? ALL_HARNESSES;
+const useAvailableHarnesses = () => useSyncExternalStore(subscribeAvailableHarnesses, currentAvailableHarnesses, currentAvailableHarnesses);
+function filterDelegationHarnesses(configured: readonly State['harness'][] | undefined, available: readonly State['harness'][]): State['harness'][] {
+  const kept = (configured ?? []).filter(harness => available.includes(harness));
+  if (kept.length) return kept;
+  const external = available.find(harness => harness !== 'dsh');
+  return external ? [external] : ['dsh'];
+}
+function filterDiscussionHarnesses(configured: readonly State['harness'][] | undefined, available: readonly State['harness'][]): State['harness'][] {
+  const external: State['harness'][] = available.filter(harness => harness !== 'dsh');
+  const kept = (configured ?? []).filter(harness => external.includes(harness));
+  return kept.length ? kept : external;
+}
+const freshOptions = (available: readonly State['harness'][] = currentAvailableHarnesses()): DelegationOptions => {
   const settings = pluginSettings();
-  const harnesses: State['harness'][] = settings?.delegateHarnesses?.length ? [...settings.delegateHarnesses] : ['codex'];
+  const harnesses = filterDelegationHarnesses(settings?.delegateHarnesses?.length ? settings.delegateHarnesses : ['codex'], available);
   return { harnesses, reportBack: settings?.delegateReportBack ?? false, worktree: !harnesses.includes('dsh') && (settings?.delegateWorktree ?? false), picks: {} };
 };
-const freshDiscussion = (): State['harness'][] => { const harnesses = pluginSettings()?.discussHarnesses; return harnesses?.length ? [...harnesses] : ['codex', 'claude-code']; };
+const freshDiscussion = (available: readonly State['harness'][] = currentAvailableHarnesses()): State['harness'][] => {
+  const harnesses = pluginSettings()?.discussHarnesses;
+  return filterDiscussionHarnesses(harnesses?.length ? harnesses : ['codex', 'claude-code'], available);
+};
 const optionsFor = (sessionId: string): DelegationOptions => delegationOptions.get(sessionId) ?? freshOptions();
 /** Catalog and project readers per session in delegation mode; the dock slot itself has no Remote. */
 const delegationReaders = new Map<string, { models(harness: Target, workspaceId?: string): Promise<Models>; workspaces(): Promise<Workspaces> }>();
@@ -559,9 +586,13 @@ const discussionHarnesses = new Map<string, State['harness'][]>();
 const discussionFor = (sessionId: string): State['harness'][] => discussionHarnesses.get(sessionId) ?? freshDiscussion();
 let delegationRequestSequence = 0;
 const delegationRequestId = () => globalThis.crypto?.randomUUID?.() ?? `delegate-${Date.now()}-${++delegationRequestSequence}`;
+const refreshAvailable = (remote: Api) => {
+  if (typeof remote.availableHarnesses === 'function') void value(remote.availableHarnesses({})).then(next => setKnownAvailableHarnesses(next), () => {});
+};
 const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
   const requestId = delegationRequestId();
   delegationOptions.set(session.sessionId, freshOptions());
+  refreshAvailable(remote);
   delegationReaders.set(session.sessionId, {
     models: (harness, workspaceId) => value(remote.models({ sessionId: session.sessionId, harness, ...(workspaceId ? { workspaceId } : {}) })),
     workspaces: () => value(remote.workspaces({ sessionId: session.sessionId })),
@@ -581,10 +612,13 @@ const delegationClaim = (remote: Api, session: ClientSessionContext, t: T): Comm
 const discussionClaim = (remote: Api, session: ClientSessionContext, t: T): CommandClaim => {
   const requestId = delegationRequestId();
   discussionHarnesses.set(session.sessionId, freshDiscussion());
+  refreshAvailable(remote);
   return {
     name: 'discuss', token: '/discuss ', hint: t('discussTask'), attachments: true,
     async submit(prompt, _actx, attachments) {
-      await value(remote.startDiscussionFromUser({ sessionId: session.sessionId, requestId, prompt, attachments, harnesses: discussionFor(session.sessionId) }));
+      const harnesses = discussionFor(session.sessionId);
+      if (!harnesses.length) throw new Error(t('discussNone'));
+      await value(remote.startDiscussionFromUser({ sessionId: session.sessionId, requestId, prompt, attachments, harnesses }));
       discussionHarnesses.delete(session.sessionId);
       return { kind: 'success', text: t('discussStarted') };
     },
@@ -601,13 +635,15 @@ function setTaskMode(sessionId: string, task?: CommandClaim) {
   publishTaskMode();
 }
 
-function TaskHarnessSelector({ selected, onChange, discussion = false, disabled = false, t }: { selected: State['harness'][]; onChange: (selected: State['harness'][]) => void; discussion?: boolean; disabled?: boolean; t: T }) {
+function TaskHarnessSelector({ selected, onChange, available = ALL_HARNESSES, discussion = false, disabled = false, t }: { selected: State['harness'][]; onChange: (selected: State['harness'][]) => void; available?: readonly State['harness'][]; discussion?: boolean; disabled?: boolean; t: T }) {
   const names: Record<State['harness'], string> = { dsh: t('native'), codex: 'Codex', 'claude-code': 'Claude Code', antigravity: 'Antigravity' };
+  const visible = (Object.keys(names) as State['harness'][]).filter(harness => available.includes(harness));
+  const current = selected.filter(harness => visible.includes(harness));
   return <div className="hp-delegate-harness" role="group" aria-label={t('harness')}>
-    {(Object.keys(names) as State['harness'][]).map(harness => <button key={harness} type="button" role="checkbox" aria-checked={selected.includes(harness)}
+    {visible.map(harness => <button key={harness} type="button" role="checkbox" aria-checked={current.includes(harness)}
       disabled={disabled || (discussion && harness === 'dsh')} title={discussion && harness === 'dsh' ? t('discussNative') : undefined}
-      onClick={() => { const next = selected.includes(harness) ? selected.filter(value => value !== harness) : [...selected, harness]; if (next.length) onChange(next); }}>
-      {selected.includes(harness) && <Check />}{names[harness]}
+      onClick={() => { const next = current.includes(harness) ? current.filter(value => value !== harness) : [...current, harness]; if (next.length) onChange(next); }}>
+      {current.includes(harness) && <Check />}{names[harness]}
     </button>)}
   </div>;
 }
@@ -842,14 +878,21 @@ export function LinkedProjectsPanel({ sessionId, projects, linkProjects, directo
   </div>;
 }
 function DelegationDockActive({ sessionId, t }: DelegationDockProps) {
+  const available = useAvailableHarnesses();
   const [options, setOptions] = useState(() => optionsFor(sessionId));
   const busy = taskModes.get(sessionId)?.busy === true;
   const update = (next: DelegationOptions) => { delegationOptions.set(sessionId, next); setOptions(next); };
+  useEffect(() => {
+    const filtered = filterDelegationHarnesses(options.harnesses, available);
+    if (filtered.length !== options.harnesses.length || filtered.some((item, index) => item !== options.harnesses[index])) {
+      update({ ...options, harnesses: filtered, worktree: !filtered.includes('dsh') && options.worktree });
+    }
+  }, [available, options]);
   const readers = delegationReaders.get(sessionId);
   const loadModels = useCallback((harness: Target) => readers!.models(harness, options.workspaceId), [readers, options.workspaceId]);
   return <div className="hp-delegate" data-hp-mode="delegate" aria-label={t('delegateMode')}>
     <strong>{t('delegateMode')}</strong>
-    <TaskHarnessSelector disabled={busy} selected={options.harnesses} onChange={harnesses => update({ ...options, harnesses, worktree: !harnesses.includes('dsh') && options.worktree })} t={t} />
+    <TaskHarnessSelector disabled={busy} available={available} selected={options.harnesses} onChange={harnesses => update({ ...options, harnesses, worktree: !harnesses.includes('dsh') && options.worktree })} t={t} />
     {/* Another project has its own catalog, so picks made for the previous one are dropped and the catalog is read again. */}
     <DelegateProject workspaceId={options.workspaceId} load={readers?.workspaces} disabled={busy} onChange={workspaceId => update({ ...options, workspaceId, picks: {} })} t={t} />
     {options.harnesses.filter((harness): harness is Target => harness !== 'dsh').map(harness => <DelegatePick key={`${harness}:${options.workspaceId ?? ''}`} harness={harness} pick={options.picks[harness] ?? {}}
@@ -867,11 +910,21 @@ function DelegationDockActive({ sessionId, t }: DelegationDockProps) {
   </div>;
 }
 function DiscussionDockActive({ sessionId, t }: DelegationDockProps) {
+  const available = useAvailableHarnesses();
   const [selected, setSelected] = useState(() => discussionFor(sessionId));
   const busy = taskModes.get(sessionId)?.busy === true;
+  useEffect(() => {
+    const filtered = filterDiscussionHarnesses(selected, available);
+    if (filtered.length !== selected.length || filtered.some((item, index) => item !== selected[index])) {
+      discussionHarnesses.set(sessionId, filtered);
+      setSelected(filtered);
+    }
+  }, [available, selected]);
+  const hasExternal = available.some(harness => harness !== 'dsh');
   return <div className="hp-delegate" data-hp-mode="discuss" aria-label={t('discuss')}>
     <strong title={t('discussHint')}>{t('discuss')}</strong>
-    <TaskHarnessSelector disabled={busy} selected={selected} onChange={harnesses => { discussionHarnesses.set(sessionId, harnesses); setSelected(harnesses); }} discussion t={t} />
+    <TaskHarnessSelector disabled={busy} available={available} selected={selected} onChange={harnesses => { discussionHarnesses.set(sessionId, harnesses); setSelected(harnesses); }} discussion t={t} />
+    {!hasExternal && <span role="status" className="hp-alert">{t('discussNone')}</span>}
     <button type="button" className="hp-delegate-exit" disabled={busy} aria-label={t('discussExit')} title={t('discussExit')}
       onClick={() => { discussionHarnesses.delete(sessionId); setTaskMode(sessionId); }}>×</button>
   </div>;
@@ -1082,12 +1135,19 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
     setError(undefined);
     void read(sessionId).then(next => { if (generation.current === version) {
       setState(next);
+      setKnownAvailableHarnesses(next.availableHarnesses);
       const key = `${sessionId}\0${next.harness}`;
       if (reported.current !== key) { reported.current = key; changed(sessionId, next.harness); }
     } })
       .catch(error => { if (generation.current === version) setError(error instanceof Error ? error.message : String(error)); });
     return () => { generation.current++; };
   }, [sessionId,summary?.running,summary?.blank,read,changed,revision]);
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    void read(sessionId).then(next => { if (live) { setState(next); setKnownAvailableHarnesses(next.availableHarnesses); } }, () => {});
+    return () => { live = false; };
+  }, [open, sessionId, read]);
   // Switching the session's model provider changes whose account the quota describes, so the provider joins the
   // dependencies: a switch re-reads at once, while the interval still covers a window moving on its own.
   const provider = useModelProvider(modelProvider, sessionId);
@@ -1101,11 +1161,13 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
     try {
       const result = await select(sessionId, next);
       if (generation.current !== version) return;
-      setState(result); changed(sessionId, result.harness);
+      setState(result); setKnownAvailableHarnesses(result.availableHarnesses); changed(sessionId, result.harness);
     } catch(error) { if (generation.current === version) setError(error instanceof Error ? error.message : String(error)); }
     finally { if (generation.current === version) setBusy(false); }
   }
   const current = state?.harness ?? 'dsh';
+  const baseAvailable = state?.availableHarnesses ?? ALL_HARNESSES;
+  const menuHarnesses = baseAvailable.includes(current) ? baseAvailable : [...baseAvailable, current];
   // The service decides: a started session is locked, while a branch stays switchable until its own first message.
   const disabled = !state || busy || state.locked || !!summary?.running;
   return <div className="hp-root" aria-busy={busy || !state}>
@@ -1115,7 +1177,7 @@ export function HarnessSelect({ sessionId, useSessions, read, select, quota, vie
         <span className="hp-chip-label">{current === 'dsh' ? t('native') : names[current]}</span><Chevron open={open} />
       </button>
       {open && <div className="hp-menu hp-menu-left" role="menu" aria-label={t('harness')}>
-        {(['dsh', 'codex', 'claude-code', 'antigravity'] as const).map(id => <Option key={id} label={id === 'dsh' ? t('native') : names[id]} selected={current === id} onClick={() => void choose(id)} />)}
+        {menuHarnesses.map(id => <Option key={id} label={id === 'dsh' ? t('native') : names[id]} selected={current === id} onClick={() => void choose(id)} />)}
       </div>}
     </div>
     {/* Only "not logged in" earns composer-row space; the identity labels (plan, API key, external backend) do not. */}
@@ -1291,7 +1353,7 @@ export function HarnessModel({ sessionId, locked, useSessions, read, models, sel
 }
 
 // ---- Settings page: the plugin's live configuration; DSH Settings validates each edit and persists it in the profile ----
-type SettingsSectionInjected = { hooks: { harnessSettings: ConfigForm<Settings> }; form: ConfigForm<Settings> };
+type SettingsSectionInjected = { hooks: { harnessSettings: ConfigForm<Settings> }; form: ConfigForm<Settings>; loadAvailableHarnesses?: () => Promise<State['harness'][]> };
 type SettingsSectionProps = PropsRuntime<'settings.section'> & PropsLocale<'harness'> & InjectFace<SettingsSectionInjected>;
 type SettingField = keyof Settings;
 
@@ -1308,15 +1370,25 @@ function DraftInput({ value, label, numeric, multiline, disabled, onCommit }: { 
 function Toggle({ checked, label, disabled, onChange }: { checked: boolean; label: string; disabled: boolean; onChange: (checked: boolean) => void }) {
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} className="hp-switch" disabled={disabled} onClick={() => onChange(!checked)}><span className="hp-switch-thumb" /></button>;
 }
-export function HarnessSettingsSection({ useHarnessSettings, form, t }: SettingsSectionProps) {
+export function HarnessSettingsSection({ useHarnessSettings, form, loadAvailableHarnesses, t }: SettingsSectionProps) {
   const snapshot = useHarnessSettings(value => value);
   const [failed, setFailed] = useState<SettingField>();
+  const [available, setAvailable] = useState<readonly State['harness'][]>(ALL_HARNESSES);
+  useEffect(() => {
+    if (!loadAvailableHarnesses) return;
+    let live = true;
+    void loadAvailableHarnesses().then(next => { if (live && next.length) { setAvailable(next); setKnownAvailableHarnesses(next); } }, () => {});
+    return () => { live = false; };
+  }, [loadAvailableHarnesses]);
   const value = snapshot.value;
   if (snapshot.status !== 'ready' || !value) return <div className="hp-set">
     <h2 className="hp-set-page">{t('settingsNav')}</h2>
     <p className="hp-set-intro">{snapshot.status === 'loading' ? t('loading') : t('settingsUnavailable')}</p>
   </div>;
   const disabled = !snapshot.writable;
+  const savedDefault = value.defaultHarness ?? 'last';
+  const defaultOptions: readonly State['harness'][] = savedDefault !== 'last' && !available.includes(savedDefault as State['harness'])
+    ? [...available, savedDefault as State['harness']] : available;
   // A field present in the profile's own layer is an override, even when it equals the default.
   const user = typeof snapshot.user === 'object' && snapshot.user !== null ? snapshot.user as Record<string, unknown> : {};
   const settle = (field: SettingField, work: Promise<boolean>) => { setFailed(undefined); void work.then(ok => { if (!ok) setFailed(field); }, () => setFailed(field)); };
@@ -1342,18 +1414,18 @@ export function HarnessSettingsSection({ useHarnessSettings, form, t }: Settings
     <p className="hp-set-intro">{t('settingsIntro')}</p>
     {disabled && <p className="hp-set-intro" role="note">{t('settingsReadOnly')}</p>}
     {group('settingsGroup.sessions', <>
-      {row('defaultHarness', <select aria-label={label('defaultHarness')} disabled={disabled} value={value.defaultHarness ?? 'last'}
+      {row('defaultHarness', <select aria-label={label('defaultHarness')} disabled={disabled} value={savedDefault}
         onChange={event => settle('defaultHarness', form.set('defaultHarness', event.target.value))}>
-        <option value="last">{t('lastHarness')}</option><option value="dsh">{t('native')}</option>
-        <option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="antigravity">Antigravity</option>
+        <option value="last">{t('lastHarness')}</option>
+        {defaultOptions.map(id => <option key={id} value={id}>{id === 'dsh' ? t('native') : names[id]}</option>)}
       </select>)}
       {row('idleCloseSeconds', number('idleCloseSeconds'))}
     </>)}
     {group('settingsGroup.delegation', <>
-      {row('delegateHarnesses', <TaskHarnessSelector selected={value.delegateHarnesses ?? ['codex']} disabled={disabled} t={t} onChange={next => settle('delegateHarnesses', form.set('delegateHarnesses', next))} />)}
+      {row('delegateHarnesses', <TaskHarnessSelector available={available} selected={value.delegateHarnesses ?? ['codex']} disabled={disabled} t={t} onChange={next => settle('delegateHarnesses', form.set('delegateHarnesses', next))} />)}
       {row('delegateReportBack', toggle('delegateReportBack'))}
       {row('delegateWorktree', toggle('delegateWorktree'))}
-      {row('discussHarnesses', <TaskHarnessSelector discussion selected={value.discussHarnesses ?? ['codex', 'claude-code']} disabled={disabled} t={t} onChange={next => settle('discussHarnesses', form.set('discussHarnesses', next))} />)}
+      {row('discussHarnesses', <TaskHarnessSelector discussion available={available} selected={value.discussHarnesses ?? ['codex', 'claude-code']} disabled={disabled} t={t} onChange={next => settle('discussHarnesses', form.set('discussHarnesses', next))} />)}
     </>)}
     {group('settingsGroup.feedback', <>
       {row('progressFeedback', toggle('progressFeedback'))}
@@ -2196,10 +2268,14 @@ export async function apply(ctx: Context): Promise<void> {
     const t = ctx.locale.bind('harness'), form = scope.configForms.get<Settings>(SETTINGS_ENTRY);
     if (processLocalForm(form)) return;
     settingsForm = form;
+    const loadAvailableHarnesses = () => {
+      const harness = ctx.remote?.harness as Api | undefined;
+      return typeof harness?.availableHarnesses === 'function' ? value(harness.availableHarnesses({})) : Promise.resolve([...ALL_HARNESSES]);
+    };
     scope.effect(() => () => { if (settingsForm === form) settingsForm = undefined; }, 'harness: settings form');
     scope.effect(() => scope.configForms.whileServed([SETTINGS_ENTRY], () => scope.slots.inject('settings.section', () => scope.slots.register({
       name: 'settings.section', id: 'harness', order: 25, label: () => t('settingsNav'), locale: 'harness',
-      inject: () => ({ hooks: { harnessSettings: form }, form }),
+      inject: () => ({ hooks: { harnessSettings: form }, form, loadAvailableHarnesses }),
     }, HarnessSettingsSection))), 'harness: settings page');
   });
   // A legacy remote browser (before the Host persisted browser preferences) gets a process-local Host form that never
@@ -2208,6 +2284,8 @@ export async function apply(ctx: Context): Promise<void> {
   ctx.inject(['slots', 'configForms', 'remote.harness'], scope => {
     if (!processLocalForm(scope.configForms.get<Settings>(SETTINGS_ENTRY))) return;
     const t = ctx.locale.bind('harness'), form = remoteSettingsForm(scope.remote.harness);
+    const loadAvailableHarnesses = () => typeof scope.remote.harness.availableHarnesses === 'function'
+      ? value(scope.remote.harness.availableHarnesses({})) : Promise.resolve([...ALL_HARNESSES]);
     const reload = () => { void form.load().catch(() => {}); };
     settingsForm = form;
     scope.effect(() => () => { if (settingsForm === form) settingsForm = undefined; }, 'harness: remote settings form');
@@ -2217,7 +2295,7 @@ export async function apply(ctx: Context): Promise<void> {
         const ready = form.getSnapshot().status === 'ready';
         if (ready && !off) off = scope.slots.inject('settings.section', () => scope.slots.register({
           name: 'settings.section', id: 'harness', order: 25, label: () => t('settingsNav'), locale: 'harness',
-          inject: () => ({ hooks: { harnessSettings: form }, form }),
+          inject: () => ({ hooks: { harnessSettings: form }, form, loadAvailableHarnesses }),
         }, HarnessSettingsSection));
         else if (!ready && off) { off(); off = undefined; }
       };

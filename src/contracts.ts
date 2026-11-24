@@ -251,6 +251,8 @@ export interface HarnessSkill { name: string; description: string; path?: string
 export interface HarnessPlugin { name: string; displayName: string; description: string | null; mention: string }
 export interface HarnessAdapter {
   readonly harnessId: HarnessId;
+  /** Lightweight local executable check (no subprocess); omitted adapters are treated as installed. */
+  isInstalled?(): boolean;
   inspect(input?: { cwd?: string; refresh?: boolean }): Promise<HarnessInspection>;
   listSkills(input: { cwd: string }): Promise<HarnessSkill[]>;
   listPlugins?(input: { cwd: string }): Promise<HarnessPlugin[]>;
