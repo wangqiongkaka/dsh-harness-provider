@@ -1,8 +1,8 @@
 # DSH Harness Provider
 
-将 Codex 和 Claude Code 接入 DSH 的独立插件，无需修改 DSH 源码。
+将 Codex、Claude Code 和 Antigravity 接入 DSH 的独立插件，无需修改 DSH 源码。
 
-插件通过 [Agent Client Protocol](https://agentclientprotocol.com)（ACP v2）连接随包提供的官方适配器：`codex-acp` 驱动本机 Codex CLI，`claude-agent-acp` 驱动本机 Claude Code CLI。对话、工具活动、提问、历史、分支和恢复都保留在 DSH 原生会话中；认证、模型推理、工具、沙箱、hooks 和权限策略仍由对应 CLI 管理。
+插件通过 [Agent Client Protocol](https://agentclientprotocol.com)（ACP）接入外部 CLI：随包提供官方适配器 `codex-acp`（驱动本机 Codex CLI）和 `claude-agent-acp`（驱动本机 Claude Code CLI，兼容 `reclaude`），并通过原生 `agy acp --stdio` 直连本机 Antigravity CLI。对话、工具活动、提问、历史、分支和恢复都保留在 DSH 原生会话中；认证、模型推理、工具、沙箱、hooks 和权限策略仍由对应 CLI 管理。
 
 > 当前为开发预览版，仅在 macOS 上验证。
 
@@ -10,21 +10,22 @@
 
 ## 功能特性
 
-- 在 DSH 输入栏切换 DSH 原生、Codex 或 Claude Code。
+- 在 DSH 输入栏切换 DSH 原生、Codex、Claude Code 或 Antigravity。
 - Claude Code 模型菜单同时列出 DSH 已配置服务商的模型（标记 `(DSH)`），复用 DSH 的接口、凭据和模型适配器，兼容 OpenAI 等接口；文件、终端和审批仍由 Claude Code 执行。
-- 使用 Harness 原生的模型、推理强度和权限配置。
-- 流式显示回复、Claude Code 思考、命令、文件操作、网页访问、计划、提问和审批；Codex 的 reasoning summary 不展示。
+- Claude Code 支持通过 `claudeCommand` 或 `CLAUDE_COMMAND_PATH` 指向 `reclaude`，自动同步其当前绑定账号的隔离 `CLAUDE_CONFIG_DIR`。
+- 使用 Harness 原生的模型、推理强度和权限配置（Antigravity 的模型与推理强度分开展示）。
+- 流式显示回复、Claude Code / Antigravity 思考、命令、文件操作、网页访问、计划、提问和审批；Codex 的 reasoning summary 不展示。
 - 支持图片输入、工具图片输出和本地文件附件。
-- 显示上下文用量、账户额度（原生会话切换模型厂商后立即刷新；Codex 额度对话一轮后同步，旧值先行展示；Claude Code 的 5 小时与 7 天窗口由会话在用量变化时推送，分模型周限额与套餐名只在首次读取或切换登录后更新）、输出速度、token 和缓存命中。Claude Code 的模型窗口由原生适配器读取，首次使用时可能短暂显示估计值。
-- 支持停止、运行中追加消息、排队消息在当前轮次完成后依次启动、分支、回滚和异常恢复；分支在发送第一条消息前可切换到其他 Harness。
+- 显示上下文用量、账户额度（原生会话切换模型厂商后立即刷新；Codex 额度对话一轮后同步，旧值先行展示；Claude Code 的 5 小时与 7 天窗口由会话在用量变化时推送，分模型周限额与套餐名只在首次读取或切换登录后更新；Antigravity 通过 `agy -p /usage` 读取并默认优先展示 Gemini 5 小时窗口，展开查看其他模型及周限额）、输出速度、token 和缓存命中。Claude Code 的模型窗口由原生适配器读取，首次使用时可能短暂显示估计值。
+- 支持停止、运行中追加消息、排队消息在当前轮次完成后依次启动、分支、回滚和异常恢复；分支在发送第一条消息前可切换到其他 Harness（Antigravity 不支持接收继承的宿主上下文）。
 - Codex / Claude Code 的用户消息旁提供独立的「恢复文件与对话」入口：预览文件差异并确认后，恢复到该轮开始前的文件和原生上下文，保留后续不冲突的修改；有冲突时不执行恢复。原有编辑和仅回滚对话的行为不变。
-- Codex / Claude Code 会话沿用 DSH 的自动标题插件：默认只在首条提示时生成；开启“随对话更新的标题”后随新用户消息更新，手动修改的标题保持锁定。标题使用插件显式配置的 DSH 模型，未指定时使用 DSH 默认模型，需要对应凭据和额度；失败不影响对话。
-- Codex / Claude Code 会话可关联 DSH 已添加的其他项目，Harness 在同一会话中直接访问这些项目的目录。
+- 外部 Harness 会话沿用 DSH 的自动标题插件：默认只在首条提示时生成；开启“随对话更新的标题”后随新用户消息更新，手动修改的标题保持锁定。标题使用插件显式配置的 DSH 模型，未指定时使用 DSH 默认模型，需要对应凭据和额度；失败不影响对话。
+- 外部 Harness 会话可关联 DSH 已添加的其他项目，Harness 在同一会话中直接访问这些项目的目录。
 - Agent 按要求创建并进入 Worktree 时，同步当前会话的工作目录、成员弹窗和 Git 面板；保留原项目归属和其他会话的目录。
-- 可手动将独立任务委派到新的 DSH 原生、Codex 或 Claude Code 会话。
-- 可手动开启讨论模式，由主 Agent 按任务并发性分配一个或多个会话并汇总结论。
-- 左侧边栏「新会话」下方显示「Agent 运行」卡片：四格分别统计待确认（等待审批、计划待审或等待回答）、运行中、已完成（数字仅统计未读完成会话，列表包含已读与未读）、未释放（Codex / Claude Code 会话已空闲但原生进程仍在，每 30 秒刷新）的会话，默认列出运行中会话，点统计格原位切换列表；「已完成」把已读和未读会话统一按最近一次任务结束事件的时间倒序排列；查看、改名和其他会话更新不改变顺序，记录从宿主日志恢复。未读会话标题旁显示「未读」，查看后标记清除。行首是会话的 Harness 图标（运行中呼吸闪动，委派会话带角标），点行打开会话，行尾「…」提供置顶、重命名、分叉、归档（仍在运行时先确认停止）和复制 Session ID。卡片较窄（如默认 280px 侧栏）时统计格排成两行两列。远程手机抽屉中由 dsh-remote-control 把它放到「新会话」的位置。
-- Codex / Claude Code 会话不在屏幕上且空闲 1 分钟后自动关闭其原生进程（仍有后台任务时保留），下一轮对话按原生会话恢复（首条消息多几秒冷启动）。
+- 可手动将独立任务委派到新的 DSH 原生、Codex、Claude Code 或 Antigravity 会话。
+- 可手动开启讨论模式，由主 Agent 按任务并发性分配一个或多个 Codex、Claude Code、Antigravity 只读会话并汇总结论。
+- 左侧边栏「新会话」下方显示「Agent 运行」卡片：四格分别统计待确认（等待审批、计划待审或等待回答）、运行中、已完成（数字仅统计未读完成会话，列表包含已读与未读）、未释放（外部 Harness 会话已空闲但原生进程仍在，每 30 秒刷新）的会话，默认列出运行中会话，点统计格原位切换列表；「已完成」把已读和未读会话统一按最近一次任务结束事件的时间倒序排列；查看、改名和其他会话更新不改变顺序，记录从宿主日志恢复。未读会话标题旁显示「未读」，查看后标记清除。行首是会话的 Harness 图标（运行中呼吸闪动，委派会话带角标），点行打开会话，行尾「…」提供置顶、重命名、分叉、归档（仍在运行时先确认停止）和复制 Session ID。列表区域最多展示 5 行高度，更多条目通过原生滚动浏览；卡片较窄（如默认 280px 侧栏）时统计格排成两行两列。远程手机抽屉中由 dsh-remote-control 把它放到「新会话」的位置，同样采用五行滚动。
+- 外部 Harness 会话不在屏幕上且空闲 1 分钟后自动关闭其原生进程（仍有后台任务时保留），下一轮对话按原生会话恢复（首条消息多几秒冷启动）。
 - Codex / Claude Code 的后台命令显示在 DSH 原生「后台任务」面板：查看运行状态、命令、输出、退出码（原生提供时）与耗时，停止单个任务或清空已结束任务。需要宿主提供 `jobs` 服务；清空仅隐藏列表记录，沿用宿主行为。输出以 CLI 上报为准，Codex 可能省略转入后台前已被工具收取的早期日志。
 - Claude Code 的后台任务结束后，它自行继续执行的内容显示在一个自动开启的跟进轮次里（以“后台任务已结束，Harness 继续执行。”开头），期间会话保持运行中、进程不被回收；此时发送的消息在跟进轮次结束后作为下一轮发出。跟进轮次不对应单独的原生轮次：回滚会连同它所跟随的那一轮一起撤销，分支请从它前后的普通轮次创建。
 
@@ -32,25 +33,25 @@
 
 - Node.js 22 或更高版本。
 - 使用 DSH 0.1.7-rc.2 的 Web Profile，或 DSH 0.2.0-rc.1 / 0.2.0-rc.2 / 0.2.1-rc.2 / 0.2.1-rc.3 / 0.2.1-rc.5 / 0.2.2-rc.1 / 0.2.2-rc.2 / 0.2.2-rc.3 / 0.2.2-rc.5 桌面版。本插件按这些版本的消息来源、工具结果、预设注册表和实时配置接口构建。各版本的验证范围见 [实现状态](docs/implementation-status.md)。
-- 已安装并完成登录或环境配置的 [Codex CLI](https://developers.openai.com/codex/cli/) 或 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)。
+- 已安装并完成登录或环境配置的 [Codex CLI](https://developers.openai.com/codex/cli/)、[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/overview)（或托管 Claude Code 的 `reclaude`），或支持原生 `acp` 子命令的 Antigravity CLI（`agy`）。
 
 ## 安装
 
 将发布包加入 DSH Profile，然后启动 DSH：
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.2.8.tgz
+dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.2.9.tgz
 dsh --profile web
 ```
 
-桌面版可在插件管理器中安装同一个 `dsh-harness-provider-0.2.8.tgz`，然后重新启动 DSH。
+桌面版可在插件管理器中安装同一个 `dsh-harness-provider-0.2.9.tgz`，然后重新启动 DSH。
 
 外部 Harness 不需要 DeepSeek API Key。首次引导时可以选择“稍后配置”；插件会在当前会话使用外部 Harness 时跳过 DeepSeek 凭据引导。
 
 ## 快速开始
 
 1. 新建一个空会话。
-2. 在输入栏选择 **Codex** 或 **Claude Code**。
+2. 在输入栏选择 **Codex**、**Claude Code** 或 **Antigravity**。
 3. 按需选择模型、推理强度和权限模式。
 4. 发送第一条消息。
 
@@ -61,6 +62,7 @@ dsh --profile web
 - 保持原 Harness：沿用原生会话分支，上下文完整。
 - 切到 DSH 原生：直接使用分支继承的会话记录。
 - 切到另一个 Codex / Claude Code：原生会话无法跨 Harness 复制，分支前的对话（用户消息、回复和工具名称，不含工具参数及输出）作为引用数据交给新会话，不进入用户消息；已回滚或编辑撤销的内容不会携带。超过“分支携带记录上限”时只保留最近部分。原会话中的工具细节和原生内部状态不会带过去，切走后再切回原 Harness 也改用这种方式。
+- Antigravity 无法接收继承的宿主上下文，不支持从已有消息分支切换进入；如需使用请新建会话。
 
 运行中的主要行为：
 
@@ -75,8 +77,9 @@ dsh --profile web
 | --- | --- | --- |
 | Codex | 逐项审批、自动审批、完全权限 | 自动审批（`agent`） |
 | Claude Code | 默认、接受编辑、计划、自动；符合条件时提供完全权限 | 自动（`auto`） |
+| Antigravity | 完全权限（需明确选择，或继承 DSH 完全访问） | 尚未授权（`blocked`） |
 
-新会话首次绑定时，插件优先将 DSH 的只读、工作区可写和完全权限映射到对应 Harness；没有对应模式时选择 Harness 的自动审批模式。Claude Code 的当前模型不支持自动模式时会退回接受编辑。运行期间不能切换模型、推理强度或权限模式。
+新会话首次绑定时，插件优先将 DSH 的只读、工作区可写和完全权限映射到对应 Harness；没有对应模式时选择 Harness 的自动审批模式（Antigravity 无对应模式时保持「尚未授权」，需用户在权限菜单明确选择「完全权限」后才可启动）。Claude Code 的当前模型不支持自动模式时会退回接受编辑。运行期间不能切换模型、推理强度或权限模式。
 
 ### 会话工作目录
 
@@ -99,7 +102,7 @@ Codex / Claude Code 会话点输入栏的 **+**（或输入 `/link`），在“�
 
 | Harness 活动 | DSH 显示 |
 | --- | --- |
-| 回复、Claude Code 思考 | 回复流、思考行；Codex reasoning summary 不展示 |
+| 回复、Claude Code / Antigravity 思考 | 回复流、思考行；Codex reasoning summary 不展示 |
 | 命令 | Bash 行 |
 | 读取、搜索、编辑文件 | Read、Grep、Glob、Edit 或 Write 行 |
 | 网页访问 | Web 行 |
@@ -126,9 +129,17 @@ Codex / Claude Code 会话点输入栏的 **+**（或输入 `/link`），在“�
 
 输入栏仅展示当前所选外部模型对应账户的额度：ZAI / 智谱 Coding Plan 默认显示 5 小时剩余额度，点击展开 5 小时、本周及模型限额、重置时间等明细；原生 Harness 使用相同展示方式。没有 5 小时窗口时展示接口实际提供的窗口。DeepSeek API 和 DeepSeek Account 显示钱包余额，入口及充值、赠送明细统一四舍五入保留两位小数，原始金额保持不变。切换模型立即刷新，旧账户的在途响应不会覆盖新账户；每 60 秒同步一次。模型列表不增加逐项额度。DeepSeek Account 当前公开接口只提供钱包余额，没有订阅窗口；其他未提供可查询接口的服务商不显示数值，不以零代替未知额度。
 
+### Antigravity
+
+默认直接调用本机 `agy` CLI 内置的原生 ACP 服务（`agy acp --stdio`），复用已有的 `agy` 登录；可通过 `AGY_BIN` 指定 `agy` 路径，或设置 `ANTIGRAVITY_ACP_PATH` 覆盖为自定义 ACP 可执行文件。
+
+- 在新会话中选择 **Antigravity**，然后在权限菜单选择 **完全权限**（已有的 DSH 完全访问权限会随会话选择自动继承）。常规及委派会话以 `--dangerously-skip-permissions` 运行，只读讨论以计划模式加沙箱（`--sandbox` + `mode=plan`）运行；受控会话与带继承上下文的分支不提供此选项。
+- 模型与推理强度在菜单中分开展示；流式思考、工具调用过程、用量统计和历史回放均由原生 ACP 服务端提供，DSH 进展反馈与宿主说明通过 `_meta.antigravity.systemPrompt.append` 传入。
+- 账户额度通过 `agy -p /usage` 读取，默认优先展示 Gemini 5 小时窗口，展开可查看周限额与其他模型分组额度。
+
 ## 委派会话
 
-在输入框的“指令”菜单中选择 **委派**，或输入 `/delegate`，再在原输入框中填写任务。任务可以同时携带图片和文件；发送前可多选 DSH 原生、Codex、Claude Code，并决定是否在完成后回传到当前会话。每个选中的 Harness 都会收到同一任务和附件，各创建一个独立会话；至少保留一个目标。
+在输入框的“指令”菜单中选择 **委派**，或输入 `/delegate`，再在原输入框中填写任务。任务可以同时携带图片和文件；发送前可多选 DSH 原生、Codex、Claude Code、Antigravity，并决定是否在完成后回传到当前会话。每个选中的 Harness 都会收到同一任务和附件，各创建一个独立会话；至少保留一个目标。
 
 委派和讨论模式与正文分开保存，输入框中不插入或隐藏模式指令。删空正文仍保留模式；点击关闭按钮退出时保留正文与附件。发送期间暂时锁定输入区，失败后恢复模式和内容，成功后清空；模式内不执行当前会话的其他指令。
 
@@ -140,10 +151,10 @@ Codex / Claude Code 会话点输入栏的 **+**（或输入 `/link`），在“�
 - 只能由用户明确触发；模型无法自行创建委派会话。模型原生的 subagent 能力不受影响。
 - “完成后回传”默认关闭；关闭时结果仅保留在新会话，开启时才通知并唤醒来源会话。只有创建者可以读取回传结果。
 - 任何会话（包括委派创建的会话）都可由用户再次明确发起委派。
-- 同 Harness 沿用来源权限；跨 Harness 使用与来源权限相匹配的目标权限。
-- 发送前可为每个选中的 Codex / Claude Code 选择模型与推理强度，不选时为“默认”，即该 Harness 最近一次在会话中切换且仍可用的模型与推理强度，没有时使用 Harness 自身默认，点开菜单可看到具体值。选择只作用于这次创建的会话，不改变之后新建会话沿用的模型；创建前按该 Harness 的模型目录校验，任一目标不合法时不创建任何会话。DSH 原生目标使用宿主当前模型。
-- DSH 原生目标使用宿主当前的默认 Agent preset 与模型；权限取与来源沙箱级别相同的权限预设（来源为 Codex / Claude Code 时，完全权限对应完全权限，只读或计划对应只读，其余对应工作区可写），没有匹配预设时拒绝创建。
-- 可选 **独立 worktree**（默认关闭，仅 Codex / Claude Code）：以目标项目目录（未选项目时为来源目录）当前内容（含未提交修改和未被忽略的新文件，不含 `node_modules`、`.env` 等被忽略文件）为起点，在插件数据目录下创建分离的 git worktree，Harness 在其中工作；DSH 会话仍显示在原工作区，界面中的文件与终端仍指向主目录。工作目录不是 git 仓库时拒绝创建。
+- 同 Harness 沿用来源权限；跨 Harness 使用与来源权限相匹配的目标权限（Antigravity 目标以完全权限运行）。
+- 发送前可为每个选中的 Codex / Claude Code / Antigravity 选择模型与推理强度，不选时为“默认”，即该 Harness 最近一次在会话中切换且仍可用的模型与推理强度，没有时使用 Harness 自身默认，点开菜单可看到具体值。选择只作用于这次创建的会话，不改变之后新建会话沿用的模型；创建前按该 Harness 的模型目录校验，任一目标不合法时不创建任何会话。DSH 原生目标使用宿主当前模型。
+- DSH 原生目标使用宿主当前的默认 Agent preset 与模型；权限取与来源沙箱级别相同的权限预设（来源为外部 Harness 时，完全权限对应完全权限，只读或计划对应只读，其余对应工作区可写），没有匹配预设时拒绝创建。
+- 可选 **独立 worktree**（默认关闭，仅 Codex / Claude Code / Antigravity）：以目标项目目录（未选项目时为来源目录）当前内容（含未提交修改和未被忽略的新文件，不含 `node_modules`、`.env` 等被忽略文件）为起点，在插件数据目录下创建分离的 git worktree，Harness 在其中工作；DSH 会话仍显示在原工作区，界面中的文件与终端仍指向主目录。工作目录不是 git 仓库时拒绝创建。
 - 使用 worktree 时，委派会话每轮结束且有未合并改动，会在该会话中询问：**合并并删除**（三方合并，作为未提交修改应用到主目录，不创建提交、不改动暂存区；有冲突时不应用任何改动并保留 worktree）、**放弃并删除** 或 **暂不处理**（下一轮结束时再问）。删除后该会话不再接受新的对话。
 
 创建操作使用 `requestId` 保证幂等。开启回传后，来源 Agent 只会在收到完成通知后分页读取结果，不使用 `sleep` 或定时轮询；状态为 `not-started` 或 `interrupted` 时提醒用户进入目标会话处理，不自动重发。
@@ -152,12 +163,12 @@ Codex / Claude Code 会话点输入栏的 **+**（或输入 `/link`），在“�
 
 在“指令”菜单中选择 **讨论**，或输入 `/discuss`，再在原输入框中填写任务并按需添加图片或文件。只有这条人工指令会授权当前主 Agent 发起一次讨论；普通对话和 `/delegate` 不会触发自动分配。
 
-- 顶部按钮支持多选 Codex、Claude Code，至少保留一个。主 Agent 在所选范围内分配 1–4 个会话，每个选中的 Harness 至少参与一次。DSH 原生暂不支持锁定只读权限，因此显示为不可选。
+- 顶部按钮支持多选 Codex、Claude Code、Antigravity，至少保留一个。主 Agent 在所选范围内分配 1–4 个会话，每个选中的 Harness 至少参与一次。DSH 原生暂不支持锁定只读权限，因此显示为不可选。
 - 只分配一个会话时直接执行；分配多个会话时先独立完成，再在各自原会话中互评一轮，由主 Agent 汇总最终答案。
 - 参与者都是与当前会话同层显示的独立会话，共用工作区但拥有独立历史；讨论不会再递归创建新会话。
 - 分配入口只在用户开启讨论的当前轮有效。相同调用重试复用已有任务，不能借此增加会话。
 - 主 Agent 可按每项分工的复杂度为参与者指定模型与推理强度（先查询可用值），省略时沿用该 Harness 上次的选择；有不合法的选择时不创建任何参与者，修正后可在同一轮重试。
-- 参与者锁定为只读：Codex 使用真正的只读沙箱；Claude Code 只开放读取、文件搜索和内置网页搜索/抓取工具。权限申请自动拒绝，不能切换权限、修改配置或创建会话分支；限制在恢复后继续生效。
+- 参与者锁定为只读：Codex 使用真正的只读沙箱；Claude Code 只开放读取、文件搜索和内置网页搜索/抓取工具；Antigravity 使用 `--sandbox` 沙箱与 `plan` 模式。权限申请自动拒绝，不能切换权限、修改配置或创建会话分支；限制在恢复后继续生效。
 - 原始网络与外部 MCP/应用操作不可用；内置网页能力仍受 Harness 自身支持和权限约束。无法安全拒绝或检测到权限变化时停止参与者，并在结果中报告原因；失败参与者不会自动进入互评。
 
 ## 会话恢复与数据
@@ -179,7 +190,7 @@ Claude 原生连接丢失或报告会话已结束时，插件会关闭失效连�
 
 | 分组 | 配置项 | 默认值 | 生效时机 |
 | --- | --- | --- | --- |
-| 会话 | `defaultHarness` 新会话默认 Harness | `last`（沿用上次选择） | 新会话首次打开；可固定为 `dsh`、`codex` 或 `claude-code`，已有会话和单次手动选择保持不变 |
+| 会话 | `defaultHarness` 新会话默认 Harness | `last`（沿用上次选择） | 新会话首次打开；可固定为 `dsh`、`codex`、`claude-code` 或 `antigravity`，已有会话和单次手动选择保持不变 |
 | 会话 | `idleCloseSeconds` 空闲回收（秒） | 60 | 下一次空闲扫描 |
 | 委派与讨论 | `delegateHarnesses` / `delegateReportBack` / `delegateWorktree` 委派默认目标、回传、独立 worktree | Codex / 关 / 关 | 下次进入委派模式 |
 | 委派与讨论 | `discussHarnesses` 讨论默认参与者 | Codex + Claude Code | 下次进入讨论模式 |
@@ -199,11 +210,14 @@ Claude 原生连接丢失或报告会话已结束时，插件会关闭失效连�
 | `claudeCommand` | 自动查找 | Claude Code 可执行文件；未设置时使用环境变量 `CLAUDE_COMMAND_PATH`，再从 PATH、常见安装目录和版本管理器目录中查找；原生进程下次启动时生效。指向 `reclaude` 时自动同步其当前绑定账号的 `CLAUDE_CONFIG_DIR` |
 | `root` | `$DSH_HOME/harness-plugin` | 插件状态目录；未设置 `DSH_HOME` 时为 `~/.dsh/harness-plugin`；修改后插件重新加载 |
 
+Antigravity 可执行文件通过启动环境变量配置：`AGY_BIN`（默认 `agy`）指定 Antigravity CLI 路径，或设置 `ANTIGRAVITY_ACP_PATH` 覆盖为自定义 ACP 可执行文件。
+
 ```yaml
 - id: harness-plugin
   config:
     root: /absolute/path/harness-state
     codexCommand: /absolute/path/codex
+    claudeCommand: reclaude
 ```
 
 从图形界面启动 DSH 时，插件会读取登录 shell 的环境；PATH 保留 DSH 自身的条目，并追加 shell 中的其他目录（如 nvm、pnpm），因此 `codexCommand` 可以指向 nvm 安装的 `#!/usr/bin/env node` 脚本。
@@ -218,16 +232,17 @@ DSH Host
     ├── DelegationBridge       创建、读取委派及受控讨论
     └── AcpAdapter
         ├── codex-acp          → 本机 Codex CLI
-        └── claude-agent-acp   → 本机 Claude Code CLI
+        ├── claude-agent-acp   → 本机 Claude Code CLI（兼容 reclaude）
+        └── agy acp --stdio    → 本机 Antigravity CLI（原生 ACP）
 ```
 
-两个 Harness 共用同一个 ACP 适配层，差异集中在 `src/acp-profiles.ts`。插件不向 Agent 声明文件系统或终端能力；工具由各 CLI 在自己的权限策略下执行。普通会话不额外传入 MCP 服务器。
+三个 Harness 共用同一个 ACP 适配层，差异集中在 `src/acp-profiles.ts`。插件不向 Agent 声明文件系统或终端能力；工具由各 CLI 在自己的权限策略下执行。普通会话不额外传入 MCP 服务器。
 
 选择 DSH 外部模型的 Claude Code 会话通过 `src/claude-dsh-models.ts` 将 Anthropic 消息协议转为宿主的 `llm.stream()`，复用各服务商适配器；工具执行仍留在 Claude Code。
 
 ### 供插件管理的工单会话
 
-`ctx.harness.manageSession(sessionId, { owner, harness, context, selection? })` 绑定已有的 DSH 会话，不创建委派会话，也不修改用户记忆的 Harness、模型或推理强度。`harness: 'dsh'` 固定主会话使用原生执行；外部工单使用 `codex` 或 `claude-code`，并以完全权限执行。该接口仅供可信插件调用，没有开放远程或模型工具入口。
+`ctx.harness.manageSession(sessionId, { owner, harness, context, selection? })` 绑定已有的 DSH 会话，不创建委派会话，也不修改用户记忆的 Harness、模型或推理强度。`harness: 'dsh'` 固定主会话使用原生执行；外部工单使用 `codex` 或 `claude-code`（不支持 `antigravity`），并以完全权限执行。该接口仅供可信插件调用，没有开放远程或模型工具入口。
 
 `managedSessionOptionsVersion >= 1` 表示支持 `selection: { model?: string, thinking?: string, fast?: boolean }`。省略字段保留 Harness 默认行为（模型和推理沿用最近可用选择）；显式值按能力目录校验，快速模式适配 `fast` / `fast-mode` 的布尔值或 `on/off` 表示，不支持时拒绝绑定。只在首次绑定时应用，恢复已有受控会话不会覆盖原选择。插件可用 `models({ sessionId, harness })` 查询目录，并用 `validateManagedSessionSelection(sessionId, harness, selection)` 在保存设置前只读校验；调用方应先检查能力版本，避免旧版本忽略参数。DSH 原生会话不接受 `selection`。
 
@@ -303,9 +318,3 @@ DSH `0.2.2-rc.2` 的 macOS 桌面发行包已验证类型检查、构建和全�
 ## 许可证
 
 本项目采用 [MIT License](LICENSE)。第三方依赖许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
-### Antigravity
-
-默认直接调用本机 `agy` CLI 内置的原生 ACP 服务（`agy acp --stdio`），复用已有的 `agy` 登录；可通过 `AGY_BIN` 指定 `agy` 路径，或设置 `ANTIGRAVITY_ACP_PATH` 覆盖为自定义 ACP 可执行文件。
-
-在新会话中选择 **Antigravity**，然后在权限菜单选择 **完全权限**。已有的 DSH 完全访问权限会随会话选择继承。常规及委派会话以 `--dangerously-skip-permissions` 运行，只读讨论以计划模式加沙箱（`--sandbox` + `mode=plan`）运行，受控会话不提供此选项。模型、推理强度、流式思考与工具调用过程、用量统计和历史回放均由原生 ACP 服务端提供，DSH 进展反馈与宿主说明通过 `_meta.antigravity.systemPrompt.append` 传入。
