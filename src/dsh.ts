@@ -1419,6 +1419,7 @@ export class HarnessService extends TypertRemoteService {
         if (binding.fileRewind) throw new Error('请先完成文件与对话恢复');
         if (binding.pending || agent.status === 'running' || agent.inbox.nextTurn.length || agent.inbox.nextStep.length) throw new Error('请先结束当前请求并处理未确认结果');
         const live = this.runner.live.get(sessionId);
+        if (live?.session.hasBackgroundTasks?.()) throw new Error('当前会话有后台任务，请等待任务结束后再清理上下文');
         if (live) { await live.session.close(); this.runner.live.delete(sessionId); }
         this.runner.retainedSubagents.delete(sessionId);
         delete binding.nativeRef; delete binding.usage; delete binding.turns; delete binding.pendingNative; delete binding.carry;

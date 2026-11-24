@@ -277,3 +277,70 @@ test('the quota panel footer stays on one line for an external Harness plan', as
   assert.match(box.text, /claude-code · max/u);
  } finally { await browser.close(); }
 });
+
+test('command/executed for /clear notifies HarnessContext to clear the context ring immediately without waiting for the 30s poll', async () => {
+ const { readFile, mkdir } = await import('node:fs/promises');
+ const { createRequire } = await import('node:module');
+ const { resolve } = await import('node:path');
+ const { runInNewContext } = await import('node:vm');
+
+ // 1. Built client entry wires `command/executed` for `clear` into the shared seat subscription.
+ const require = createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ let client;
+ runInNewContext(await readFile('dist/client.js', 'utf8'), {
+  window: { __ModuleLoader__: { load: ({ factory }) => { client = factory(require); } } },
+  document: { createElement: () => ({ setAttribute() {}, remove() {} }), head: { append() {} }, body: {}, querySelectorAll: () => [] },
+  MutationObserver: class { observe() {} disconnect() {} }, requestAnimationFrame: () => 1, cancelAnimationFrame() {}, setInterval: () => 1, clearInterval() {},
+ });
+ const events = new Map(), registered = [];
+ const slots = { inject: (_name, register) => register(), register(options, component) { registered.push({ options, component }); return () => {}; } };
+ const sessions = { list: { getSnapshot: () => ({ byId: { s1: { id: 's1', running: false, retainedBy: { mainView: 1 } } } }), subscribe: () => () => {} } };
+ const remote = { harness: { harnesses: async () => ({ ok: true, value: {} }) }, async $mount() { return () => {}; }, $on: () => () => {} };
+ const scope = {
+  slots, sessions, remote, get: () => undefined, effect(fn) { fn(); },
+  on(name, listener) { events.set(name, listener); return () => {}; },
+ };
+ await client.apply({
+  remote, locale: { register: () => () => {}, bind: () => key => key }, effect(fn) { fn(); }, on() { return () => {}; },
+  inject(keys, apply) { if (keys.includes('sessions') && keys.includes('remote.harness')) apply(scope); },
+ });
+ const left = registered.find(entry => entry.options.id === 'harness-selector');
+ assert.ok(left, 'harness-selector slot must be registered');
+ const api = left.options.inject();
+ let notified = 0;
+ api.subscribe(() => { notified++; });
+ const onCommand = events.get('command/executed');
+ assert.equal(typeof onCommand, 'function');
+ onCommand('s1', 'clear', { kind: 'success' });
+ assert.equal(notified, 1, 'command/executed(clear) must trigger subscribed seats immediately');
+
+ // 2. HarnessContext immediately drops the context ring on subscription notification while idle (instead of waiting 30s).
+ const script = await clientBundle();
+ const browser = await chromium.launch({ headless: true });
+ try {
+  const page = await browser.newPage({ viewport: { width: 420, height: 180 } });
+  await page.setContent('<style>:root{--dsw-alias-label-primary:#eee;--dsw-alias-label-secondary:#bbb;--dsw-alias-label-tertiary:#999;--dsw-alias-border-l2:#333;--dsw-alias-bg-layer-3:#29292c}body{margin:24px;background:#1b1b1b;color:#eee;font:14px sans-serif}</style><div id="root"></div>');
+  await page.addScriptTag({ content: script });
+  await page.evaluate(() => {
+   const { createElement, createRoot, useSyncExternalStore, HarnessContext, styles, zh } = window.HarnessProvider;
+   const style = document.createElement('style'); style.textContent = styles; document.head.append(style);
+   const sessionListeners = new Set(), seatListeners = new Set();
+   const state = { calls: 0, cleared: false, store: { byId: { s1: { running: false } } } };
+   window.__clearContext = { state, notify: () => { state.cleared = true; for (const listener of seatListeners) listener(); } };
+   createRoot(document.getElementById('root')).render(createElement(HarnessContext, {
+    sessionId: 's1', t: key => zh[key] ?? key,
+    useSessions: selector => useSyncExternalStore(onChange => { sessionListeners.add(onChange); return () => sessionListeners.delete(onChange); }, () => selector(state.store)),
+    subscribe: listener => { seatListeners.add(listener); return () => seatListeners.delete(listener); },
+    usage: () => { state.calls++; return Promise.resolve(state.cleared ? null : { contextUsedTokens: 50_000, contextWindowTokens: 100_000, totalTokens: 60_000 }); },
+   }));
+  });
+  const ring = page.getByRole('button', { name: '上下文已用 50%', exact: true });
+  await ring.waitFor();
+  await mkdir('.cache', { recursive: true });
+  await page.screenshot({ path: resolve('.cache/clear-context-before.png') });
+  await page.evaluate(() => window.__clearContext.notify());
+  await page.waitForFunction(() => window.__clearContext.state.calls === 2, undefined, { timeout: 2_000 });
+  await ring.waitFor({ state: 'detached', timeout: 2_000 });
+  await page.screenshot({ path: resolve('.cache/clear-context-after.png') });
+ } finally { await browser.close(); }
+});

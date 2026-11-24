@@ -114,13 +114,18 @@ test('Harness sessions keep /goal /plan /compact, add /clear, hide the other DSH
   await ctx.harness.bindings.write(binding);
   await assert.rejects(ctx.commands.execute(agents.claude,'/clear now',[],signal),/不接受参数或附件/);
   await assert.rejects(ctx.commands.execute(agents.claude,'/clear',[{type:'image',mediaType:'image/png',data:png}],signal),/不接受参数或附件/);
-  let closed=0;
-  ctx.harness.runner.live.set('claude',{session:{close:async()=>{closed++;}}});
+  let closed=0,background=true;
+  ctx.harness.runner.live.set('claude',{session:{hasBackgroundTasks:()=>background,close:async()=>{closed++;}}});
   ctx.harness.runner.retainedSubagents.set('claude',[{id:'old-agent'}]);
+  await assert.rejects(ctx.commands.execute(agents.claude,'/clear',[],signal),/后台任务/);
+  assert.equal(closed,0);
+  assert.equal((await ctx.harness.bindings.read('claude')).nativeRef.nativeSessionId,'old');
+  background=false;
   assert.deepEqual(await run('claude','/clear'),{kind:'success'});
   assert.equal(closed,1);
   assert.equal(ctx.harness.runner.live.has('claude'),false);
   assert.equal(ctx.harness.runner.retainedSubagents.has('claude'),false);
+  assert.equal(await ctx.harness.usage({sessionId:'claude'}),null);
   assert.deepEqual(await ctx.harness.bindings.read('claude'),{
    version:1,sessionId:'claude',harness:'claude-code',cwd:root,locked:true,permission:'auto',
   });

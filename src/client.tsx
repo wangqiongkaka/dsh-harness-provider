@@ -1041,9 +1041,11 @@ function ContextRing({ usage, t }: { usage: Usage | undefined; t: T }) {
 }
 
 /** A Harness session's context reading, in the dock slot where DSH native sessions show theirs; DSH sessions read null. */
-export function HarnessContext({ sessionId, useSessions, usage, t }: ContextDockProps) {
+export function HarnessContext({ sessionId, useSessions, usage, subscribe, t }: ContextDockProps) {
   const running = useSessions(s => s.byId[sessionId]?.running);
-  const view = usePolled(() => usage(sessionId), running ? 5_000 : 30_000, [sessionId, running], [sessionId]);
+  const [reload, setReload] = useState(0);
+  useEffect(() => subscribe?.(() => setReload(n => n + 1)), [subscribe]);
+  const view = usePolled(() => usage(sessionId), running ? 5_000 : 30_000, [sessionId, running, reload], [sessionId]);
   return <ContextRing usage={view ?? undefined} t={t} />;
 }
 
@@ -2037,8 +2039,8 @@ export async function apply(ctx: Context): Promise<void> {
       providers.set(id, handle);
       return handle;
     };
-    // `/plan` in a Harness session switches its permission or collaboration mode; the seats re-read it.
-    scope.on('command/executed', (_sessionId, name) => { if (name === 'plan') for (const listener of listeners) listener(); });
+    // `/plan` switches permission or collaboration mode, and `/clear` resets native context and usage; the seats re-read at once.
+    scope.on('command/executed', (_sessionId, name) => { if (name === 'plan' || name === 'clear') for (const listener of listeners) listener(); });
     const api: Injected = {
       recover:(sessionId,action)=>value(scope.remote.harness.recover({sessionId,action})),
       confirmRewind:(sessionId,token)=>value(scope.remote.harness.confirmRewind({sessionId,token})),
