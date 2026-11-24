@@ -427,6 +427,22 @@ test('AIR custom answers associate arbitrary question ids, preserve selections a
     question_0: { type: 'string', enum: ['A'] }, question_0_custom: { type: 'string' },
   } });
   assert.deepEqual(formContent(form, { question_0: ['自定义'] }), { question_0_custom: '自定义' });
+
+  // Native Antigravity ACP pairs each `q<n>` choice with a `q<n>_other` free-text companion without AIR metadata.
+  const agy = formOf({ type: 'object', properties: {
+    q1: { type: 'string', title: 'Color?', oneOf: [{ const: '1', title: 'Red' }, { const: '2', title: 'Blue' }] },
+    q1_other: { type: 'string', title: 'Other', description: 'Optional free-form answer to: Color?' },
+    q2: { type: 'array', title: 'Tags?', items: { anyOf: [{ const: '1', title: 'A' }, { const: '2', title: 'B' }] } },
+    q2_other: { type: 'string', title: 'Other', description: 'Optional free-form answer to: Tags?' },
+  } });
+  assert.deepEqual(agy.questions.map(question => [question.id, question.type, question.multiple, question.allowOther]), [
+    ['q1', 'choice', false, true],
+    ['q2', 'choice', true, true],
+  ]);
+  const agyInteraction = { type: 'question', interactionId: 'agy-q', turnId: 't', questions: agy.questions };
+  assert.equal(validateHostInteractionResponse(agyInteraction, { type: 'question', answers: { q1: ['Green'], q2: ['1', 'CustomTag'] } }), null);
+  assert.deepEqual(formContent(agy, { q1: ['Green'], q2: ['1', 'CustomTag'] }), { q1_other: 'Green', q2: ['1'], q2_other: 'CustomTag' });
+  assert.deepEqual(formContent(agy, { q1: ['2', 'Navy'], q2: ['OnlyCustom'] }), { q1: '2', q1_other: 'Navy', q2_other: 'OnlyCustom' });
 });
 
 for (const harness of ['codex', 'claude-code']) test('轮次保存 Git 前后检查点：' + harness, { timeout: 20000 }, async () => {

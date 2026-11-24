@@ -291,8 +291,8 @@ const capabilitiesOf = (agent: acp.AgentCapabilities | undefined, catalogs: Cata
 
 // ── Elicitation forms → Host questions ──────────────────────────────────────────────────────────────────────────────
 
-// AIR associates companions through metadata; older Claude ACP only names `question_<n>_custom`.
-const CUSTOM_ANSWER = /^(question_\d+)_custom$/;
+// AIR associates companions through metadata; older Claude ACP names `question_<n>_custom`, native Antigravity ACP names `q<n>_other`.
+const CUSTOM_ANSWER = /^(question_\d+)_custom$|^(q\d+)_other$/;
 interface FormField { id: string; kind: 'string' | 'number' | 'integer' | 'boolean' | 'array'; customFor?: string; typedCustom?: boolean; secret?: boolean }
 interface Form { questions: HostQuestion[]; fields: FormField[] }
 /** Primitive object fields the DSH question UI can represent; null when the form needs something else. */
@@ -305,7 +305,8 @@ export function formOf(schema: acp.ElicitationSchema): Form | null {
     const meta = record(property._meta);
     const custom = record(record(meta.jetbrains).air).customAnswer;
     const secret = property.writeOnly === true || property.format === 'password' || record(meta.codex).isSecret === true;
-    const customFor = (custom === true ? text(record(meta.codex).questionId) : record(custom).isCustomAnswer === true ? text(record(custom).questionId) : undefined) ?? CUSTOM_ANSWER.exec(id)?.[1];
+    const match = CUSTOM_ANSWER.exec(id);
+    const customFor = (custom === true ? text(record(meta.codex).questionId) : record(custom).isCustomAnswer === true ? text(record(custom).questionId) : undefined) ?? match?.[1] ?? match?.[2];
     if (customFor && property.type === 'string' && schema.properties?.[customFor]) { fields.push({ id, kind: 'string', customFor, typedCustom: custom === true, secret }); continue; }
     const prompt = text(property.title, 200) ?? text(property.description, 200) ?? id;
     const enumOptions = (value: unknown) => Array.isArray(value) && value.every(entry => record(entry).const !== undefined && typeof record(entry).title === 'string')

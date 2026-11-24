@@ -40,11 +40,11 @@
 将发布包加入 DSH Profile，然后启动 DSH：
 
 ```sh
-dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.2.9.tgz
+dsh plugin --profile web add /absolute/path/dsh-harness-provider-0.2.10.tgz
 dsh --profile web
 ```
 
-桌面版可在插件管理器中安装同一个 `dsh-harness-provider-0.2.9.tgz`，然后重新启动 DSH。
+桌面版可在插件管理器中安装同一个 `dsh-harness-provider-0.2.10.tgz`，然后重新启动 DSH。
 
 外部 Harness 不需要 DeepSeek API Key。首次引导时可以选择“稍后配置”；插件会在当前会话使用外部 Harness 时跳过 DeepSeek 凭据引导。
 
