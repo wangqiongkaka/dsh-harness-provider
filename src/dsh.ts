@@ -125,6 +125,8 @@ const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>
 const FULL_ACCESS: Record<Binding['harness'], string> = { antigravity: 'default', codex: 'agent-full-access', 'claude-code': 'bypassPermissions' };
 const AUTOMATIC_PERMISSION: Record<Binding['harness'], string> = { antigravity: 'blocked', codex: 'agent', 'claude-code': 'auto' };
 const HARNESS_NAMES: Record<'dsh' | Binding['harness'], string> = { dsh: 'DSH 原生', codex: 'Codex', 'claude-code': 'Claude Code', antigravity: 'Antigravity' };
+/** External Harnesses another plugin may run a managed session on; Antigravity needs a person to choose full access. */
+const MANAGED_HARNESSES: readonly Binding['harness'][] = ['codex', 'claude-code'];
 
 /**
  * One DSH child session as a sidebar subagent: its first prompt is the task, its messages, reasoning and tool calls the
@@ -187,6 +189,7 @@ export class HarnessService extends TypertRemoteService {
   /** Bind a plugin-owned session without changing the user's remembered Harness or model. */
   async manageSession(sessionId: string, options: { owner: string; harness: 'dsh' | Binding['harness']; context?: ManagedSession['context']; selection?: z.infer<typeof managedSelection> }): Promise<void> {
     if (options.harness === 'antigravity') throw new Error('Antigravity 需要用户明确选择完全访问，不支持受控会话');
+    if (options.harness !== 'dsh' && !MANAGED_HARNESSES.includes(options.harness)) throw new Error(`${HARNESS_NAMES[options.harness]} 不支持受控会话`);
     if (!options.owner || (options.harness !== 'dsh' && !options.context)) throw new Error('受控会话需要管理方和上下文');
     await this.bindings.serial(sessionId, async () => {
       const agent = await this.agent(sessionId), current = await this.bindings.read(sessionId);
@@ -620,6 +623,12 @@ export class HarnessService extends TypertRemoteService {
   async availableHarnesses(raw: unknown): Promise<Array<'dsh' | Binding['harness']>> {
     z.object({}).strict().parse(raw);
     return ['dsh', ...this.availableExternalHarnesses()];
+  }
+  /** The installed Harnesses `manageSession` accepts, with their names, for a plugin to offer as its choices. */
+  async managedHarnesses(raw: unknown): Promise<Array<{ id: 'dsh' | Binding['harness']; label: string }>> {
+    z.object({}).strict().parse(raw);
+    const ids = ['dsh', ...this.availableExternalHarnesses().filter(harness => MANAGED_HARNESSES.includes(harness))] as const;
+    return ids.map(id => ({ id, label: HARNESS_NAMES[id] }));
   }
 
   async harnesses(raw: unknown) {

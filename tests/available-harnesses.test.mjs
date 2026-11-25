@@ -97,6 +97,7 @@ test('后端仅暴露已安装的 Harness，跳过未安装默认项并从讨论
     const h = ctx.harness;
 
     assert.deepEqual(await h.availableHarnesses({}), ['dsh', 'claude-code']);
+    assert.deepEqual(await h.managedHarnesses({}), [{ id: 'dsh', label: 'DSH 原生' }, { id: 'claude-code', label: 'Claude Code' }]);
 
     const freshState = await h.state({ sessionId: 'fresh' });
     assert.equal(freshState.harness, 'dsh', '默认 Harness 未安装时回退到 DSH 原生');

@@ -27,8 +27,10 @@ test('工单绑定不修改个人默认值，主会话固定原生，停止接�
   try {
     await ctx.plugin(Typert); await ctx.plugin(Commands);
     for (const [name, value] of Object.entries({ agents: { get: agent }, sessions: {}, userQuestions: {}, attachments: {}, fileUploads: {} })) ctx.provide(name, value);
-    await ctx.plugin({ inject, apply(scope) { new HarnessService(scope, root, { codex: adapter, 'claude-code': adapter }); } });
+    await ctx.plugin({ inject, apply(scope) { new HarnessService(scope, root, { codex: adapter, 'claude-code': adapter, antigravity: adapter }); } });
     const h = ctx.harness;
+    // Installed, Antigravity is still no managed choice, since it needs a person to choose full access.
+    assert.deepEqual((await h.managedHarnesses({})).map(item => item.id), ['dsh', 'codex', 'claude-code']);
     await h.bindings.writeDefaults({ harness: 'claude-code' });
     assert.equal((await h.state({ sessionId: 'main' })).harness, 'claude-code');
     await h.manageSession('main', { owner: 'superagent', harness: 'dsh' });
