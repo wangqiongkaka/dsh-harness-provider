@@ -29,8 +29,7 @@ test('工单绑定不修改个人默认值，主会话固定原生，停止接�
     for (const [name, value] of Object.entries({ agents: { get: agent }, sessions: {}, userQuestions: {}, attachments: {}, fileUploads: {} })) ctx.provide(name, value);
     await ctx.plugin({ inject, apply(scope) { new HarnessService(scope, root, { codex: adapter, 'claude-code': adapter, antigravity: adapter }); } });
     const h = ctx.harness;
-    // Installed, Antigravity is still no managed choice, since it needs a person to choose full access.
-    assert.deepEqual((await h.managedHarnesses({})).map(item => item.id), ['dsh', 'codex', 'claude-code']);
+    assert.deepEqual((await h.managedHarnesses({})).map(item => item.id), ['dsh', 'codex', 'claude-code', 'antigravity']);
     await h.bindings.writeDefaults({ harness: 'claude-code' });
     assert.equal((await h.state({ sessionId: 'main' })).harness, 'claude-code');
     await h.manageSession('main', { owner: 'superagent', harness: 'dsh' });
@@ -66,6 +65,9 @@ test('工单绑定不修改个人默认值，主会话固定原生，停止接�
       await h.manageSession(`claude-${fast}`, { owner: 'superagent', harness: 'claude-code', context, selection: { fast } });
       assert.deepEqual((await h.bindings.read(`claude-${fast}`)).configs, { fast: fast ? 'on' : 'off' });
     }
+    // Antigravity runs managed with full access, which the plugin's operator chose by picking it, never left unauthorized.
+    await h.manageSession('agy', { owner: 'superagent', harness: 'antigravity', context });
+    assert.deepEqual([(await h.bindings.read('agy')).permission, (await h.bindings.read('agy')).managedBy], ['default', 'superagent']);
     configOptions.length = 0;
     await assert.rejects(h.manageSession('no-fast', { owner: 'superagent', harness: 'codex', context, selection: { fast: true } }), /不支持快速模式/);
     assert.equal(await h.bindings.read('no-fast'), undefined);

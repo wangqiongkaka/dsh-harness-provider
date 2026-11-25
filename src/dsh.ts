@@ -125,8 +125,11 @@ const NATIVE_PERMISSION_MODES: Record<Binding['harness'], Record<string, string>
 const FULL_ACCESS: Record<Binding['harness'], string> = { antigravity: 'default', codex: 'agent-full-access', 'claude-code': 'bypassPermissions' };
 const AUTOMATIC_PERMISSION: Record<Binding['harness'], string> = { antigravity: 'blocked', codex: 'agent', 'claude-code': 'auto' };
 const HARNESS_NAMES: Record<'dsh' | Binding['harness'], string> = { dsh: 'DSH 原生', codex: 'Codex', 'claude-code': 'Claude Code', antigravity: 'Antigravity' };
-/** External Harnesses another plugin may run a managed session on; Antigravity needs a person to choose full access. */
-const MANAGED_HARNESSES: readonly Binding['harness'][] = ['codex', 'claude-code'];
+/**
+ * External Harnesses another plugin may run a managed session on, always with full access: the plugin's operator choosing
+ * one there is the explicit choice Antigravity's full access needs.
+ */
+const MANAGED_HARNESSES: readonly Binding['harness'][] = ['codex', 'claude-code', 'antigravity'];
 
 /**
  * One DSH child session as a sidebar subagent: its first prompt is the task, its messages, reasoning and tool calls the
@@ -188,7 +191,6 @@ export class HarnessService extends TypertRemoteService {
 
   /** Bind a plugin-owned session without changing the user's remembered Harness or model. */
   async manageSession(sessionId: string, options: { owner: string; harness: 'dsh' | Binding['harness']; context?: ManagedSession['context']; selection?: z.infer<typeof managedSelection> }): Promise<void> {
-    if (options.harness === 'antigravity') throw new Error('Antigravity 需要用户明确选择完全访问，不支持受控会话');
     if (options.harness !== 'dsh' && !MANAGED_HARNESSES.includes(options.harness)) throw new Error(`${HARNESS_NAMES[options.harness]} 不支持受控会话`);
     if (!options.owner || (options.harness !== 'dsh' && !options.context)) throw new Error('受控会话需要管理方和上下文');
     await this.bindings.serial(sessionId, async () => {

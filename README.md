@@ -133,7 +133,7 @@ Codex / Claude Code 会话点输入栏的 **+**（或输入 `/link`），在“�
 
 默认直接调用本机 `agy` CLI 内置的原生 ACP 服务（`agy acp --stdio`），复用已有的 `agy` 登录；可通过 `AGY_BIN` 指定 `agy` 路径，或设置 `ANTIGRAVITY_ACP_PATH` 覆盖为自定义 ACP 可执行文件。
 
-- 在新会话中选择 **Antigravity**，然后在权限菜单选择 **完全权限**（已有的 DSH 完全访问权限会随会话选择自动继承）。常规及委派会话以 `--dangerously-skip-permissions` 运行，只读讨论以计划模式加沙箱（`--sandbox` + `mode=plan`）运行；受控会话与带继承上下文的分支不提供此选项。
+- 在新会话中选择 **Antigravity**，然后在权限菜单选择 **完全权限**（已有的 DSH 完全访问权限会随会话选择自动继承）。常规及委派会话以 `--dangerously-skip-permissions` 运行，只读讨论以计划模式加沙箱（`--sandbox` + `mode=plan`）运行；受控会话（如 Superagent 执行器）同样以完全权限运行，在该插件中选择 Antigravity 即视为明确选择完全权限；带继承上下文的分支不提供此选项。
 - 模型与推理强度在菜单中分开展示；流式思考、工具调用过程、用量统计和历史回放均由原生 ACP 服务端提供，DSH 进展反馈与宿主说明通过 `_meta.antigravity.systemPrompt.append` 传入。
 - 账户额度通过 `agy -p /usage` 读取，默认优先展示 Gemini 5 小时窗口，展开可查看周限额与其他模型分组额度。
 
