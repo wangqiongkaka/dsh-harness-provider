@@ -392,6 +392,43 @@ test('in the tree view the card unfolds the folded ancestor project hiding the S
   expect(scrolled).toEqual(['run']);
 }, { arg: { sidebar: `(${SIDEBAR})`, ITEMS } }));
 
+test('the card keeps scrolling to the Session while the unfolding rows still push it down', () => inPage(async ({ sidebar, ITEMS }) => {
+  const { clicks, scrolled, session, project, frames } = eval(sidebar)();
+  column();
+  project('own', false, () => {
+    session('run');
+    // The host animates unfolded rows in: the row moves on its next few reads, then stays.
+    let moves = 4;
+    document.querySelector('[data-row-key="session:run"]').getBoundingClientRect = () => ({ top: 100 + (moves > 0 ? moves-- : 0) * 10 });
+  });
+  render(list, {}, statuses, { ...workspaces, items: ITEMS });
+  click(host()?.querySelector('[data-hp-agents-pick]'));
+  await frames(10);
+  expect(clicks).toEqual(['own']);
+  expect(scrolled.length).toBeGreaterThan(1);
+  const settledScrolls = scrolled.length;
+  await frames(5);
+  expect(scrolled.length).toBe(settledScrolls);
+}, { arg: { sidebar: `(${SIDEBAR})`, ITEMS } }));
+
+test('a Session another plugin opens (dsh-superagent\'s panel) unfolds its project too, but the one open at start does not', () => inPage(async ({ sidebar, ITEMS }) => {
+  const { clicks, scrolled, session, project, frames } = eval(sidebar)();
+  column();
+  project('outer', false);
+  project('own', false, () => { session('run'); });
+  const items = [...ITEMS, { workspaceId: 'outer', path: '/w', sessionIds: ['ask'] }].slice(1);
+  const main = id => ({ ...list, byId: Object.fromEntries(Object.entries(list.byId).map(([key, value]) =>
+    [key, { ...value, retainedBy: key === id ? { mainView: 1 } : {} }])) });
+  render(main('ask'), {}, statuses, { ...workspaces, items });
+  await frames(5);
+  expect(clicks).toEqual([]);
+  render(main('run'), {}, statuses, { ...workspaces, items });
+  await frames(5);
+  expect(opened).toEqual([]);
+  expect(clicks).toEqual(['own']);
+  expect(scrolled).toEqual(['run']);
+}, { arg: { sidebar: `(${SIDEBAR})`, ITEMS } }));
+
 test('the agent card shows all selected rows rather than limiting details to three previews', () => inPage(() => {
   column();
   render({ ...list, ids: [...list.ids, 'run2', 'run3', 'run4'], byId: { ...list.byId,

@@ -133,6 +133,8 @@ const ANCHOR = '[class*="_sidebarCol"] :is([class*="_newSessionRow"], button[cla
 
 /** Frames a reveal keeps trying while the host opens the Session and unfolds its project (about one second). */
 const REVEAL_FRAMES = 60
+/** The latest reveal; a newer one stops the older loop. */
+let reveals = 0
 
 /**
  * Show an opened Session in the host's Workspace browser. Opening a Session unfolds its project only while the
@@ -153,7 +155,10 @@ export function revealInSidebar(sessionId: string, items: readonly { workspaceId
   const header = (key: string): HTMLElement | null =>
     document.querySelector(`[role="treeitem"][data-row-key="workspace:${CSS.escape(key)}"]`)
   const clicked = new Set<string>()
+  const token = ++reveals
+  let settled: number | undefined
   const step = (left: number): void => {
+    if (token !== reveals) return
     const own = header(owner?.workspaceId ?? '')
     const key = own === null ? ancestors.find(item => header(item.workspaceId) !== null)?.workspaceId : owner?.workspaceId ?? ''
     const blocking = key === undefined ? null : header(key)
@@ -162,9 +167,13 @@ export function revealInSidebar(sessionId: string, items: readonly { workspaceId
       blocking.click()
     } else {
       const row = document.querySelector(`[data-row-key="session:${CSS.escape(sessionId)}"]`)
-      if (row !== null) { row.scrollIntoView({ block: 'nearest' }); return }
+      if (row !== null) {
+        // Unfolding animates the rows in, which can push this row out again: scroll until it stays put.
+        if (row.getBoundingClientRect().top === settled) return
+        row.scrollIntoView({ block: 'nearest' })
+        settled = row.getBoundingClientRect().top
       // ponytail: a Session past the host's automatic 50-row watermark never renders; land on its project instead.
-      if (left === 0) own?.scrollIntoView({ block: 'nearest' })
+      } else if (left === 0) own?.scrollIntoView({ block: 'nearest' })
     }
     if (left > 0) requestAnimationFrame(() => { step(left - 1) })
   }
@@ -501,6 +510,16 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
     ...sessions,
     ids: sessions.ids.filter(id => !workspaces.archivedSessionIds.includes(id)),
   }), [sessions, workspaces.archivedSessionIds])
+  // Whoever opens a Session (this card, another plugin's panel such as dsh-superagent's, a shortcut), its project is
+  // shown in the Workspace browser. The Session current at mount keeps the view the user left.
+  const mainSession = sessions.ids
+    .find(id => sessions.byId[id]?.blank === false && (sessions.byId[id].retainedBy?.mainView ?? 0) > 0)
+  const revealed = useRef(mainSession)
+  useEffect(() => {
+    if (mainSession === undefined || mainSession === revealed.current) return
+    revealed.current = mainSession
+    revealInSidebar(mainSession, workspaces.items)
+  }, [mainSession])
   const statuses = useSessionStatus(value => value)
   const rows = useMemo(() => agentRows(list, statuses), [list, statuses])
   const completed = useMemo(() => completedRows(list, statuses), [list, statuses])
