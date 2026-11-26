@@ -112,6 +112,8 @@ test('设置页下拉框和数字框收窄居中，标题与恢复默认不换�
   assert.ok(firstRow,'空间足够时控件应与标题同行');
   const textarea=await page.locator('#text').evaluate(row=>[row.querySelector('textarea').getBoundingClientRect(),row.getBoundingClientRect()].map(box=>[box.left,box.width]));
   assert.deepEqual(textarea[0],textarea[1],'宽行输入框应占满整行');
+  const rowHeight=await page.locator('.hp-set-row').nth(1).evaluate(row=>row.getBoundingClientRect().height);
+  assert.ok(rowHeight<=44,`普通设置行高 ${rowHeight}px`);
  } finally {await browser.close();}
 });
 
