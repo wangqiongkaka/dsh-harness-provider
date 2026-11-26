@@ -291,6 +291,10 @@ test('sidebar marks active turns as breathing, completed sessions as static, and
    return [getComputedStyle(cell,'::before').content,getComputedStyle(cell,'::before').backgroundColor,getComputedStyle(cell,'::after').content];
   }));
   assert.deepEqual(marks,[['""','rgb(128, 128, 128)','none'],['none','rgba(0, 0, 0, 0)','none'],['""','rgb(128, 128, 128)','""']], 'empty host slots show gray logos and delegation badges without covering schedule marks');
+  // The host paints a selected row with its hover gray; the plugin's sheet loads after it and tints the row with its Harness color.
+  await page.setContent(`<style>.sessionRow.selected{background:rgb(60, 60, 60)}${css}</style><div role="treeitem" class="sessionRow selected" aria-selected="true" data-hp-harness="antigravity" data-hp-closed=""></div><div role="treeitem" class="sessionRow selected" aria-selected="true" data-hp-harness="claude-code"></div><div role="treeitem" class="sessionRow" aria-selected="false" data-hp-harness="antigravity"></div><div role="treeitem" class="sessionRow selected" aria-selected="true"></div>`);
+  const selected=await page.locator('[role="treeitem"]').evaluateAll(rows=>rows.map(row=>getComputedStyle(row).backgroundColor));
+  assert.deepEqual(selected,['rgba(66, 133, 244, 0.24)','rgba(217, 119, 87, 0.24)','rgba(0, 0, 0, 0)','rgb(60, 60, 60)'],'selected rows take their Harness color; unselected and unmarked rows keep the host style');
  } finally { await browser.close(); }
  assert.match(css,/\[data-hp-running\]>span:first-child>\*\{display:none\}/,'the breathing Harness logo replaces native running dots');
  assert.match(css,/\[data-hp-running\]>span:first-child::before\{animation:hp-logo-breathe 1\.4s ease-in-out infinite\}/);

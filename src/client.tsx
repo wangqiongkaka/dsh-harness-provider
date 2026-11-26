@@ -1941,7 +1941,9 @@ const logos: Record<State['harness'], { mask: string; color: string }> = {
 const delegatedMask = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><mask id="m"><circle cx="5" cy="5" r="5" fill="#fff"/><path d="M3 3l4 4M7 4v3H4" stroke="#000" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="5" cy="5" r="5" mask="url(#m)"/></svg>')}")`;
 const emptyStatusCell = '>span:first-child:is(:empty,:has(> [data-slot="sidebar.session.row.leading"]:empty))';
 const markStyles = Object.entries(logos).map(([harness, { mask, color }]) =>
-  `[data-hp-harness="${harness}"]${emptyStatusCell}::before,[data-hp-harness="${harness}"]:not([data-hp-closed])>span:first-child::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`).join('\n')
+  `[data-hp-harness="${harness}"]${emptyStatusCell}::before,[data-hp-harness="${harness}"]:not([data-hp-closed])>span:first-child::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`
+  // The host paints the selected row with its hover gray; tint it with the session's Harness color instead.
+  + `\n[role="treeitem"][aria-selected="true"][data-hp-harness="${harness}"]{background:${color}3D}`).join('\n')
   // A running turn replaces the host's status dots with its breathing brand mark; an idle live Harness stays static.
   + `\n[data-hp-running]>span:first-child>*{display:none}`
   + `\n[data-hp-running]>span:first-child::before{animation:hp-logo-breathe 1.4s ease-in-out infinite}`
