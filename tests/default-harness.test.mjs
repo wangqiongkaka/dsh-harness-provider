@@ -104,6 +104,11 @@ createRoot(document.querySelector('#root')).render(<App />);
     assert.ok(list.y >= button.y + button.height, '菜单应在按钮下方展开');
     await page.keyboard.press('Escape');
     await expect(menu).toHaveCount(0);
+    for (const title of ['委派默认目标', '讨论默认参与者']) {
+      const row = page.locator('.hp-set-row').filter({hasText: title});
+      const [box, hint, group] = await Promise.all([row, row.locator('.hp-set-hint'), row.getByRole('group')].map(item => item.boundingBox()));
+      assert.ok(group.y >= hint.y + hint.height && Math.abs(group.x - box.x) < 1, title + ' 的多选控件应在说明下方左对齐');
+    }
     for (const width of [390, 1280]) {
       await page.setViewportSize({width, height: 850});
       await choose('Antigravity');

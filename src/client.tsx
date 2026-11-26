@@ -1437,10 +1437,10 @@ export function HarnessSettingsSection({ useHarnessSettings, form, loadAvailable
       {row('idleCloseSeconds', number('idleCloseSeconds'))}
     </>)}
     {group('settingsGroup.delegation', <>
-      {row('delegateHarnesses', <TaskHarnessSelector available={available} selected={value.delegateHarnesses ?? ['codex']} disabled={disabled} t={t} onChange={next => settle('delegateHarnesses', form.set('delegateHarnesses', next))} />)}
+      {row('delegateHarnesses', <TaskHarnessSelector available={available} selected={value.delegateHarnesses ?? ['codex']} disabled={disabled} t={t} onChange={next => settle('delegateHarnesses', form.set('delegateHarnesses', next))} />, true)}
       {row('delegateReportBack', toggle('delegateReportBack'))}
       {row('delegateWorktree', toggle('delegateWorktree'))}
-      {row('discussHarnesses', <TaskHarnessSelector discussion available={available} selected={value.discussHarnesses ?? ['codex', 'claude-code']} disabled={disabled} t={t} onChange={next => settle('discussHarnesses', form.set('discussHarnesses', next))} />)}
+      {row('discussHarnesses', <TaskHarnessSelector discussion available={available} selected={value.discussHarnesses ?? ['codex', 'claude-code']} disabled={disabled} t={t} onChange={next => settle('discussHarnesses', form.set('discussHarnesses', next))} />, true)}
     </>)}
     {group('settingsGroup.feedback', <>
       {row('progressFeedback', toggle('progressFeedback'))}
@@ -1761,7 +1761,7 @@ ${nativeContextColors}
 .hp-set-head{margin:0 0 2px;font-size:12px;font-weight:600;letter-spacing:.06em;color:var(--dsw-alias-label-tertiary)}
 .hp-set-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 24px;padding:14px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
 .hp-set-row:last-child{border-bottom:none}
-.hp-set-wide{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:10px}.hp-set-wide .hp-set-control{margin-left:0}
+.hp-set-wide{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:10px}.hp-set-wide .hp-set-control{margin-left:0;justify-content:flex-start}
 .hp-set-copy{display:grid;flex:1 1 0;gap:4px}
 .hp-set-title{display:flex;align-items:center;gap:8px;font-size:14px;line-height:20px;white-space:nowrap}
 .hp-set-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
@@ -1769,7 +1769,7 @@ ${nativeContextColors}
 .hp-set-reset{padding:0;border:none;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
 .hp-set-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
 .hp-set-control{display:flex;justify-content:flex-end;flex:0 0 auto;min-width:0;margin-left:auto}
-.hp-set-control .hp-delegate-harness{font-size:14px;line-height:20px}
+.hp-set-control .hp-delegate-harness{gap:2px;font-size:14px;line-height:20px}
 .hp-set-control input,.hp-set-control textarea,.hp-set-select{box-sizing:border-box;padding:6px 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px}
 .hp-set-select{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding-right:8px;cursor:pointer}
 .hp-set-select:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid,var(--dsw-alias-bg-layer-3))}
