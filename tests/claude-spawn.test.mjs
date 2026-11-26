@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { claudeProfile } from '../dist/acp-profiles.js';
+import { defaultSettings } from '../dist/settings.js';
 
 test('Claude sessions keep the Artifact tool enabled', () => {
   const { env } = claudeProfile({ command: process.execPath, environment: {} }).spawn({});
@@ -126,6 +127,41 @@ test('Claude account inspection also forwards reclaude CLAUDE_CONFIG_DIR to the 
     await assert.rejects(() => profile.inspectAccount());
     const captured = JSON.parse(await readFile(capturedPath, 'utf8'));
     assert.equal(captured.CLAUDE_CONFIG_DIR, join(dataDir, 'claude', 'accounts', '12345', 'config'));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('configuring claudeConfigDir injects CLAUDE_CONFIG_DIR, expands ~/, wins over env and reclaude probing, and applies to account inspection', { skip: process.platform === 'win32' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'claude-config-dir-'));
+  const counter = join(root, 'status-calls');
+  const capturedPath = join(root, 'captured.json');
+  try {
+    const cli = await fakeCli(root, 'reclaude');
+    let current = { ...defaultSettings(), claudeCommand: cli, claudeConfigDir: '~/.rec/claude/accounts/2048/config' };
+    const profile = claudeProfile({
+      environment: { HOME: root, SHELL: '/bin/false', TEST_CAPTURED_ENV: capturedPath, TEST_STATUS_COUNTER: counter },
+      settings: () => current,
+    });
+    const expected = join(root, '.rec', 'claude', 'accounts', '2048', 'config');
+
+    // Configured claudeConfigDir expands ~/ and wins over both process env CLAUDE_CONFIG_DIR and reclaude probing.
+    const spawned = profile.spawn({
+      HOME: root, SHELL: '/bin/false', CLAUDE_CONFIG_DIR: join(root, 'env-dir'), TEST_STATUS_COUNTER: counter,
+    }).env;
+    assert.equal(spawned.CLAUDE_CONFIG_DIR, expected);
+    await assert.rejects(readFile(counter, 'utf8'), { code: 'ENOENT' });
+
+    // Account inspection forwards the same configured CLAUDE_CONFIG_DIR.
+    await assert.rejects(() => profile.inspectAccount());
+    const captured = JSON.parse(await readFile(capturedPath, 'utf8'));
+    assert.equal(captured.CLAUDE_CONFIG_DIR, expected);
+    await assert.rejects(readFile(counter, 'utf8'), { code: 'ENOENT' });
+
+    // Clearing claudeConfigDir live falls back to the environment variable on the next spawn.
+    current = { ...current, claudeConfigDir: '' };
+    const fallback = profile.spawn({ HOME: root, SHELL: '/bin/false', CLAUDE_CONFIG_DIR: join(root, 'env-dir') }).env;
+    assert.equal(fallback.CLAUDE_CONFIG_DIR, join(root, 'env-dir'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

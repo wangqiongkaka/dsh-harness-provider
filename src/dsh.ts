@@ -1527,7 +1527,7 @@ export class HarnessService extends TypertRemoteService {
   async updateSettings(raw: unknown) {
     const { ops, revision } = updateSettingsRequest.parse(raw);
     // The state directory and the Harness executables stay off the page, so a remote page cannot point the Host at another program.
-    const bad = ops.find(op => ['root', 'codexCommand', 'claudeCommand'].includes(op.path[0]) || !Object.hasOwn(Config.dict!, op.path[0]));
+    const bad = ops.find(op => ['root', 'codexCommand', 'claudeCommand', 'claudeConfigDir'].includes(op.path[0]) || !Object.hasOwn(Config.dict!, op.path[0]));
     if (bad) throw new RemoteError('gateway/bad-request', `不能修改设置项 ${bad.path[0]}`, {});
     const settings = this.ctx.get('settings');
     if (!settings) return null;

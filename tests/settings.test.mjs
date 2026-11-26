@@ -11,7 +11,7 @@ test('the plugin Config keeps the former built-in defaults, rejects out-of-range
   assert.deepEqual(settingsOf(PluginConfig({}))(), defaultSettings(), "the entry exports the plugin Config");
   assert.match(feedbackInstructions, /^\[DSH 进展反馈\][\s\S]*每个执行步骤开始前[\s\S]*\[\/DSH 进展反馈\]$/);
   assert.deepEqual(defaultSettings(), {
-    codexCommand: 'codex', claudeCommand: undefined, defaultHarness: 'last', idleCloseSeconds: 60,
+    codexCommand: 'codex', claudeCommand: undefined, claudeConfigDir: undefined, defaultHarness: 'last', idleCloseSeconds: 60,
     delegateHarnesses: ['codex'], delegateReportBack: false, delegateWorktree: false, discussHarnesses: ['codex', 'claude-code'],
     progressFeedback: true, progressFeedbackText: feedbackInstructions,
     requestTimeoutSeconds: 60, sessionLoadTimeoutSeconds: 120, discussionTimeoutMinutes: 30,
@@ -19,8 +19,8 @@ test('the plugin Config keeps the former built-in defaults, rejects out-of-range
     catalogCacheSeconds: 60, quotaCacheSeconds: 60, pluginCacheSeconds: 30, recoveryCheckSeconds: 30, acpStderr: false,
   });
   // The existing profile entry options still parse; `root` stays an ordinary, non-live field.
-  const parsed = Config['~standard'].validate({ root: '/state', codexCommand: '/bin/codex' }).value;
-  assert.equal(parsed.root, '/state');assert.equal(settingsOf(parsed)().codexCommand, '/bin/codex');assert.equal('root' in settingsOf(parsed)(), false);
+  const parsed = Config['~standard'].validate({ root: '/state', codexCommand: '/bin/codex', claudeConfigDir: '/custom/claude-config' }).value;
+  assert.equal(parsed.root, '/state');assert.equal(settingsOf(parsed)().codexCommand, '/bin/codex');assert.equal(settingsOf(parsed)().claudeConfigDir, '/custom/claude-config');assert.equal('root' in settingsOf(parsed)(), false);
   for (const invalid of [{ idleCloseSeconds: 1 }, { discussionResultChars: 64_001 }, { branchContextChars: 120_001 }, { quotaCacheSeconds: 5 }, { delegateHarnesses: ['other'] }, { discussHarnesses: ['dsh'] }]) {
     assert.ok(Config['~standard'].validate(invalid).issues?.length, JSON.stringify(invalid));
   }

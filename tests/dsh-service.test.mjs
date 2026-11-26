@@ -353,6 +353,7 @@ test('remote pages read and write only the plugin settings namespace through the
   await assert.rejects(h.updateSettings({ops:[{op:'set',path:['root'],value:'/tmp'}]}),'the state directory is not remotely editable');
   await assert.rejects(h.updateSettings({ops:[{op:'set',path:['nope'],value:1}]}));
   await assert.rejects(h.updateSettings({ops:[{op:'set',path:['codexCommand'],value:'/tmp/evil'}]}),'nor the Harness executables');
+  await assert.rejects(h.updateSettings({ops:[{op:'set',path:['claudeConfigDir'],value:'/tmp/evil'}]}),'nor the Claude config directory');
   await assert.rejects(h.updateSettings({ops:[{op:'set',path:['acpStderr','deep'],value:true}]}));
   assert.equal(mutations.length,2,'rejected keys never reach the settings service');
   present=false;

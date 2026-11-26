@@ -208,6 +208,7 @@ Claude 原生连接丢失或报告会话已结束时，插件会关闭失效连�
 | --- | --- | --- |
 | `codexCommand` | `codex` | Codex 可执行文件，也用于额度、插件和轮次记录查询；原生进程下次启动时生效 |
 | `claudeCommand` | 自动查找 | Claude Code 可执行文件；未设置时使用环境变量 `CLAUDE_COMMAND_PATH`，再从 PATH、常见安装目录和版本管理器目录中查找；原生进程下次启动时生效。指向 `reclaude` 时自动同步其当前绑定账号的 `CLAUDE_CONFIG_DIR` |
+| `claudeConfigDir` | 自动推导 | 显式指定 Claude Code 配置目录（注入为 `CLAUDE_CONFIG_DIR`，支持 `~/` 展开）；优先级高于环境变量与 `reclaude` 自动探测，并可供同环境插件（如 `dsh-agent-packages`）共用；原生进程下次启动时生效 |
 | `root` | `$DSH_HOME/harness-plugin` | 插件状态目录；未设置 `DSH_HOME` 时为 `~/.dsh/harness-plugin`；修改后插件重新加载 |
 
 Antigravity 可执行文件通过启动环境变量配置：`AGY_BIN`（默认 `agy`）指定 Antigravity CLI 路径，或设置 `ANTIGRAVITY_ACP_PATH` 覆盖为自定义 ACP 可执行文件。
@@ -218,6 +219,7 @@ Antigravity 可执行文件通过启动环境变量配置：`AGY_BIN`（默认 `
     root: /absolute/path/harness-state
     codexCommand: /absolute/path/codex
     claudeCommand: reclaude
+    claudeConfigDir: ~/.rec/claude/accounts/<account_id>/config
 ```
 
 从图形界面启动 DSH 时，插件会读取登录 shell 的环境；PATH 保留 DSH 自身的条目，并追加 shell 中的其他目录（如 nvm、pnpm），因此 `codexCommand` 可以指向 nvm 安装的 `#!/usr/bin/env node` 脚本。

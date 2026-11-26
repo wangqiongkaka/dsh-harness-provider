@@ -16,7 +16,7 @@ import type { HarnessAccountSnapshot, HarnessPlugin, HostTurnSnapshot } from './
 import { defaultSettings, feedbackOf, type SettingsSource } from './settings.js';
 import { interactionInstructions } from './feedback.js';
 import { CodexRpc } from './codex-rpc.js';
-import { ClaudeInspector, ClaudeNotInstalledError, isCommandInstalled, resolveClaudeExecutable, withNodeOnPath, withReclaudeEnvironment, withUserShellEnvironment } from './claude-sdk.js';
+import { ClaudeInspector, ClaudeNotInstalledError, isCommandInstalled, resolveClaudeExecutable, withClaudeConfigDir, withNodeOnPath, withReclaudeEnvironment, withUserShellEnvironment } from './claude-sdk.js';
 import type { AcpLimits, AcpProfile } from './acp-adapter.js';
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -285,11 +285,12 @@ export function claudeRateLimitSnapshot(rateLimit: unknown): HarnessAccountSnaps
       : window])) });
 }
 
-export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command?: string; settings?: SettingsSource; dshModels?: ClaudeDshModels }): AcpProfile {
+export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command?: string; configDir?: string; settings?: SettingsSource; dshModels?: ClaudeDshModels }): AcpProfile {
   const environment = withUserShellEnvironment({ ...options.environment });
   const settings = options.settings ?? defaultSettings;
   // An empty setting means unset: the environment variable and the usual install locations still apply.
   const command = () => options.command ?? (settings().claudeCommand || undefined);
+  const configDir = () => options.configDir ?? (settings().claudeConfigDir?.trim() || undefined);
   const executable = (env: NodeJS.ProcessEnv) => {
     try { return resolveClaudeExecutable(env, command()); }
     catch (cause) { throw cause instanceof ClaudeNotInstalledError ? { code: 'notInstalled', message: cause.message } : cause; }
@@ -304,7 +305,7 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
     } : {}),
     protocolVersion: 2,
     spawn: raw => {
-      const env = withUserShellEnvironment({ ...raw });
+      const env = withClaudeConfigDir(withUserShellEnvironment({ ...raw }), configDir());
       const cli = executable(env);
       // The SDK spawns the CLI as CLAUDE_CODE_ENTRYPOINT=sdk-ts, which drops the Artifact tools (and with them /design's
       // canvas) unless CLAUDE_CODE_ARTIFACT is truthy. Default it on; a user-set value still wins.
@@ -327,7 +328,12 @@ export function claudeProfile(options: { environment: NodeJS.ProcessEnv; command
     titleCommand: title => `/rename ${title}`,
     inspectAccount: async () => {
       const claudeCommand = command();
-      const inspector = new ClaudeInspector({ environment, cwd: process.cwd(), closeTimeoutMs: 7_000, ...(claudeCommand ? { command: claudeCommand } : {}) });
+      const claudeConfigDir = configDir();
+      const inspector = new ClaudeInspector({
+        environment, cwd: process.cwd(), closeTimeoutMs: 7_000,
+        ...(claudeCommand ? { command: claudeCommand } : {}),
+        ...(claudeConfigDir ? { configDir: claudeConfigDir } : {}),
+      });
       try {
         const account = await inspector.account();
         return account && claudeAccountSnapshot(account.usage, account.email);

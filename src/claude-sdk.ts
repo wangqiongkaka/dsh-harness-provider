@@ -125,6 +125,27 @@ export function resolveClaudeExecutable(environment: NodeJS.ProcessEnv, command?
   throw new ClaudeNotInstalledError('Claude Code is not installed');
 }
 
+function resolveClaudeConfigDir(configDir: string, environment: NodeJS.ProcessEnv): string {
+  const trimmed = configDir.trim();
+  if (!trimmed) return '';
+  if (trimmed === '~' || trimmed.startsWith('~/') || trimmed.startsWith('~\\')) {
+    const home = envValue(environment, 'HOME') ?? envValue(environment, 'USERPROFILE') ?? os.homedir();
+    return trimmed === '~' ? path.resolve(home) : path.resolve(home, trimmed.slice(2));
+  }
+  return path.resolve(trimmed);
+}
+
+/**
+ * Applies an explicit `claudeConfigDir` setting as `CLAUDE_CONFIG_DIR`, overriding inherited environment values and
+ * skipping reclaude's `status --json` probe.
+ */
+export function withClaudeConfigDir(environment: NodeJS.ProcessEnv, configDir?: string): NodeJS.ProcessEnv {
+  const resolved = configDir ? resolveClaudeConfigDir(configDir, environment) : '';
+  if (!resolved) return environment;
+  const key = envKey(environment, 'CLAUDE_CONFIG_DIR') ?? 'CLAUDE_CONFIG_DIR';
+  return { ...environment, [key]: resolved };
+}
+
 /**
  * reclaude isolates each bound account's Claude Code config and session transcripts under
  * `<data_dir>/claude/accounts/<device_id>/config`. Forward that directory as `CLAUDE_CONFIG_DIR` so claude-agent-acp
@@ -232,7 +253,7 @@ export class ClaudeInspector {
   readonly #input = new PushableInput<SDKUserMessage>();
   #query: Query | null = null;
 
-  constructor(private readonly options: { command?: string; environment: NodeJS.ProcessEnv; cwd: string; closeTimeoutMs: number; queryFactory?: QueryFactory }) {}
+  constructor(private readonly options: { command?: string; configDir?: string; environment: NodeJS.ProcessEnv; cwd: string; closeTimeoutMs: number; queryFactory?: QueryFactory }) {}
 
   async account(): Promise<{ usage: Awaited<ReturnType<Query['usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET']>>; email?: string } | null> {
     const activeQuery = this.#create();
@@ -263,7 +284,7 @@ export class ClaudeInspector {
       options: {
         cwd: options.cwd, pathToClaudeCodeExecutable: executable,
         settingSources: ['user'], permissionMode: 'default', tools: [], persistSession: false, includePartialMessages: false,
-        env: withNodeOnPath({ ...withReclaudeEnvironment(executable, options.environment), CLAUDE_AGENT_SDK_CLIENT_APP: CLIENT_APP }),
+        env: withNodeOnPath({ ...withReclaudeEnvironment(executable, withClaudeConfigDir(options.environment, options.configDir)), CLAUDE_AGENT_SDK_CLIENT_APP: CLIENT_APP }),
         spawnClaudeCodeProcess: (spawnOptions: SpawnOptions) => {
           const child = spawn(spawnOptions.command, spawnOptions.args, { cwd: spawnOptions.cwd, env: spawnOptions.env, signal: spawnOptions.signal, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
           child.stderr.resume();

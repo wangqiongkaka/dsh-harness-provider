@@ -15,6 +15,8 @@ export const Config = Schema.object({
   codexCommand: Schema.string().default('codex').volatile(),
   /** Unset: `CLAUDE_COMMAND_PATH`, then `claude` on PATH and the usual install locations; supports `reclaude`. */
   claudeCommand: Schema.string().volatile(),
+  /** Explicit Claude Code configuration directory (`CLAUDE_CONFIG_DIR`); unset falls back to env or reclaude's active binding. */
+  claudeConfigDir: Schema.string().volatile(),
   defaultHarness: Schema.union(['last', 'dsh', 'codex', 'claude-code', 'antigravity']).default('last').volatile(),
   idleCloseSeconds: count(5, 60),
   delegateHarnesses: Schema.array(Schema.union(['dsh', 'codex', 'claude-code', 'antigravity'])).default(['codex']).volatile(),
