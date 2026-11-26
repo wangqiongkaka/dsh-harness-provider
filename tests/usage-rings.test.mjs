@@ -86,6 +86,35 @@ test('settings harness choices match row typography without changing composer ch
  } finally {await browser.close();}
 });
 
+test('设置页下拉框和数字框收窄居中，标题与恢复默认不换行', async () => {
+ const source=await readFile('src/client.tsx','utf8');
+ const bundle=await build({stdin:{contents:source+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require:createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'))});
+ const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage();
+  const copy=(title)=>`<div class="hp-set-copy"><div class="hp-set-title">${title}<button class="hp-set-reset">恢复默认</button></div><div class="hp-set-hint">进入讨论模式时预选的 Harness。</div></div>`;
+  await page.setContent(`<style>body{font-size:16px}${module.exports.styles}</style><div class="hp-set" style="width:560px">
+   <div class="hp-set-row">${copy('新会话默认 Harness')}<div class="hp-set-control"><button class="hp-set-select"><span>沿用上次选择</span></button></div></div>
+   <div class="hp-set-row">${copy('空闲回收（秒）')}<div class="hp-set-control"><input class="hp-set-number" value="60"></div></div>
+   <div class="hp-set-row" id="wide">${copy('讨论默认参与者')}<div class="hp-set-control"><div style="width:420px;height:28px"></div></div></div>
+   <div class="hp-set-row hp-set-wide" id="text">${copy('进展反馈说明')}<div class="hp-set-control"><textarea rows="6">说明</textarea></div></div></div>`);
+  const fields=await page.locator('.hp-set-select,.hp-set-control input').evaluateAll(nodes=>nodes.map(node=>({width:node.offsetWidth,align:getComputedStyle(node).textAlign})));
+  for (const field of fields) assert.equal(field.align,'center');
+  assert.ok(fields[0].width<160,`下拉框宽 ${fields[0].width}px`);
+  assert.ok(fields[1].width<=88,`数字框宽 ${fields[1].width}px`);
+  const heights=await page.locator('#wide .hp-set-title,#wide .hp-set-reset').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().height));
+  for (const height of heights) assert.ok(height<=20,`文字换行，高 ${height}px`);
+  const overflow=await page.locator('#wide').evaluate(row=>row.querySelector('.hp-set-control').getBoundingClientRect().right-row.getBoundingClientRect().right);
+  assert.ok(overflow<=0,`控件溢出 ${overflow}px`);
+  const firstRow=await page.locator('.hp-set-row').first().evaluate(row=>row.querySelector('.hp-set-control').getBoundingClientRect().top<row.querySelector('.hp-set-copy').getBoundingClientRect().bottom);
+  assert.ok(firstRow,'空间足够时控件应与标题同行');
+  const textarea=await page.locator('#text').evaluate(row=>[row.querySelector('textarea').getBoundingClientRect(),row.getBoundingClientRect()].map(box=>[box.left,box.width]));
+  assert.deepEqual(textarea[0],textarea[1],'宽行输入框应占满整行');
+ } finally {await browser.close();}
+});
+
 test('输入提示条在宽屏和窄屏下与输入框顶边直线段等长', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {styles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});

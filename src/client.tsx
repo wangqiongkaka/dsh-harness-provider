@@ -1360,6 +1360,21 @@ type SettingsSectionProps = PropsRuntime<'settings.section'> & PropsLocale<'harn
 type SettingField = keyof Settings;
 
 /** Text kept locally while typing and committed on blur or Enter, so every keystroke is not a profile write. */
+/** The settings dropdown: the composer's own menu, opening downward, instead of the OS popup a native select draws. */
+function SettingSelect({ value, options, label, disabled, onChange }: { value: string; options: { value: string; label: string }[]; label: string; disabled: boolean; onChange: (value: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpen(false), []);
+  useDismiss(open, close, root);
+  return <div ref={root} className="hp-anchor">
+    <button type="button" className="hp-set-select" aria-label={label} aria-haspopup="menu" aria-expanded={open} disabled={disabled} onClick={() => setOpen(!open)}>
+      <span>{options.find(option => option.value === value)?.label ?? value}</span><Chevron open={open} />
+    </button>
+    {open && <div className="hp-menu hp-set-menu" role="menu" aria-label={label}>
+      {options.map(option => <Option key={option.value} label={option.label} selected={option.value === value} onClick={() => { close(); if (option.value !== value) onChange(option.value); }} />)}
+    </div>}
+  </div>;
+}
 function DraftInput({ value, label, numeric, multiline, disabled, onCommit }: { value: string; label: string; numeric?: boolean; multiline?: boolean; disabled: boolean; onCommit: (text: string) => void }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => { setDraft(value); }, [value]);
@@ -1416,11 +1431,9 @@ export function HarnessSettingsSection({ useHarnessSettings, form, loadAvailable
     <p className="hp-set-intro">{t('settingsIntro')}</p>
     {disabled && <p className="hp-set-intro" role="note">{t('settingsReadOnly')}</p>}
     {group('settingsGroup.sessions', <>
-      {row('defaultHarness', <select aria-label={label('defaultHarness')} disabled={disabled} value={savedDefault}
-        onChange={event => settle('defaultHarness', form.set('defaultHarness', event.target.value))}>
-        <option value="last">{t('lastHarness')}</option>
-        {defaultOptions.map(id => <option key={id} value={id}>{id === 'dsh' ? t('native') : names[id]}</option>)}
-      </select>)}
+      {row('defaultHarness', <SettingSelect label={label('defaultHarness')} disabled={disabled} value={savedDefault}
+        options={[{ value: 'last', label: t('lastHarness') }, ...defaultOptions.map(id => ({ value: id, label: id === 'dsh' ? t('native') : names[id] }))]}
+        onChange={next => settle('defaultHarness', form.set('defaultHarness', next))} />)}
       {row('idleCloseSeconds', number('idleCloseSeconds'))}
     </>)}
     {group('settingsGroup.delegation', <>
@@ -1746,29 +1759,32 @@ ${nativeContextColors}
 .hp-set-intro{margin:0;font-size:13px;line-height:1.5;color:var(--dsw-alias-label-tertiary)}
 .hp-set-group{display:flex;flex-direction:column;margin-top:20px}
 .hp-set-head{margin:0 0 2px;font-size:12px;font-weight:600;letter-spacing:.06em;color:var(--dsw-alias-label-tertiary)}
-.hp-set-row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
+.hp-set-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 24px;padding:14px 0;border-bottom:.5px solid var(--dsw-alias-border-l2)}
 .hp-set-row:last-child{border-bottom:none}
-.hp-set-wide{flex-direction:column;align-items:stretch;gap:10px}
-.hp-set-copy{display:grid;gap:4px;min-width:0}
-.hp-set-title{display:flex;align-items:center;gap:8px;font-size:14px;line-height:20px}
+.hp-set-wide{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:10px}.hp-set-wide .hp-set-control{margin-left:0}
+.hp-set-copy{display:grid;flex:1 1 0;gap:4px}
+.hp-set-title{display:flex;align-items:center;gap:8px;font-size:14px;line-height:20px;white-space:nowrap}
 .hp-set-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
 .hp-set-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
 .hp-set-reset{padding:0;border:none;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
 .hp-set-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
-.hp-set-control{display:flex;justify-content:flex-end;flex:0 0 auto;min-width:0}
+.hp-set-control{display:flex;justify-content:flex-end;flex:0 0 auto;min-width:0;margin-left:auto}
 .hp-set-control .hp-delegate-harness{font-size:14px;line-height:20px}
-.hp-set-control input,.hp-set-control textarea,.hp-set-control select{box-sizing:border-box;padding:6px 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px}
-.hp-set-control select{width:200px;max-width:100%}
-.hp-set-control input{width:260px}.hp-set-control input.hp-set-number{width:120px;text-align:right;font-variant-numeric:tabular-nums}
+.hp-set-control input,.hp-set-control textarea,.hp-set-select{box-sizing:border-box;padding:6px 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px}
+.hp-set-select{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding-right:8px;cursor:pointer}
+.hp-set-select:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid,var(--dsw-alias-bg-layer-3))}
+.hp-set-menu{top:calc(100% + 4px);bottom:auto;right:0;min-width:100%;border-radius:12px}
+.hp-set-menu .hp-option{min-height:32px}
+.hp-set-control input{width:260px}.hp-set-control input.hp-set-number{width:88px;text-align:center;font-variant-numeric:tabular-nums}
 .hp-set-control textarea{width:100%;resize:vertical;font-family:var(--dsw-font-mono,ui-monospace,monospace);font-size:12px;line-height:18px}
-.hp-set-control input:focus-visible,.hp-set-control textarea:focus-visible,.hp-set-control select:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px}
+.hp-set-control input:focus-visible,.hp-set-control textarea:focus-visible,.hp-set-select:focus-visible{outline:2px solid var(--dsw-alias-border-l3);outline-offset:1px}
 .hp-set-control :disabled{opacity:.5;cursor:not-allowed}
 .hp-switch{box-sizing:border-box;position:relative;flex:0 0 auto;width:36px;height:20px;padding:2px;border:0;border-radius:10px;background:var(--dsw-alias-border-l3);cursor:pointer}
 .hp-switch[aria-checked=true]{background:var(--dsw-alias-brand-primary)}.hp-switch:disabled{opacity:.5;cursor:default}
 .hp-switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .hp-switch-thumb{display:block;width:16px;height:16px;border-radius:50%;background:var(--dsw-alias-label-primary-foreground);transition:transform 120ms ease}
 .hp-switch[aria-checked=true] .hp-switch-thumb{transform:translateX(16px)}
-@media(max-width:600px){.hp-set-row{flex-direction:column;align-items:stretch;gap:10px}.hp-set-control{justify-content:flex-start}.hp-set-control input{width:100%}}
+@media(max-width:600px){.hp-set-row{flex-direction:column;align-items:stretch;gap:10px}.hp-set-control{justify-content:flex-start;margin-left:0}.hp-set-menu{left:0;right:auto}.hp-set-control input{width:100%}}
 @media(prefers-reduced-motion:reduce){.hp-switch-thumb{transition:none}}
 `;
 
