@@ -91,7 +91,7 @@ const statuses = new Map([
   ['ask', { running: undefined, pendingInteraction: { kind: 'approval' }, completionUnread: false }],
   ['done', { running: false, pendingInteraction: undefined, completionUnread: true }],
 ]);
-const workspaces = { phase: 'ready', archivedSessionIds: [], pinnedSessionIds: [] };
+const workspaces = { phase: 'ready', archivedSessionIds: [], pinnedSessionIds: [], items: [] };
 const opened = [], asked = [], calls = [], fail = {};
 const refreshed = [];
 let completionLoader = async id => { refreshed.push(id); };
@@ -321,6 +321,76 @@ test('the agent card switches details inline and opens the chosen Session withou
   click(host()?.querySelector('.hp-agents-tile[data-state="running"]'));
   expect([...host().querySelectorAll('.hp-agents-title')].map(row => row.textContent)).toEqual(['运行中']);
 }));
+
+// The host's Workspace browser rows the card drives: a project header toggles on click and carries aria-expanded.
+const SIDEBAR = () => {
+  const tree = document.createElement('div');
+  tree.setAttribute('role', 'tree');
+  document.body.append(tree);
+  const clicks = [], scrolled = [];
+  const session = id => {
+    const row = document.createElement('div');
+    row.dataset.rowKey = 'session:' + id;
+    row.scrollIntoView = () => { scrolled.push(id); };
+    tree.append(row);
+  };
+  const project = (id, expanded, unfold = () => {}) => {
+    const row = document.createElement('div');
+    row.setAttribute('role', 'treeitem');
+    row.dataset.rowKey = 'workspace:' + id;
+    row.setAttribute('aria-expanded', String(expanded));
+    row.addEventListener('click', () => {
+      clicks.push(id);
+      const next = row.getAttribute('aria-expanded') !== 'true';
+      row.setAttribute('aria-expanded', String(next));
+      if (next) unfold();
+    });
+    tree.append(row);
+  };
+  const frames = n => new Promise(done => { const next = k => k === 0 ? done() : requestAnimationFrame(() => { next(k - 1); }); next(n); });
+  return { clicks, scrolled, session, project, frames };
+};
+const ITEMS = [
+  { workspaceId: 'outer', path: '/w', sessionIds: [] },
+  { workspaceId: 'own', path: '/w/dsh-remote-control-01/', sessionIds: ['run'] },
+];
+
+test('opening a Session from the card unfolds its folded project and scrolls the Workspace browser to it', () => inPage(async ({ sidebar, ITEMS }) => {
+  const { clicks, scrolled, session, project, frames } = eval(sidebar)();
+  column();
+  // Sibling view: the folded parent-directory project stays folded; only the owner unfolds, once.
+  project('outer', false);
+  project('own', false, () => { session('run'); });
+  render(list, {}, statuses, { ...workspaces, items: ITEMS });
+  click(host()?.querySelector('[data-hp-agents-pick]'));
+  await frames(5);
+  expect(opened).toEqual(['run']);
+  expect(clicks).toEqual(['own']);
+  expect(scrolled).toEqual(['run']);
+}, { arg: { sidebar: `(${SIDEBAR})`, ITEMS } }));
+
+test('opening a Session from the card leaves an unfolded project open and only scrolls to the row', () => inPage(async ({ sidebar, ITEMS }) => {
+  const { clicks, scrolled, session, project, frames } = eval(sidebar)();
+  column();
+  project('own', true);
+  session('run');
+  render(list, {}, statuses, { ...workspaces, items: ITEMS });
+  click(host()?.querySelector('[data-hp-agents-pick]'));
+  await frames(5);
+  expect(clicks).toEqual([]);
+  expect(scrolled).toEqual(['run']);
+}, { arg: { sidebar: `(${SIDEBAR})`, ITEMS } }));
+
+test('in the tree view the card unfolds the folded ancestor project hiding the Session, then its own', () => inPage(async ({ sidebar, ITEMS }) => {
+  const { clicks, scrolled, session, project, frames } = eval(sidebar)();
+  column();
+  project('outer', false, () => { project('own', false, () => { session('run'); }); });
+  render(list, {}, statuses, { ...workspaces, items: ITEMS });
+  click(host()?.querySelector('[data-hp-agents-pick]'));
+  await frames(6);
+  expect(clicks).toEqual(['outer', 'own']);
+  expect(scrolled).toEqual(['run']);
+}, { arg: { sidebar: `(${SIDEBAR})`, ITEMS } }));
 
 test('the agent card shows all selected rows rather than limiting details to three previews', () => inPage(() => {
   column();

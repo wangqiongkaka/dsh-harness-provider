@@ -131,6 +131,46 @@ type AgentKey = keyof typeof agentsZh
 /** New Session in the sidebar column: the card takes the seat right after it. */
 const ANCHOR = '[class*="_sidebarCol"] :is([class*="_newSessionRow"], button[class*="_newSession"])'
 
+/** Frames a reveal keeps trying while the host opens the Session and unfolds its project (about one second). */
+const REVEAL_FRAMES = 60
+
+/**
+ * Show an opened Session in the host's Workspace browser. Opening a Session unfolds its project only while the
+ * user never toggled it, and the browser's own reveal (search results) is private, so this drives the rows it
+ * renders: a project header `[role="treeitem"][data-row-key="workspace:<id>"]` toggles on click and carries
+ * `aria-expanded`; a Session row is `[data-row-key="session:<id>"]`. Headers are clicked only while folded, once
+ * each, so a click always unfolds. In the tree view a folded ancestor project hides the header, so the nearest
+ * rendered ancestor is unfolded first. Without the browser (flat list, rail, another host build) it only scrolls
+ * whatever is found, or does nothing.
+ */
+export function revealInSidebar(sessionId: string, items: readonly { workspaceId: string; path: string; sessionIds: readonly string[] }[]): void {
+  const owner = items.find(item => item.sessionIds.includes(sessionId))
+  const folder = (path: string): string => path.replace(/\/+$/, '')
+  // Nearest first, like the host's owningParentFolder: registered projects whose directory contains the owner's.
+  const ancestors = owner === undefined ? [] : items
+    .filter(item => folder(owner.path).startsWith(`${folder(item.path)}/`))
+    .sort((a, b) => b.path.length - a.path.length)
+  const header = (key: string): HTMLElement | null =>
+    document.querySelector(`[role="treeitem"][data-row-key="workspace:${CSS.escape(key)}"]`)
+  const clicked = new Set<string>()
+  const step = (left: number): void => {
+    const own = header(owner?.workspaceId ?? '')
+    const key = own === null ? ancestors.find(item => header(item.workspaceId) !== null)?.workspaceId : owner?.workspaceId ?? ''
+    const blocking = key === undefined ? null : header(key)
+    if (key !== undefined && blocking?.getAttribute('aria-expanded') === 'false' && !clicked.has(key)) {
+      clicked.add(key)
+      blocking.click()
+    } else {
+      const row = document.querySelector(`[data-row-key="session:${CSS.escape(sessionId)}"]`)
+      if (row !== null) { row.scrollIntoView({ block: 'nearest' }); return }
+      // ponytail: a Session past the host's automatic 50-row watermark never renders; land on its project instead.
+      if (left === 0) own?.scrollIntoView({ block: 'nearest' })
+    }
+    if (left > 0) requestAnimationFrame(() => { step(left - 1) })
+  }
+  requestAnimationFrame(() => { step(REVEAL_FRAMES) })
+}
+
 /** Host commands passed through the slot injection face. */
 export interface AgentBoardInjected {
   openSession: (sessionId: SessionId) => void
@@ -501,6 +541,10 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
     setToast(previous => ({ text: t(key), seq: (previous?.seq ?? 0) + 1 }))
   }
   const failed = (): void => { say('agents.toast.failed') }
+  const open = (id: SessionId): void => {
+    openSession(id)
+    revealInSidebar(id, workspaces.items)
+  }
   const act = (action: RowAction, row: AgentRow<SessionId>): void => {
     switch (action) {
       case 'pin': props.pinSession(row.id).catch(failed); break
@@ -550,7 +594,7 @@ export function AgentBoard(props: AgentBoardProps): React.JSX.Element | null {
           {shown.length > 0 && (
             <section className="hp-agents-group">
               <h3><StateDot state={DOT[filter]} size={filter === 'running' ? 12 : 10} />{t(`agents.${filter}`)}</h3>
-              <div>{shown.map(row => <Row key={row.id} row={row} mark={marks.get(row.id)} pinned={pinned.has(row.id)} unread={row.state === 'done' && statuses.get(row.id)?.completionUnread === true} now={now} t={t} open={openSession} act={act} />)}</div>
+              <div>{shown.map(row => <Row key={row.id} row={row} mark={marks.get(row.id)} pinned={pinned.has(row.id)} unread={row.state === 'done' && statuses.get(row.id)?.completionUnread === true} now={now} t={t} open={open} act={act} />)}</div>
             </section>
           )}
         </div>
