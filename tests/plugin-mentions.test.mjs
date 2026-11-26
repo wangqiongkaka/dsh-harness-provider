@@ -348,6 +348,152 @@ test('workspace header gains a collapse-all button that folds every expanded pro
  } finally { await browser.close(); }
 });
 
+test('sidebar hides New Session and moves panel entries to a horizontal icon bar above the Agent board', async () => {
+ const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {syncPanelTooltips,markStyles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}}}});
+ const {syncPanelTooltips,markStyles}=module.exports;
+ const hostCss=`
+  html,body{margin:0;height:640px}
+  .h_sidebarCol{width:336px;height:640px;overflow:hidden}
+  .h_root{display:flex;flex-direction:column;height:100%;padding:6px 8px;box-sizing:border-box;--dsh-sidebar-inline-padding:8px;--dsh-sidebar-paint-inset:3px;--dsw-radius-md:12px}
+  .h_logoRow{flex:none;height:60px}
+  .h_newSessionRow{flex:none;display:flex;height:38px;margin:0 4px}
+  .h_newSession{flex:1;height:38px}
+  .h_scrollRegion{margin-top:4px;position:relative;flex:1;min-height:0;display:flex;flex-direction:column}
+  .h_root:not(.h_collapsed) .h_scrollRegion{container-type:size}
+  .h_scrollArea{flex:1;min-height:0;display:grid;grid-template-columns:4px minmax(0,1fr) 6px;grid-template-rows:8px max-content 2px max-content;align-content:start;overflow-y:auto}
+  .h_root:not(.h_collapsed) .h_scrollArea{container-type:scroll-state}
+  .h_panelList{grid-column:2;grid-row:2;flex:none;display:flex;flex-direction:column;gap:2px;margin-bottom:8px}
+  .h_panelEntry{position:relative;display:flex;border-inline:3px solid transparent}
+  .h_panelEntryWide>*:first-child{flex:1;min-width:0}
+  .h_panelEntryWide .h_panelRow{width:100%;padding-right:38px}
+  .h_panelUnpin{position:absolute;right:0;top:2px;width:28px;height:28px}
+  .h_moreAnchor{display:flex;flex-direction:column}
+  .h_panelRow{display:flex;align-items:center;min-height:32px;padding:5px 9px;box-sizing:border-box;border:0;background:transparent}
+  .h_panelGlyph{display:inline-flex;align-items:center;justify-content:center}
+  .h_regionArea{grid-column:2;grid-row:4;min-height:0;min-width:0;display:flex;flex-direction:column}
+  .ws_root{flex:none;max-height:100cqh;display:flex;flex-direction:column;min-height:0}
+  .ws_sectionHeader{flex:none;height:36px}
+  .ws_listArea{flex:1;min-height:0;overflow-y:auto}
+  @container scroll-state(scrollable: bottom){.ws_root .ws_listArea{overflow-y:hidden}}
+  .h_footArea{flex:none;height:44px}
+  .h_collapsed .h_scrollArea{display:flex;flex-direction:column}
+  .h_collapsed .h_panelList{gap:12px}
+  .h_collapsed .h_panelRow{width:36px;height:36px;justify-content:center;padding:0}
+  [data-hp-agents]{height:180px}
+ `;
+ const entry=(label,unpin=true)=>`<div class="h_panelEntry h_panelEntryWide"><span><button type="button" class="h_panelRow" aria-label="${label}"><span class="h_panelGlyph"><svg width="16" height="16"></svg></span><span class="h_panelTitle">${label}</span></button></span>${unpin?'<button type="button" class="h_panelUnpin">x</button>':''}</div>`;
+ const pageHtml=({collapsed=false,remoteDrawer=false,legacy=false}={})=>`<!doctype html><head><style>${hostCss}${markStyles}</style>${remoteDrawer?'<style data-dsh-remote-control-drawer-selection></style>':''}</head><body>
+  <div class="h_sidebarCol"><div class="h_root${collapsed?' h_collapsed':''}">
+   <div class="h_logoRow">deepseek HARNESS</div>
+   ${legacy?'<button type="button" class="h_newSession">新会话</button>':'<div class="h_newSessionRow"><div data-slot="sidebar.session.action" style="display:contents"><button type="button" class="h_newSession">新会话</button></div></div>'}
+   <div data-hp-agents>Agent 运行</div>
+   ${legacy
+     ?`<nav class="h_panelList">${['插件','自动化任务','Superagent','更多'].map(l=>`<button type="button" class="h_panelRow" aria-label="${l}"><span class="h_panelGlyph"><svg width="16" height="16"></svg></span><span class="h_panelTitle">${l}</span></button>`).join('')}</nav><div class="h_regionArea"><div class="ws_root"><div class="ws_sectionHeader">工作区</div><div class="ws_listArea"><div style="height:900px"></div></div></div></div>`
+     :`<div class="h_scrollRegion"><div class="h_scrollArea"><nav class="h_panelList">${entry('插件',false)}${entry('自动化任务')}${entry('Superagent')}<div class="h_moreAnchor"><span><button type="button" class="h_panelRow" aria-label="更多" aria-haspopup="menu"><span class="h_panelGlyph"><svg width="16" height="16"></svg></span><span class="h_panelTitle">更多</span></button></span></div></nav><div class="h_regionArea"><div class="ws_root"><div class="ws_sectionHeader">工作区</div><div class="ws_listArea"><div style="height:900px"></div></div></div></div></div><span class="h_scrollFade"></span></div>`}
+   <div class="h_footArea">设置</div>
+  </div></div>
+  <div data-shell-leading><div class="h_controls"><span><button type="button" data-sidebar-opener aria-label="展开侧边栏">open</button></span><span><button type="button" aria-label="新会话">new</button></span></div></div>
+ </body>`;
+ const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage({viewport:{width:400,height:640}});
+  await page.setContent(pageHtml());
+  const sync=()=>page.evaluate(`(${syncPanelTooltips})()`);
+  await sync();
+  const expanded=await page.evaluate(()=>{
+   const rect=s=>document.querySelector(s).getBoundingClientRect();
+   const rows=[...document.querySelectorAll('.h_panelRow')];
+   const listArea=document.querySelector('.ws_listArea');
+   return {
+    newSessionDisplay:getComputedStyle(document.querySelector('.h_newSessionRow')).display,
+    logoBottom:rect('.h_logoRow').bottom,
+    navTop:rect('.h_panelList').top,
+    navBottom:rect('.h_panelList').bottom,
+    agentsTop:rect('[data-hp-agents]').top,
+    agentsBottom:rect('[data-hp-agents]').bottom,
+    regionTop:rect('.h_regionArea').top,
+    footTop:rect('.h_footArea').top,
+    rowTops:rows.map(r=>Math.round(r.getBoundingClientRect().top)),
+    rowLefts:rows.map(r=>Math.round(r.getBoundingClientRect().left)),
+    rowWidths:rows.map(r=>Math.round(r.getBoundingClientRect().width)),
+    titlesVisible:[...document.querySelectorAll('.h_panelTitle')].some(e=>getComputedStyle(e).display!=='none'),
+    unpinsVisible:[...document.querySelectorAll('.h_panelUnpin')].some(e=>getComputedStyle(e).display!=='none'),
+    titles:rows.map(r=>r.title),
+    listScrollable:listArea.scrollHeight>listArea.clientHeight&&getComputedStyle(listArea).overflowY==='auto',
+    listHeight:Math.round(listArea.getBoundingClientRect().height),
+   };
+  });
+  assert.equal(expanded.newSessionDisplay,'none','New Session is hidden in expanded sidebar');
+  assert.ok(expanded.navTop>=expanded.logoBottom-1&&expanded.navBottom<=expanded.agentsTop+1,'panel bar sits between logo row and Agent board');
+  assert.ok(expanded.agentsBottom<=expanded.regionTop+1&&expanded.regionTop<expanded.footTop,'Agent board sits above workspaces and footer');
+  assert.equal(new Set(expanded.rowTops).size,1,'all panel icons share one horizontal row');
+  for (let i=1;i<expanded.rowLefts.length;i++) assert.ok(expanded.rowLefts[i]>expanded.rowLefts[i-1],'panel icons run left to right');
+  assert.ok(Math.max(...expanded.rowWidths)-Math.min(...expanded.rowWidths)<=2,'panel icon buttons share equal width');
+  assert.equal(expanded.titlesVisible,false,'panel labels stay hidden in the horizontal icon bar');
+  assert.equal(expanded.unpinsVisible,false,'inline unpin controls stay hidden in the horizontal icon bar');
+  assert.deepEqual(expanded.titles,['插件','自动化任务','Superagent','更多'],'hover tooltips mirror each entry aria-label');
+  assert.equal(expanded.listScrollable,true,'workspace list keeps scrolling below the Agent board');
+  assert.ok(expanded.listHeight>200,'workspace list fills the remaining vertical space');
+
+  // Collapsed sidebar: hide New Session, Agent board, panel launchers, workspaces and footer, and hide the leading New Session control while keeping the reopen button.
+  await page.evaluate(()=>document.querySelector('.h_root').classList.add('h_collapsed'));
+  await sync();
+  const rail=await page.evaluate(()=>{
+   const display=s=>getComputedStyle(document.querySelector(s)).display;
+   const rows=[...document.querySelectorAll('.h_panelRow')];
+   return {
+    logoDisplay:display('.h_logoRow'),
+    newSessionDisplay:display('.h_newSessionRow'),
+    agentsDisplay:display('[data-hp-agents]'),
+    panelListDisplay:display('.h_panelList'),
+    regionDisplay:display('.h_regionArea'),
+    footDisplay:display('.h_footArea'),
+    leadingOpenerDisplay:display('[data-shell-leading] [data-sidebar-opener]'),
+    leadingNewDisplay:display('[data-shell-leading] button:not([data-sidebar-opener])'),
+    titles:rows.map(r=>r.getAttribute('title')),
+   };
+  });
+  assert.notEqual(rail.logoDisplay,'none','collapsed sidebar keeps the toggle row to reopen');
+  assert.equal(rail.newSessionDisplay,'none','New Session stays hidden when collapsed');
+  assert.equal(rail.agentsDisplay,'none','Agent board is hidden when collapsed');
+  assert.equal(rail.panelListDisplay,'none','panel launchers are hidden when collapsed');
+  assert.equal(rail.regionDisplay,'none','workspaces are hidden when collapsed');
+  assert.equal(rail.footDisplay,'none','footer is hidden when collapsed');
+  assert.notEqual(rail.leadingOpenerDisplay,'none','macOS leading reopen button stays visible');
+  assert.equal(rail.leadingNewDisplay,'none','macOS leading New Session button is hidden');
+  assert.deepEqual(rail.titles,[null,null,null,null],'collapsed sidebar removes plugin titles');
+
+  // Legacy host markup (no scrollRegion/newSessionRow wrapper): still hides New Session and places the icon bar above Agent board.
+  await page.setContent(pageHtml({legacy:true}));
+  await sync();
+  const legacy=await page.evaluate(()=>{
+   const rows=[...document.querySelectorAll('.h_panelRow')];
+   return {
+    newSessionDisplay:getComputedStyle(document.querySelector('.h_newSession')).display,
+    navBottom:document.querySelector('.h_panelList').getBoundingClientRect().bottom,
+    agentsTop:document.querySelector('[data-hp-agents]').getBoundingClientRect().top,
+    rowTops:rows.map(r=>Math.round(r.getBoundingClientRect().top)),
+   };
+  });
+  assert.equal(legacy.newSessionDisplay,'none','legacy New Session button is hidden');
+  assert.ok(legacy.navBottom<=legacy.agentsTop+1,'legacy panel bar sits above Agent board');
+  assert.equal(new Set(legacy.rowTops).size,1,'legacy panel icons sit in one horizontal row');
+
+  // Phone drawer (dsh-remote-control active): desktop sidebar rules step aside and do not set plugin titles.
+  await page.setContent(pageHtml({remoteDrawer:true}));
+  await sync();
+  const drawer=await page.evaluate(()=>({
+   direction:getComputedStyle(document.querySelector('.h_panelList')).flexDirection,
+   titles:[...document.querySelectorAll('.h_panelRow')].map(r=>r.getAttribute('title')),
+  }));
+  assert.equal(drawer.direction,'column','phone drawer is left to dsh-remote-control');
+  assert.deepEqual(drawer.titles,[null,null,null,null],'phone drawer does not receive desktop tooltip titles');
+ } finally { await browser.close(); }
+});
+
 test('子代理开始页入口沿用原生卡片，不注册自绘渲染器', async () => {
  const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
  const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8'),resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});

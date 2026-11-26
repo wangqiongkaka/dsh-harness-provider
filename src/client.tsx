@@ -1940,6 +1940,8 @@ const logos: Record<State['harness'], { mask: string; color: string }> = {
 };
 const delegatedMask = `url("data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><mask id="m"><circle cx="5" cy="5" r="5" fill="#fff"/><path d="M3 3l4 4M7 4v3H4" stroke="#000" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></mask><circle cx="5" cy="5" r="5" mask="url(#m)"/></svg>')}")`;
 const emptyStatusCell = '>span:first-child:is(:empty,:has(> [data-slot="sidebar.session.row.leading"]:empty))';
+// Desktop expanded sidebar root (skipping collapsed rail and dsh-remote-control's phone drawer, which styles its own header).
+const sidebarRoot = 'html:not(:has(style[data-dsh-remote-control-drawer-selection])) [class*="_sidebarCol"] [class*="_root"]:has(>[class*="_logoRow"]):not([class*="_collapsed"])';
 const markStyles = Object.entries(logos).map(([harness, { mask, color }]) =>
   `[data-hp-harness="${harness}"]${emptyStatusCell}::before,[data-hp-harness="${harness}"]:not([data-hp-closed])>span:first-child::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`
   // The host paints the selected row with its hover gray; tint it with the session's Harness color instead.
@@ -1954,6 +1956,26 @@ const markStyles = Object.entries(logos).map(([harness, { mask, color }]) =>
   + `\n[data-hp-running]>span:first-child::before{animation:hp-logo-breathe 1.4s ease-in-out infinite}`
   + `\n@keyframes hp-logo-breathe{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.06)}}`
   + `\n@media (prefers-reduced-motion:reduce){[data-hp-running]>span:first-child::before,[role="treeitem"][aria-selected="true"][data-hp-harness]{animation:none}}`
+  // Hide the sidebar New Session control in both expanded and collapsed states (including macOS collapsed shell.leading); the Agent board still anchors to the hidden element.
+  + `\n[class*="_sidebarCol"] [class*="_newSessionRow"],[class*="_sidebarCol"] button[class*="_newSession"],[data-shell-leading] [class*="_controls"]>*:not([data-sidebar-opener]):not(:has([data-sidebar-opener])),[data-shell-leading] button:not([data-sidebar-opener]){display:none !important}`
+  // Collapsed sidebar hides all body sections (Agent board, panel launchers, workspaces, footer), keeping only the reopen toggle.
+  + `\n[class*="_sidebarCol"] [class*="_root"]:has(>[class*="_logoRow"])[class*="_collapsed"] :is([data-hp-agents],[class*="_panelList"],[class*="_regionArea"],[class*="_footArea"]){display:none !important}`
+  // Move panel launchers into New Session's seat above the Agent board as a horizontal icon bar without reparenting React nodes.
+  + `\n${sidebarRoot}>[class*="_scrollRegion"],${sidebarRoot}>[class*="_scrollRegion"]>[class*="_scrollArea"]{display:contents;container-type:normal}`
+  + `\n${sidebarRoot} [class*="_scrollArea"]::before,${sidebarRoot} [class*="_scrollArea"]::after,${sidebarRoot}>[class*="_scrollRegion"]>[class*="_scrollFade"]{display:none}`
+  + `\n${sidebarRoot} [class*="_panelList"]{order:1;flex:none;display:flex;flex-direction:row;align-items:center;gap:4px;margin:0 0 4px;padding:0;overflow-x:auto;scrollbar-width:none}`
+  + `\n${sidebarRoot} [class*="_panelList"]::-webkit-scrollbar{display:none}`
+  + `\n${sidebarRoot} [class*="_panelList"]>*{flex:1 1 0;min-width:32px;display:flex}`
+  + `\n${sidebarRoot} [class*="_panelList"] [class*="_panelEntry"]{border-inline:0;border-radius:var(--dsw-radius-md);background-clip:border-box}`
+  + `\n${sidebarRoot} [class*="_panelList"] [class*="_panelEntry"]>*:first-child,${sidebarRoot} [class*="_panelList"] [class*="_moreAnchor"]>*{flex:1;min-width:0;display:flex}`
+  + `\n${sidebarRoot} [class*="_panelList"] [class*="_moreAnchor"]{flex-direction:row}`
+  + `\n${sidebarRoot} [class*="_panelList"] button[class*="_panelRow"]{width:100%;height:36px;min-height:36px;padding:0;margin:0;border-inline:0;border-radius:var(--dsw-radius-md);background-clip:border-box;justify-content:center}`
+  + `\n${sidebarRoot} [class*="_panelList"] [class*="_panelGlyph"] svg{width:18px;height:18px}`
+  + `\n${sidebarRoot} [class*="_panelList"] [class*="_panelTitle"],${sidebarRoot} [class*="_panelList"] [class*="_panelUnpin"]{display:none}`
+  + `\n${sidebarRoot}>[data-hp-agents]{order:2}`
+  + `\n${sidebarRoot} [class*="_regionArea"]{order:3;flex:1 1 0;min-height:0}`
+  + `\n${sidebarRoot} [class*="_regionArea"] [class*="_root"]:has(>[class*="_sectionHeader"]){flex:1 1 auto;min-height:0;height:auto;max-height:none}`
+  + `\n${sidebarRoot}>[class*="_footArea"]{order:4}`
   // Collapse-all button in the Workspace header: the host's action cluster fits two buttons, so it widens while it holds
   // ours (not while search hides it); the rail has no project rows.
   + `\n[class*="_headerActions"]:has(>[data-hp-collapse-all]):not([class*="_headerActionsHidden"]){max-width:100px}`
@@ -1962,6 +1984,27 @@ const markStyles = Object.entries(logos).map(([harness, { mask, color }]) =>
   + `\n[data-hp-delegated]${emptyStatusCell}{position:relative}[data-hp-delegated]${emptyStatusCell}::after{content:"";position:absolute;right:-2px;bottom:0;width:9px;height:9px;background:#4D6BFE;-webkit-mask:${delegatedMask} center/contain no-repeat;mask:${delegatedMask} center/contain no-repeat}`
   // Closed sessions (no live Harness process, or an unloaded DSH agent) show the logo and badge in gray.
   + `\n[data-hp-closed]${emptyStatusCell}::before,[data-hp-closed]${emptyStatusCell}::after{background:var(--dsw-alias-label-tertiary)}`;
+/**
+ * Mirror each panel launcher's accessible label to `title` while the expanded icon bar hides its text
+ * (the host disables its own Tooltip while wide), and remove it in the collapsed rail or phone drawer.
+ */
+// ponytail: the host disables Tooltip when wide and exposes no icon-only panel-bar option; remove if DSH adds one.
+function syncPanelTooltips(): void {
+  const drawer = document.querySelectorAll('style[data-dsh-remote-control-drawer-selection]').length > 0;
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[class*="_sidebarCol"] [class*="_root"]:has(>[class*="_logoRow"]) [class*="_panelList"] button[class*="_panelRow"]')) {
+    const collapsed = button.closest('[class*="_collapsed"]') !== null;
+    if (!drawer && !collapsed) {
+      const label = button.getAttribute('aria-label');
+      if (label) {
+        if (button.title !== label) button.title = label;
+        button.dataset.hpPanelTip = '';
+      }
+    } else if ('hpPanelTip' in button.dataset) {
+      button.removeAttribute('title');
+      delete button.dataset.hpPanelTip;
+    }
+  }
+}
 /**
  * Put a "collapse all projects" button first in the Workspace header's action cluster, and keep it disabled while no
  * project is expanded. Idempotent: every sidebar paint calls it. Self-contained so tests can run it in a page.
@@ -2078,6 +2121,7 @@ export async function apply(ctx: Context): Promise<void> {
     function paint() {
       frame = 0;
       mountCollapseAll(ht('collapseAllProjects'));
+      syncPanelTooltips();
       const {byId}=scope.sessions.list.getSnapshot();
       const missing: string[] = [];
       for (const row of document.querySelectorAll<HTMLElement>('[role="treeitem"]')) {
@@ -2212,7 +2256,7 @@ export async function apply(ctx: Context): Promise<void> {
       // Processes start with a turn and are reclaimed when idle, so every visible row is re-read periodically.
       // ponytail: polls all visible rows every 5s; push process start/exit events if the sidebar grows large.
       const refresh=setInterval(()=>{fetched.clear();schedule();},5_000);
-      return ()=>{observer.disconnect();clearInterval(refresh);cancelAnimationFrame(frame);frame=0;for (const button of document.querySelectorAll('[data-hp-collapse-all]')) button.remove();for (const row of document.querySelectorAll<HTMLElement>('[data-hp-harness],[data-hp-delegated],[data-hp-running],[data-hp-closed]')) { delete row.dataset.hpHarness; delete row.dataset.hpDelegated; delete row.dataset.hpRunning; delete row.dataset.hpClosed; }};
+      return ()=>{observer.disconnect();clearInterval(refresh);cancelAnimationFrame(frame);frame=0;for (const button of document.querySelectorAll('[data-hp-collapse-all]')) button.remove();for (const button of document.querySelectorAll<HTMLElement>('[data-hp-panel-tip]')) { button.removeAttribute('title'); delete button.dataset.hpPanelTip; }for (const row of document.querySelectorAll<HTMLElement>('[data-hp-harness],[data-hp-delegated],[data-hp-running],[data-hp-closed]')) { delete row.dataset.hpHarness; delete row.dataset.hpDelegated; delete row.dataset.hpRunning; delete row.dataset.hpClosed; }};
     },'harness: sidebar marks');
     scope.slots.inject('conversation.input.left',()=>scope.slots.register({
       name:'conversation.input.left',id:'harness-selector',order:-100,locale:'harness',inject:()=>api,
