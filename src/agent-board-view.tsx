@@ -131,18 +131,46 @@ type AgentKey = keyof typeof agentsZh
 /** New Session in the sidebar column: the card takes the seat right after it. */
 const ANCHOR = '[class*="_sidebarCol"] :is([class*="_newSessionRow"], button[class*="_newSession"])'
 
-/** Frames a reveal keeps trying while the host opens the Session and unfolds its project (about one second). */
-const REVEAL_FRAMES = 60
+/** Frames a reveal keeps trying while the host opens the Session and unfolds its project (about two seconds). */
+const REVEAL_FRAMES = 120
+/** Frames the shown row must stay still before a reveal ends (about half a second). */
+const CALM_FRAMES = 30
 /** The latest reveal; a newer one stops the older loop. */
 let reveals = 0
+
+/**
+ * The visible project a hidden one is tucked under. dsh-git-sidebar shows a Worktree's project right after its main
+ * checkout's (flex `order`) and hides it while that project is folded, so the nearest visible project before it in
+ * display order is the one to unfold.
+ */
+function tuckedUnder(hidden: HTMLElement): HTMLElement | null {
+  const section = hidden.closest('[role="tree"] > *')
+  if (section?.parentElement == null) return null
+  const order = (element: Element): number => Number(getComputedStyle(element).order) || 0
+  const sections = [...section.parentElement.children]
+    .map((element, index) => ({ element, index }))
+    .sort((a, b) => order(a.element) - order(b.element) || a.index - b.index)
+  for (let at = sections.findIndex(entry => entry.element === section) - 1; at >= 0; at--) {
+    const found = sections[at].element.querySelector<HTMLElement>('[role="treeitem"][data-row-key^="workspace:"]')
+    if (found !== null && found.getClientRects().length > 0) return found
+  }
+  return null
+}
+
+/** Whether `row` lies fully within `list`'s visible box, allowing a pixel of rounding. */
+const inside = (row: Element, list: Element): boolean => {
+  const box = list.getBoundingClientRect(), at = row.getBoundingClientRect()
+  return at.top >= box.top - 1 && at.bottom <= box.bottom + 1
+}
 
 /**
  * Show an opened Session in the host's Workspace browser. Opening a Session unfolds its project only while the
  * user never toggled it, and the browser's own reveal (search results) is private, so this drives the rows it
  * renders: a project header `[role="treeitem"][data-row-key="workspace:<id>"]` toggles on click and carries
- * `aria-expanded`; a Session row is `[data-row-key="session:<id>"]`. Headers are clicked only while folded, once
+ * `aria-expanded`; a Session row is `[data-row-key="session:<id>"]` inside the list scroller `[data-sidebar-list-area]`. Headers are clicked only while folded, once
  * each, so a click always unfolds. In the tree view a folded ancestor project hides the header, so the nearest
- * rendered ancestor is unfolded first. Without the browser (flat list, rail, another host build) it only scrolls
+ * rendered ancestor is unfolded first; a project rendered but hidden (dsh-git-sidebar tucks Worktrees under their main
+ * checkout) unfolds the project it is tucked under first. Without the browser (flat list, rail, another host build) it only scrolls
  * whatever is found, or does nothing.
  */
 export function revealInSidebar(sessionId: string, items: readonly { workspaceId: string; path: string; sessionIds: readonly string[] }[]): void {
@@ -157,20 +185,33 @@ export function revealInSidebar(sessionId: string, items: readonly { workspaceId
   const clicked = new Set<string>()
   const token = ++reveals
   let settled: number | undefined
+  let calm = 0
   const step = (left: number): void => {
     if (token !== reveals) return
     const own = header(owner?.workspaceId ?? '')
-    const key = own === null ? ancestors.find(item => header(item.workspaceId) !== null)?.workspaceId : owner?.workspaceId ?? ''
-    const blocking = key === undefined ? null : header(key)
-    if (key !== undefined && blocking?.getAttribute('aria-expanded') === 'false' && !clicked.has(key)) {
+    const blocking = own === null
+      ? ancestors.map(item => header(item.workspaceId)).find(found => found !== null) ?? null
+      : own.getClientRects().length === 0 ? tuckedUnder(own) : own
+    const key = blocking?.getAttribute('data-row-key')
+    if (blocking && key && blocking.getAttribute('aria-expanded') === 'false' && !clicked.has(key)) {
       clicked.add(key)
       blocking.click()
     } else {
       const row = document.querySelector(`[data-row-key="session:${CSS.escape(sessionId)}"]`)
       if (row !== null) {
-        // Unfolding animates the rows in, which can push this row out again: scroll until it stays put.
-        if (row.getBoundingClientRect().top === settled) return
-        row.scrollIntoView({ block: 'nearest' })
+        // Unfolding animates the rows in, the browser's scroll can land on a stale layout, and the host updates the list
+        // again a moment after opening: put the row back whenever it leaves the list, until it stays shown and still.
+        const list = row.closest('[data-sidebar-list-area]')
+        if (settled === undefined || (list !== null && !inside(row, list))) {
+          row.scrollIntoView({ block: 'nearest' })
+          if (list !== null) {
+            const box = list.getBoundingClientRect(), at = row.getBoundingClientRect()
+            if (at.top < box.top) list.scrollTop -= box.top - at.top
+            else if (at.bottom > box.bottom) list.scrollTop += at.bottom - box.bottom
+          }
+          calm = 0
+        } else if (row.getBoundingClientRect().top !== settled) calm = 0
+        else if (++calm >= CALM_FRAMES) return
         settled = row.getBoundingClientRect().top
       // ponytail: a Session past the host's automatic 50-row watermark never renders; land on its project instead.
       } else if (left === 0) own?.scrollIntoView({ block: 'nearest' })

@@ -392,24 +392,97 @@ test('in the tree view the card unfolds the folded ancestor project hiding the S
   expect(scrolled).toEqual(['run']);
 }, { arg: { sidebar: `(${SIDEBAR})`, ITEMS } }));
 
-test('the card keeps scrolling to the Session while the unfolding rows still push it down', () => inPage(async ({ sidebar, ITEMS }) => {
-  const { clicks, scrolled, session, project, frames } = eval(sidebar)();
+test('when the host pushes the shown Session row out of the list a moment later, the card brings it back', () => inPage(async ({ sidebar, ITEMS }) => {
+  const { clicks, project, frames } = eval(sidebar)();
   column();
+  const area = document.createElement('div');
+  area.setAttribute('data-sidebar-list-area', '');
+  let scrollTop = 0, offset = 100;
+  Object.defineProperty(area, 'scrollTop', { get: () => scrollTop, set: value => { scrollTop = value; } });
+  area.getBoundingClientRect = () => ({ top: 0, bottom: 200 });
+  document.body.append(area);
   project('own', false, () => {
-    session('run');
-    // The host animates unfolded rows in: the row moves on its next few reads, then stays.
-    let moves = 4;
-    document.querySelector('[data-row-key="session:run"]').getBoundingClientRect = () => ({ top: 100 + (moves > 0 ? moves-- : 0) * 10 });
+    const row = document.createElement('div');
+    row.dataset.rowKey = 'session:run';
+    row.scrollIntoView = () => {};
+    row.getBoundingClientRect = () => ({ top: offset - scrollTop, bottom: offset + 32 - scrollTop });
+    area.append(row);
   });
   render(list, {}, statuses, { ...workspaces, items: ITEMS });
   click(host()?.querySelector('[data-hp-agents-pick]'));
-  await frames(10);
+  await frames(4);
   expect(clicks).toEqual(['own']);
-  expect(scrolled.length).toBeGreaterThan(1);
-  const settledScrolls = scrolled.length;
-  await frames(5);
-  expect(scrolled.length).toBe(settledScrolls);
+  expect(scrollTop).toBe(0);
+  // The host re-renders the list after opening: rows above grow and the Session row drops below the list's edge.
+  offset = 300;
+  await frames(4);
+  expect(scrollTop).toBe(132);
 }, { arg: { sidebar: `(${SIDEBAR})`, ITEMS } }));
+
+test('when the browser scroll stops short, the card moves the Workspace list until the Session row is fully shown', () => inPage(async ({ sidebar, ITEMS }) => {
+  const { clicks, project, frames } = eval(sidebar)();
+  column();
+  // The host's list scroller (200px tall) holding the row 400px down; the browser's scroll (stubbed) leaves it there.
+  const area = document.createElement('div');
+  area.setAttribute('data-sidebar-list-area', '');
+  let scrollTop = 0;
+  Object.defineProperty(area, 'scrollTop', { get: () => scrollTop, set: value => { scrollTop = value; } });
+  area.getBoundingClientRect = () => ({ top: 0, bottom: 200 });
+  document.body.append(area);
+  project('own', false, () => {
+    const row = document.createElement('div');
+    row.dataset.rowKey = 'session:run';
+    row.scrollIntoView = () => {};
+    row.getBoundingClientRect = () => ({ top: 400 - scrollTop, bottom: 432 - scrollTop });
+    area.append(row);
+  });
+  render(list, {}, statuses, { ...workspaces, items: ITEMS });
+  click(host()?.querySelector('[data-hp-agents-pick]'));
+  await frames(8);
+  expect(clicks).toEqual(['own']);
+  expect(scrollTop).toBe(232);
+}, { arg: { sidebar: `(${SIDEBAR})`, ITEMS } }));
+
+test('a Worktree project dsh-git-sidebar tucks under its folded main checkout is shown by unfolding that checkout first', () => inPage(async ({ ITEMS }) => {
+  column();
+  const clicks = [], scrolled = [];
+  const tree = document.createElement('div');
+  tree.setAttribute('role', 'tree');
+  tree.style.display = 'flex';
+  tree.style.flexDirection = 'column';
+  document.body.append(tree);
+  const section = (id, order, unfold) => {
+    const box = document.createElement('div');
+    box.style.order = String(order);
+    const row = document.createElement('div');
+    row.setAttribute('role', 'treeitem');
+    row.dataset.rowKey = 'workspace:' + id;
+    row.textContent = id;
+    row.setAttribute('aria-expanded', 'false');
+    row.addEventListener('click', () => { clicks.push(id); row.setAttribute('aria-expanded', 'true'); unfold(); });
+    box.append(row);
+    tree.append(box);
+    return box;
+  };
+  // DOM order: the Worktree's section first, an unrelated project, then the main checkout; display order puts the
+  // Worktree right after its main checkout, hidden while that checkout is folded.
+  const worktree = section('own', 3, () => {
+    const row = document.createElement('div');
+    row.dataset.rowKey = 'session:run';
+    row.textContent = 'run';
+    row.scrollIntoView = () => { scrolled.push('run'); };
+    worktree.append(row);
+  });
+  worktree.hidden = true;
+  section('other', 0, () => {});
+  section('main', 2, () => { worktree.hidden = false; });
+  const frames = n => new Promise(done => { const next = k => k === 0 ? done() : requestAnimationFrame(() => { next(k - 1); }); next(n); });
+  render(list, {}, statuses, { ...workspaces, items: ITEMS });
+  click(host()?.querySelector('[data-hp-agents-pick]'));
+  await frames(6);
+  expect(clicks).toEqual(['main', 'own']);
+  expect(scrolled).toEqual(['run']);
+}, { arg: { ITEMS } }));
 
 test('a Session another plugin opens (dsh-superagent\'s panel) unfolds its project too, but the one open at start does not', () => inPage(async ({ sidebar, ITEMS }) => {
   const { clicks, scrolled, session, project, frames } = eval(sidebar)();
