@@ -70,7 +70,7 @@ type Api = {
   startDiscussionFromUser(request: {sessionId: string; requestId: string; harnesses: State['harness'][]; prompt: string; attachments: readonly SubmitAttachment[]}): Promise<RemoteResult<{accepted: true}>>;
 };
 const zh = {
-  workingDirectory: '工作目录', noWorkingDirectory: '未连接工作目录',
+  workingDirectory: '工作目录', noWorkingDirectory: '未连接工作目录', collapseAllProjects: '折叠所有项目',
   harness: '选择 Harness', model: '选择 Harness 模型', native: 'DSH 原生', defaultModel: '默认模型',
   retry: '重试', locked: '开始对话后 Harness 固定；可新建会话，或从消息新建分支后在发送前切换',
   recovery: '上次请求结果未确认，已暂停发送以避免重复执行。', loading: '加载中',
@@ -138,7 +138,7 @@ const zh = {
   ...agentsZh,
 };
 const en: Record<keyof typeof zh,string> = {
-  workingDirectory: 'Working directory', noWorkingDirectory: 'No working directory connected',
+  workingDirectory: 'Working directory', noWorkingDirectory: 'No working directory connected', collapseAllProjects: 'Collapse all projects',
   harness:'Select Harness', model:'Select Harness model', native:'Native DSH', defaultModel:'Default model',
   retry:'Retry', locked:'Harness is fixed after the first prompt. Start a new session, or branch from a message and switch before sending.',
   recovery:'The previous request was not confirmed. Sending is paused to avoid duplicate execution.', loading:'Loading',
@@ -1943,16 +1943,54 @@ const emptyStatusCell = '>span:first-child:is(:empty,:has(> [data-slot="sidebar.
 const markStyles = Object.entries(logos).map(([harness, { mask, color }]) =>
   `[data-hp-harness="${harness}"]${emptyStatusCell}::before,[data-hp-harness="${harness}"]:not([data-hp-closed])>span:first-child::before{content:"";width:14px;height:14px;background:${color};-webkit-mask:${mask} center/contain no-repeat;mask:${mask} center/contain no-repeat}`
   // The host paints the selected row with its hover gray; tint it with the session's Harness color instead.
-  + `\n[role="treeitem"][aria-selected="true"][data-hp-harness="${harness}"]{background:${color}3D}`).join('\n')
+  + `\n[role="treeitem"][aria-selected="true"][data-hp-harness="${harness}"]{--hp-tint:${color};background:${color}3D}`).join('\n')
+  // The selected tint breathes around its static level.
+  + `\n[role="treeitem"][aria-selected="true"][data-hp-harness]{animation:hp-row-breathe 2.4s ease-in-out infinite}`
+  + `\n@keyframes hp-row-breathe{0%,100%{background:color-mix(in srgb,var(--hp-tint) 14%,transparent)}50%{background:color-mix(in srgb,var(--hp-tint) 36%,transparent)}}`
+  // A running row already breathes through its logo, so the selected row drops its background.
+  + `\n[role="treeitem"][aria-selected="true"][data-hp-harness][data-hp-running]{background:transparent;animation:none}`
   // A running turn replaces the host's status dots with its breathing brand mark; an idle live Harness stays static.
   + `\n[data-hp-running]>span:first-child>*{display:none}`
   + `\n[data-hp-running]>span:first-child::before{animation:hp-logo-breathe 1.4s ease-in-out infinite}`
   + `\n@keyframes hp-logo-breathe{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.06)}}`
-  + `\n@media (prefers-reduced-motion:reduce){[data-hp-running]>span:first-child::before{animation:none}}`
+  + `\n@media (prefers-reduced-motion:reduce){[data-hp-running]>span:first-child::before,[role="treeitem"][aria-selected="true"][data-hp-harness]{animation:none}}`
+  // Collapse-all button in the Workspace header: the host's action cluster fits two buttons, so it widens while it holds
+  // ours (not while search hides it); the rail has no project rows.
+  + `\n[class*="_headerActions"]:has(>[data-hp-collapse-all]):not([class*="_headerActionsHidden"]){max-width:100px}`
+  + `\n[class*="_rail"] [data-hp-collapse-all]{display:none}[data-hp-collapse-all]:disabled{opacity:.4;cursor:default}`
   // Delegated sessions: a solid badge with a cut-out arrow on the logo's bottom-right corner, in the logo's state color.
   + `\n[data-hp-delegated]${emptyStatusCell}{position:relative}[data-hp-delegated]${emptyStatusCell}::after{content:"";position:absolute;right:-2px;bottom:0;width:9px;height:9px;background:#4D6BFE;-webkit-mask:${delegatedMask} center/contain no-repeat;mask:${delegatedMask} center/contain no-repeat}`
   // Closed sessions (no live Harness process, or an unloaded DSH agent) show the logo and badge in gray.
   + `\n[data-hp-closed]${emptyStatusCell}::before,[data-hp-closed]${emptyStatusCell}::after{background:var(--dsw-alias-label-tertiary)}`;
+/**
+ * Put a "collapse all projects" button first in the Workspace header's action cluster, and keep it disabled while no
+ * project is expanded. Idempotent: every sidebar paint calls it. Self-contained so tests can run it in a page.
+ */
+// ponytail: the host exposes no header-action slot or expansion API, so this finds the cluster by its CSS-module local
+// name and clicks expanded project headers (each click only toggles); use a host slot/API if DSH adds one.
+function mountCollapseAll(label: string): void {
+  const expanded = '[role="treeitem"][data-row-key^="workspace:"][aria-expanded="true"]';
+  const cluster = [...document.querySelectorAll<HTMLElement>('[class*="_headerActions"]')]
+    .find(element => [...element.classList].some(name => name.endsWith('_headerActions')));
+  if (!cluster) return;
+  let button = cluster.querySelector<HTMLButtonElement>(':scope > [data-hp-collapse-all]');
+  if (!button) {
+    const template = cluster.querySelector('button');
+    if (!template) return;
+    button = document.createElement('button');
+    button.type = 'button';
+    button.className = template.className;
+    button.dataset.hpCollapseAll = '';
+    button.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 20 5-5 5 5"/><path d="m7 4 5 5 5-5"/></svg>';
+    // Collected first: hidden projects (nested, or tucked by dsh-git-sidebar) keep their own expansion and fold too.
+    button.addEventListener('click', () => { for (const header of [...document.querySelectorAll<HTMLElement>(expanded)].reverse()) header.click(); });
+    cluster.prepend(button);
+  }
+  if (button.getAttribute('aria-label') !== label) { button.setAttribute('aria-label', label); button.title = label; }
+  const disabled = !document.querySelector(expanded);
+  if (button.disabled !== disabled) button.disabled = disabled;
+}
+
 /** Session id from the row's React props (the host's SessionNodeItem receives `node`); undefined for non-session rows. */
 // ponytail: reads React internals to mark rows even when status dots replace the leading slot; use row metadata if DSH exposes it.
 function rowSessionId(row: Element): string | undefined {
@@ -2036,8 +2074,10 @@ export async function apply(ctx: Context): Promise<void> {
     // Harness, delegation and running state per session id for sidebar marks; visible rows are re-read on an interval and when the session list changes.
     const fetched = new Set<string>(), delegated = new Set<string>(), running = new Set<string>();
     let frame = 0, loading = false;
+    const ht = ctx.locale.bind('harness');
     function paint() {
       frame = 0;
+      mountCollapseAll(ht('collapseAllProjects'));
       const {byId}=scope.sessions.list.getSnapshot();
       const missing: string[] = [];
       for (const row of document.querySelectorAll<HTMLElement>('[role="treeitem"]')) {
@@ -2172,7 +2212,7 @@ export async function apply(ctx: Context): Promise<void> {
       // Processes start with a turn and are reclaimed when idle, so every visible row is re-read periodically.
       // ponytail: polls all visible rows every 5s; push process start/exit events if the sidebar grows large.
       const refresh=setInterval(()=>{fetched.clear();schedule();},5_000);
-      return ()=>{observer.disconnect();clearInterval(refresh);cancelAnimationFrame(frame);frame=0;for (const row of document.querySelectorAll<HTMLElement>('[data-hp-harness],[data-hp-delegated],[data-hp-running],[data-hp-closed]')) { delete row.dataset.hpHarness; delete row.dataset.hpDelegated; delete row.dataset.hpRunning; delete row.dataset.hpClosed; }};
+      return ()=>{observer.disconnect();clearInterval(refresh);cancelAnimationFrame(frame);frame=0;for (const button of document.querySelectorAll('[data-hp-collapse-all]')) button.remove();for (const row of document.querySelectorAll<HTMLElement>('[data-hp-harness],[data-hp-delegated],[data-hp-running],[data-hp-closed]')) { delete row.dataset.hpHarness; delete row.dataset.hpDelegated; delete row.dataset.hpRunning; delete row.dataset.hpClosed; }};
     },'harness: sidebar marks');
     scope.slots.inject('conversation.input.left',()=>scope.slots.register({
       name:'conversation.input.left',id:'harness-selector',order:-100,locale:'harness',inject:()=>api,

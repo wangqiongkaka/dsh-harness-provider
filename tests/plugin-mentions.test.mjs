@@ -268,7 +268,7 @@ test('sidebar marks active turns as breathing, completed sessions as static, and
  const module={exports:{}},row={dataset:{},'__reactFiber$x':{memoizedProps:{node:{id:'s'}}}},styles=[];
  let refresh,processRunning=true;
  runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,
-  document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(style){styles.push(style.textContent);}},body:{},querySelectorAll:()=>[row]},
+  document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(style){styles.push(style.textContent);}},body:{},querySelectorAll:selector=>selector.includes('treeitem')?[row]:[]},
   MutationObserver:class{observe(){}disconnect(){}},requestAnimationFrame:fn=>{queueMicrotask(fn);return 1;},cancelAnimationFrame(){},
   setInterval:fn=>{refresh=fn;return 1;},clearInterval(){}});
  const summary={id:'s',retainedBy:{},running:false};
@@ -292,9 +292,13 @@ test('sidebar marks active turns as breathing, completed sessions as static, and
   }));
   assert.deepEqual(marks,[['""','rgb(128, 128, 128)','none'],['none','rgba(0, 0, 0, 0)','none'],['""','rgb(128, 128, 128)','""']], 'empty host slots show gray logos and delegation badges without covering schedule marks');
   // The host paints a selected row with its hover gray; the plugin's sheet loads after it and tints the row with its Harness color.
-  await page.setContent(`<style>.sessionRow.selected{background:rgb(60, 60, 60)}${css}</style><div role="treeitem" class="sessionRow selected" aria-selected="true" data-hp-harness="antigravity" data-hp-closed=""></div><div role="treeitem" class="sessionRow selected" aria-selected="true" data-hp-harness="claude-code"></div><div role="treeitem" class="sessionRow" aria-selected="false" data-hp-harness="antigravity"></div><div role="treeitem" class="sessionRow selected" aria-selected="true"></div>`);
-  const selected=await page.locator('[role="treeitem"]').evaluateAll(rows=>rows.map(row=>getComputedStyle(row).backgroundColor));
-  assert.deepEqual(selected,['rgba(66, 133, 244, 0.24)','rgba(217, 119, 87, 0.24)','rgba(0, 0, 0, 0)','rgb(60, 60, 60)'],'selected rows take their Harness color; unselected and unmarked rows keep the host style');
+  await page.setContent(`<style>.sessionRow.selected{background:rgb(60, 60, 60)}${css}</style><div role="treeitem" class="sessionRow selected" aria-selected="true" data-hp-harness="antigravity" data-hp-closed=""></div><div role="treeitem" class="sessionRow selected" aria-selected="true" data-hp-harness="claude-code"></div><div role="treeitem" class="sessionRow" aria-selected="false" data-hp-harness="antigravity"></div><div role="treeitem" class="sessionRow selected" aria-selected="true"></div><div role="treeitem" class="sessionRow selected" aria-selected="true" data-hp-harness="codex" data-hp-running=""></div>`);
+  const tint=()=>page.locator('[role="treeitem"]').evaluateAll(rows=>rows.map(row=>[getComputedStyle(row).backgroundColor,getComputedStyle(row).animationName]));
+  const breathing=await tint();
+  assert.deepEqual(breathing.map(([,animation])=>animation),['hp-row-breathe','hp-row-breathe','none','none','none'],'the selected Harness tint breathes; unselected, unmarked and running rows stay still');
+  assert.equal(breathing[4][0],'rgba(0, 0, 0, 0)','a running selected row drops its background: the breathing logo already shows activity');
+  await page.emulateMedia({reducedMotion:'reduce'});
+  assert.deepEqual(await tint(),[['rgba(66, 133, 244, 0.24)','none'],['rgba(217, 119, 87, 0.24)','none'],['rgba(0, 0, 0, 0)','none'],['rgb(60, 60, 60)','none'],['rgba(0, 0, 0, 0)','none']],'reduced motion keeps a static Harness tint; unselected and unmarked rows keep the host style');
  } finally { await browser.close(); }
  assert.match(css,/\[data-hp-running\]>span:first-child>\*\{display:none\}/,'the breathing Harness logo replaces native running dots');
  assert.match(css,/\[data-hp-running\]>span:first-child::before\{animation:hp-logo-breathe 1\.4s ease-in-out infinite\}/);
@@ -307,6 +311,41 @@ test('sidebar marks active turns as breathing, completed sessions as static, and
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:'',hpClosed:''});
  processRunning=true;refresh();await settle();
  assert.deepEqual({...row.dataset},{hpHarness:'codex',hpDelegated:''});
+});
+
+test('workspace header gains a collapse-all button that folds every expanded project', async () => {
+ const require=createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+ const bundle=await build({stdin:{contents:await readFile('src/client.tsx','utf8')+'\nexport {mountCollapseAll,markStyles};',resolveDir:resolve('src'),loader:'tsx'},bundle:true,write:false,platform:'node',format:'cjs',jsx:'automatic',external:['react','react/jsx-runtime','react-dom','@deepseek-ai/dsh-client-ui-primitives']});
+ const module={exports:{}};
+ runInNewContext(bundle.outputFiles[0].text,{module,exports:module.exports,require,document:{createElement:()=>({setAttribute(){},remove(){}}),head:{append(){}}}});
+ const {mountCollapseAll,markStyles}=module.exports;
+ // Host markup with hashed CSS-module names: the action cluster fits exactly two 28px buttons and clips the rest.
+ const project=(key,expanded,hidden='')=>`<section ${hidden}><div role="treeitem" data-row-key="workspace:${key}" aria-expanded="${expanded}" onclick="this.setAttribute('aria-expanded',String(this.getAttribute('aria-expanded')!=='true'));window.toggled.push('${key}')"></div></section>`;
+ const host=rail=>`<style>.h_headerActions{display:flex;gap:4px;max-width:60px;overflow:hidden}.h_headerActionsHidden{max-width:0}.h_iconButton{flex:none;width:28px;height:28px;padding:0}${markStyles}</style>
+  <div class="h_root${rail?' h_rail':''}"><div class="h_sectionHeader"><div class="h_headerActions"><button class="h_iconButton h_wide">s</button><button class="h_iconButton">+</button></div></div>
+  ${project('a',true)}${project('b',false)}${project('c',true,'hidden')}</div><script>window.toggled=[]</script>`;
+ const browser=await chromium.launch({headless:true});
+ try {
+  const page=await browser.newPage();
+  await page.setContent(host(false));
+  const mount=()=>page.evaluate(`(${mountCollapseAll})('Collapse all projects')`);
+  await mount();await mount();
+  const button=page.locator('[data-hp-collapse-all]');
+  assert.equal(await button.count(),1,'repeated passes keep one button');
+  assert.equal(await button.getAttribute('aria-label'),'Collapse all projects');
+  assert.equal(await button.getAttribute('class'),'h_iconButton h_wide','the button borrows the host icon button look');
+  const box=await page.evaluate(()=>{const b=document.querySelector('[data-hp-collapse-all]').getBoundingClientRect(),c=document.querySelector('.h_headerActions').getBoundingClientRect(),last=document.querySelector('.h_headerActions>button:last-child').getBoundingClientRect();return {inside:b.left>=c.left&&b.right<=c.right,lastInside:last.right<=c.right};});
+  assert.deepEqual(box,{inside:true,lastInside:true},'the cluster widens so no host button is clipped');
+  assert.equal(await button.isDisabled(),false);
+  await button.click();
+  assert.deepEqual((await page.evaluate('window.toggled')).sort(),['a','c'],'only expanded projects are clicked, including hidden tucked ones');
+  await mount();
+  assert.equal(await button.isDisabled(),true,'nothing left to fold disables the button');
+  await page.evaluate(()=>document.querySelector('.h_headerActions').classList.add('h_headerActionsHidden'));
+  assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('.h_headerActions')).maxWidth),'0px','the search-expanded state still hides the cluster');
+  await page.setContent(host(true));await mount();
+  assert.equal(await page.locator('[data-hp-collapse-all]').isVisible(),false,'the rail has no project rows, so the button hides');
+ } finally { await browser.close(); }
 });
 
 test('子代理开始页入口沿用原生卡片，不注册自绘渲染器', async () => {
