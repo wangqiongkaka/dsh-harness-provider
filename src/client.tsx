@@ -9,6 +9,9 @@ import type {} from '@deepseek-ai/dsh-client-locale/client';
 import type { ConfigForm, ConfigFormSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client';
 import type {} from '@deepseek-ai/dsh-settings/types';
 import type { DraftAttachmentId, SubmitOutcome } from '@deepseek-ai/dsh-client-ui-conversation/client';
+import type {} from '@deepseek-ai/dsh-api-workspace-controller/client';
+import type { SessionReference } from '@deepseek-ai/dsh-api-session-controller/client';
+import type { SessionId } from '@deepseek-ai/dsh-session';
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client';
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client';
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client';
@@ -209,6 +212,14 @@ interface RenamingSessions {
     operation: (reference: { binding: { session: { rename(title: string): Promise<RenameResult> } } }) => Promise<RenameResult>): Promise<RenameResult>;
 }
 type RenameResult = { ok: true } | { ok: false; error: { message: string } };
+// The host releases a session's unsent composer images the moment its last reference goes (a sidebar switch to
+// another session). This label marks the reference the plugin holds while a draft still has attachments.
+declare module '@deepseek-ai/dsh-api-session-controller/client' {
+  interface SessionReferenceSourceMap { harnessDraftAttachments: unknown }
+}
+/** The one thing this plugin needs from the workspace service: which sessions are archived. */
+type WorkspaceArchiveList = { list: { getSnapshot(): { archivedSessionIds: readonly SessionId[] }; subscribe(listener: () => void): () => void } };
+
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap { harness: Key }
 }
@@ -2385,5 +2396,45 @@ export async function apply(ctx: Context): Promise<void> {
     // The chip carries the same list, so "is one still running?" answers without opening the panel.
     scope.effect(() => scope.slots.inject('sidebar.right.pane.tab.title', () => scope.slots.register({ name: 'sidebar.right.pane.tab.title', key: id, locale: 'harness',
       inject: face }, SubagentsTitle)), 'harness: subagents chip');
+  });
+  // Unsent composer images are not persisted: the host keeps them only while the session scope lives. Hold the
+  // sessions whose draft still has attachments so switching to another session does not discard them. Purely
+  // state-driven (never "which session is current"): attachments appear and leave without a list notification,
+  // so a low-frequency read backs the subscriptions. An archived session is never held; its draft ends with it,
+  // and without the workspace service the plugin cannot tell, so it keeps the host's behaviour instead.
+  const archiveList = () => typeof ctx.get === 'function' ? ctx.get('workspaces') as WorkspaceArchiveList | undefined : undefined;
+  ctx.inject(['sessions', 'conversation'], scope => {
+    // Test doubles hand in partial scopes; a scope without these three faces keeps the host's behaviour.
+    if (typeof scope.sessions?.retain !== 'function' || typeof scope.sessions?.binding !== 'function'
+      || typeof scope.conversation?.input?.for !== 'function') return;
+    const held = new Map<SessionId, SessionReference>();
+    const archivedSessions = (): ReadonlySet<SessionId> => new Set<SessionId>(archiveList()?.list.getSnapshot().archivedSessionIds ?? []);
+    let disposed = false, syncing = false;
+    const sync = () => {
+      // Retaining and releasing both republish the session list, which re-enters here: one pass at a time.
+      if (disposed || syncing) return;
+      syncing = true;
+      try {
+        const archived = archivedSessions();
+        for (const { id } of Object.values(scope.sessions.list.getSnapshot().byId)) {
+          const binding = scope.sessions.binding(id);
+          const attachments = binding === undefined ? [] : scope.conversation.input.for(binding.ctx).state.getSnapshot().attachmentIds;
+          const reference = held.get(id);
+          if (attachments.length === 0 || archived.has(id)) {
+            if (reference) { held.delete(id); reference.release(); }
+          } else if (reference === undefined) {
+            const acquired = scope.sessions.retain(id, { source: 'harnessDraftAttachments' });
+            if (disposed) acquired.release(); else held.set(id, acquired);
+          }
+        }
+      } finally { syncing = false; }
+    };
+    scope.effect(() => scope.sessions.list.subscribe(sync), 'harness: draft attachment sessions (list)');
+    const archiveSource = archiveList()?.list;
+    // Without the workspace service there is no archive notification; the read below then answers "none archived".
+    if (archiveSource !== undefined) scope.effect(() => archiveSource.subscribe(sync), 'harness: draft attachment sessions (archive)');
+    scope.effect(() => { const timer = setInterval(sync, 1000); return () => clearInterval(timer); }, 'harness: draft attachment sessions (poll)');
+    scope.effect(() => () => { disposed = true; for (const reference of held.values()) reference.release(); held.clear(); }, 'harness: draft attachment references');
+    sync();
   });
 }
