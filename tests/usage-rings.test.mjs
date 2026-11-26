@@ -94,7 +94,7 @@ test('设置页下拉框和数字框收窄居中，标题与恢复默认不换�
  const browser=await chromium.launch({headless:true});
  try {
   const page=await browser.newPage();
-  const copy=(title)=>`<div class="hp-set-copy"><div class="hp-set-title">${title}<button class="hp-set-reset">恢复默认</button></div><div class="hp-set-hint">进入讨论模式时预选的 Harness。</div></div>`;
+  const copy=(title)=>`<div class="hp-set-copy"><div class="hp-set-title">${title}<span class="hp-anchor"><button class="hp-set-help">?</button></span><button class="hp-set-help hp-set-reset" aria-label="恢复默认"></button></div></div>`;
   await page.setContent(`<style>body{font-size:16px}${module.exports.styles}</style><div class="hp-set" style="width:560px">
    <div class="hp-set-row">${copy('新会话默认 Harness')}<div class="hp-set-control"><button class="hp-set-select"><span>沿用上次选择</span></button></div></div>
    <div class="hp-set-row">${copy('空闲回收（秒）')}<div class="hp-set-control"><input class="hp-set-number" value="60"></div></div>

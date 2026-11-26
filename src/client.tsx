@@ -106,7 +106,7 @@ const zh = {
   worktree: '独立 worktree', worktreeHint: '在当前改动的快照上隔离开发，每轮结束后询问是否合并', worktreeNative: '独立 worktree 仅支持 Codex / Claude Code / Antigravity',
   pickModel: '{harness} 的模型与推理强度', pickDefault: '默认',
   settingsNav: 'Harness', settingsIntro: '接入 Codex / Claude Code / Antigravity 的默认行为。修改立即保存到当前 Profile 的配置文件；进展反馈说明、讨论等待上限和调试输出在原生进程下次启动时生效。',
-  settingsReadOnly: '当前连接不能修改配置，以下内容只读。', settingsUnavailable: '当前 Profile 没有提供本插件的配置。', settingsReset: '恢复默认',
+  settingsReadOnly: '当前连接不能修改配置，以下内容只读。', settingsUnavailable: '当前 Profile 没有提供本插件的配置。', settingsReset: '恢复默认', settingsHelp: '{name} 说明',
   settingsRejected: '未保存：取值无效或超出范围。',
   'settingsGroup.sessions': '会话', 'settingsGroup.delegation': '委派与讨论', 'settingsGroup.feedback': '进展反馈', 'settingsGroup.advanced': '高级',
   lastHarness: '沿用上次选择',
@@ -174,7 +174,7 @@ const en: Record<keyof typeof zh,string> = {
   worktree:'Isolated worktree', worktreeHint:'Work on a snapshot of the current changes; asks to merge after each turn', worktreeNative:'Isolated worktrees are available for Codex, Claude Code, and Antigravity only',
   pickModel:'{harness} model and effort', pickDefault:'Default',
   settingsNav:'Harness', settingsIntro:'Defaults for Codex, Claude Code, and Antigravity. Changes save to this profile\'s configuration at once; the progress feedback contract, the discussion wait and debug output apply when a native process next starts.',
-  settingsReadOnly:'This connection cannot change configuration; the values below are read-only.', settingsUnavailable:'This profile does not serve the plugin\'s configuration.', settingsReset:'Reset',
+  settingsReadOnly:'This connection cannot change configuration; the values below are read-only.', settingsUnavailable:'This profile does not serve the plugin\'s configuration.', settingsReset:'Reset', settingsHelp:'About {name}',
   settingsRejected:'Not saved: the value is invalid or out of range.',
   'settingsGroup.sessions':'Sessions', 'settingsGroup.delegation':'Delegation and discussion', 'settingsGroup.feedback':'Progress feedback', 'settingsGroup.advanced':'Advanced',
   lastHarness: 'Use last selection',
@@ -270,6 +270,7 @@ const PluginIcon = ({ size = 16 }: { size?: number }) => <svg width={size} heigh
 const LinkIcon = ({ size = 16 }: { size?: number }) => <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden><path d="M6.8 9.2a2.6 2.6 0 003.7 0l2-2a2.6 2.6 0 00-3.7-3.7l-.7.7M9.2 6.8a2.6 2.6 0 00-3.7 0l-2 2a2.6 2.6 0 003.7 3.7l.7-.7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const FolderIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M2 4.6c0-.7.5-1.2 1.2-1.2h2.9l1.4 1.5h5.3c.7 0 1.2.5 1.2 1.2v5.3c0 .7-.5 1.2-1.2 1.2H3.2c-.7 0-1.2-.5-1.2-1.2V4.6z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/></svg>;
 const ClearIcon = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M3.2 8.8 8.4 3.6a1.4 1.4 0 012 0L12.4 5.6a1.4 1.4 0 010 2L8 12H5.2a1.4 1.4 0 01-1-.4l-1-1a1.4 1.4 0 010-2zM6.1 6l3.9 3.9M8 12h5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/></svg>;
+const Reset = () => <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden><path d="M2.5 6a3.5 3.5 0 1 0 1.03-2.47M2.5 1.75v2.25h2.25" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const Check = () => <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden><path d="M3.5 8.5l3 3 6-7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const icons: Record<string, ReactNode> = {
   clock: <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden><circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.4"/><path d="M8 4.5V8l2.5 1.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg>,
@@ -1361,6 +1362,18 @@ type SettingField = keyof Settings;
 
 /** Text kept locally while typing and committed on blur or Enter, so every keystroke is not a profile write. */
 /** The settings dropdown: the composer's own menu, opening downward, instead of the OS popup a native select draws. */
+/** A "?" after a setting's title; hover, focus or a tap shows its explanation. */
+function SettingHelp({ text, label }: { text: string; label: string }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLSpanElement>(null);
+  const id = useId();
+  const close = useCallback(() => setOpen(false), []);
+  useDismiss(open, close, root);
+  return <span ref={root} className="hp-anchor" onMouseEnter={() => setOpen(true)} onMouseLeave={close}>
+    <button type="button" className="hp-set-help" aria-label={label} aria-describedby={open ? id : undefined} onClick={() => setOpen(true)} onFocus={() => setOpen(true)} onBlur={close}>?</button>
+    {open && <span id={id} role="tooltip" className="hp-set-tip">{text}</span>}
+  </span>;
+}
 function SettingSelect({ value, options, label, disabled, onChange }: { value: string; options: { value: string; label: string }[]; label: string; disabled: boolean; onChange: (value: string) => void }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -1413,9 +1426,9 @@ export function HarnessSettingsSection({ useHarnessSettings, form, loadAvailable
   const row = (field: SettingField, control: ReactNode, wide = false) => <div key={field} className={`hp-set-row${wide ? ' hp-set-wide' : ''}`}>
     <div className="hp-set-copy">
       <div className="hp-set-title">{label(field)}
-        {field in user && <button type="button" className="hp-set-reset" disabled={disabled} onClick={() => settle(field, form.unset(field))}>{t('settingsReset')}</button>}
+        <SettingHelp text={t(`setting.${field}.hint` as Key)} label={t('settingsHelp', { name: label(field) })} />
+        {field in user && <button type="button" className="hp-set-help hp-set-reset" aria-label={t('settingsReset')} title={t('settingsReset')} disabled={disabled} onClick={() => settle(field, form.unset(field))}><Reset /></button>}
       </div>
-      <div className="hp-set-hint">{t(`setting.${field}.hint` as Key)}</div>
       {failed === field && <div role="alert" className="hp-set-error">{t('settingsRejected')}</div>}
     </div>
     <div className="hp-set-control">{control}</div>
@@ -1764,10 +1777,11 @@ ${nativeContextColors}
 .hp-set-wide{flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:10px}.hp-set-wide .hp-set-control{margin-left:0;justify-content:flex-start}
 .hp-set-copy{display:grid;flex:1 1 0;gap:4px}
 .hp-set-title{display:flex;align-items:center;gap:8px;font-size:14px;line-height:20px;white-space:nowrap}
-.hp-set-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.hp-set-help{display:inline-grid;place-items:center;width:16px;height:16px;margin-left:-2px;padding:0;border:1px solid var(--dsw-alias-border-l4);border-radius:50%;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:11px;line-height:1;font-weight:600;cursor:help}
+.hp-set-help:hover,.hp-set-help:focus-visible{outline:none;border-color:var(--dsw-alias-label-tertiary);color:var(--dsw-alias-label-primary)}
+.hp-set-tip{position:absolute;top:calc(100% + 6px);left:-8px;z-index:100;width:max-content;max-width:min(320px,calc(100vw - 32px));padding:8px 10px;border-radius:10px;background:var(--dsw-specific-menu);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;font-weight:400;white-space:normal}
 .hp-set-error{font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary)}
-.hp-set-reset{padding:0;border:none;background:none;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
-.hp-set-reset:hover:not(:disabled){color:var(--dsw-alias-label-primary)}
+.hp-set-reset{margin-left:-4px;cursor:pointer}.hp-set-reset:disabled{opacity:.5;cursor:not-allowed}
 .hp-set-control{display:flex;justify-content:flex-end;flex:0 0 auto;min-width:0;margin-left:auto}
 .hp-set-control .hp-delegate-harness{gap:2px;font-size:14px;line-height:20px}
 .hp-set-control input,.hp-set-control textarea,.hp-set-select{box-sizing:border-box;padding:6px 12px;border:.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px}

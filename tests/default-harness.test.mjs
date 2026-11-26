@@ -82,7 +82,7 @@ function App() {
   window.readonly = () => setSnapshot(current => ({...current, writable: false}));
   const form = {set: async (field, value) => { window.writes.push([field, value]); setSnapshot(current => ({...current, value: {...current.value, [field]: value}, user: {...current.user, [field]: value}})); return true; },
     unset: async field => { setSnapshot(current => ({...current, value: {...current.value, [field]: initial[field]}, user: {}})); return true; }};
-  return <HarnessSettingsSection useHarnessSettings={pick => pick(snapshot)} form={form} t={key => zh[key] ?? key} />;
+  return <HarnessSettingsSection useHarnessSettings={pick => pick(snapshot)} form={form} t={(key, params = {}) => (zh[key] ?? key).replace(/\\{(\\w+)\\}/g, (_, name) => params[name])} />;
 }
 createRoot(document.querySelector('#root')).render(<App />);
 `, resolveDir: resolve('src'), loader: 'tsx'}, bundle: true, write: false, platform: 'browser', format: 'iife', jsx: 'automatic',
@@ -93,7 +93,7 @@ createRoot(document.querySelector('#root')).render(<App />);
     const page = await browser.newPage();
     await page.setContent('<style>:root{--dsw-alias-label-primary:#eee;--dsw-alias-label-secondary:#bbb;--dsw-alias-label-tertiary:#999;--dsw-alias-border-l2:#333;--dsw-alias-border-l4:#555;--dsw-alias-bg-layer-3:#29292c}body{margin:24px;background:#1b1b1b;color:#eee;font:14px sans-serif}</style><div id="root"></div>');
     await page.addScriptTag({content: bundle.outputFiles[0].text});
-    const select = page.getByRole('button', {name: '新会话默认 Harness'});
+    const select = page.getByRole('button', {name: '新会话默认 Harness', exact: true});
     const menu = page.getByRole('menu', {name: '新会话默认 Harness'});
     const choose = async label => { await select.click(); await menu.getByRole('menuitemradio', {name: label}).click(); await expect(menu).toHaveCount(0); };
     await expect(select).toHaveText('沿用上次选择');
@@ -106,9 +106,20 @@ createRoot(document.querySelector('#root')).render(<App />);
     await expect(menu).toHaveCount(0);
     for (const title of ['委派默认目标', '讨论默认参与者']) {
       const row = page.locator('.hp-set-row').filter({hasText: title});
-      const [box, hint, group] = await Promise.all([row, row.locator('.hp-set-hint'), row.getByRole('group')].map(item => item.boundingBox()));
-      assert.ok(group.y >= hint.y + hint.height && Math.abs(group.x - box.x) < 1, title + ' 的多选控件应在说明下方左对齐');
+      const [box, hint, group] = await Promise.all([row, row.locator('.hp-set-title'), row.getByRole('group')].map(item => item.boundingBox()));
+      assert.ok(group.y >= hint.y + hint.height && Math.abs(group.x - box.x) < 1, title + ' 的多选控件应在标题下方左对齐');
     }
+    const help = page.getByRole('button', {name: '空闲回收（秒） 说明'});
+    const tip = page.getByRole('tooltip');
+    await expect(page.getByText('会话不在屏幕上且空闲超过该时长')).toHaveCount(0);
+    await help.hover();
+    await expect(tip).toContainText('会话不在屏幕上且空闲超过该时长');
+    await page.mouse.move(0, 0);
+    await expect(tip).toHaveCount(0);
+    await help.click();
+    await expect(tip).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(tip).toHaveCount(0);
     for (const width of [390, 1280]) {
       await page.setViewportSize({width, height: 850});
       await choose('Antigravity');
@@ -118,7 +129,10 @@ createRoot(document.querySelector('#root')).render(<App />);
       await mkdir('.cache', {recursive: true});
       await page.screenshot({path: resolve('.cache/default-harness-' + (width === 390 ? 'mobile' : 'desktop') + '.png')});
       await page.keyboard.press('Escape');
-      await page.locator('.hp-set-row').filter({has: select}).getByRole('button', {name: '恢复默认'}).click();
+      const reset = page.locator('.hp-set-row').filter({has: select}).getByRole('button', {name: '恢复默认'});
+      await expect(reset).toHaveText('');
+      assert.ok((await reset.boundingBox()).width <= 20, '恢复默认应为图标按钮');
+      await reset.click();
       await expect(select).toHaveText('沿用上次选择');
     }
     await choose('Claude Code');

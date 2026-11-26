@@ -205,7 +205,7 @@ createRoot(document.querySelector('#root')).render(<App />);`,
     await expect(page.locator('#dock-discuss [role="checkbox"]', { hasText: 'Claude Code' })).toHaveAttribute('aria-checked', 'true');
 
     // 4. 设置页只展示已安装的选项，但保留已保存的未安装 defaultHarness
-    const select = page.locator('#settings-host').getByRole('button', { name: '新会话默认 Harness' });
+    const select = page.locator('#settings-host').getByRole('button', { name: '新会话默认 Harness', exact: true });
     await expect(select).toHaveText('Codex');
     await select.click();
     assert.deepEqual(await page.locator('#settings-host').getByRole('menuitemradio').allTextContents(), ['沿用上次选择', 'DSH 原生', 'Claude Code', 'Codex']);

@@ -352,7 +352,7 @@ test('the Harness settings page follows Agent presets in Settings, renders the l
  // The executables stay configurable in the profile patch but are not shown on the page.
  assert.doesNotMatch(html,/settingsGroup\.programs|codexCommand|claudeCommand|\/opt\/codex/);
  assert.match(html,/<textarea[^>]*disabled=""[^>]*>\[CUSTOM FEEDBACK\]<\/textarea>/,'the text is kept but not editable while the contract is off');
- assert.equal((html.match(/settingsReset/g)??[]).length,1,'only the overridden field offers a reset');
+ assert.equal((html.match(/aria-label="settingsReset"/g)??[]).length,1,'only the overridden field offers a reset');
  assert.match(html,/role="switch" aria-checked="true" aria-label="setting.delegateReportBack"/);
  assert.equal((html.match(/role="switch"/g)??[]).length,4);
  // Unwritable: every control is disabled and the page says why.
