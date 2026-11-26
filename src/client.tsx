@@ -2265,15 +2265,14 @@ export async function apply(ctx: Context): Promise<void> {
       };
     }, 'harness: task submission');
   });
+  const availableHarnessesOf = (harness?: Api) => async () => typeof harness?.availableHarnesses === 'function'
+    ? value(harness.availableHarnesses({})) : [...ALL_HARNESSES];
   // The Settings nav row, after Agent presets; present only while the Host serves this plugin's configuration.
-  ctx.inject(['slots', 'configForms'], scope => {
+  ctx.inject(['slots', 'configForms', 'remote.harness'], scope => {
     const t = ctx.locale.bind('harness'), form = scope.configForms.get<Settings>(SETTINGS_ENTRY);
     if (processLocalForm(form)) return;
     settingsForm = form;
-    const loadAvailableHarnesses = () => {
-      const harness = ctx.remote?.harness as Api | undefined;
-      return typeof harness?.availableHarnesses === 'function' ? value(harness.availableHarnesses({})) : Promise.resolve([...ALL_HARNESSES]);
-    };
+    const loadAvailableHarnesses = availableHarnessesOf(scope.remote?.harness);
     scope.effect(() => () => { if (settingsForm === form) settingsForm = undefined; }, 'harness: settings form');
     scope.effect(() => scope.configForms.whileServed([SETTINGS_ENTRY], () => scope.slots.inject('settings.section', () => scope.slots.register({
       name: 'settings.section', id: 'harness', order: 25, label: () => t('settingsNav'), locale: 'harness',
@@ -2286,8 +2285,7 @@ export async function apply(ctx: Context): Promise<void> {
   ctx.inject(['slots', 'configForms', 'remote.harness'], scope => {
     if (!processLocalForm(scope.configForms.get<Settings>(SETTINGS_ENTRY))) return;
     const t = ctx.locale.bind('harness'), form = remoteSettingsForm(scope.remote.harness);
-    const loadAvailableHarnesses = () => typeof scope.remote.harness.availableHarnesses === 'function'
-      ? value(scope.remote.harness.availableHarnesses({})) : Promise.resolve([...ALL_HARNESSES]);
+    const loadAvailableHarnesses = availableHarnessesOf(scope.remote.harness);
     const reload = () => { void form.load().catch(() => {}); };
     settingsForm = form;
     scope.effect(() => () => { if (settingsForm === form) settingsForm = undefined; }, 'harness: remote settings form');

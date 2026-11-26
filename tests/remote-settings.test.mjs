@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
+import { Context, Service } from '@deepseek-ai/cordis';
 
 // The built client entry against fake services: `configForms` in the page's persistence mode and the Harness RPC.
 async function load({ mode, view, update }) {
@@ -83,4 +84,52 @@ test('a host-mode page keeps the Host settings form and never calls the plugin R
   const { form, hooks } = page.section().options.inject();
   assert.equal(form, page.hostForm); assert.equal(hooks.harnessSettings, page.hostForm);
   assert.equal(page.reads.length, 0);
+});
+
+test('a host-mode settings section loads availableHarnesses under real Cordis inject guards', async () => {
+  const require = createRequire(resolve('node_modules/@deepseek-ai/dsh-client-ui-skill/package.json'));
+  let client;
+  runInNewContext(await readFile('dist/client.js', 'utf8'), {
+    window: { __ModuleLoader__: { load: ({ factory }) => { client = factory(require); } } },
+    document: { createElement: () => ({ setAttribute() {}, remove() {} }), head: { append() {} }, body: {}, querySelectorAll: () => [] },
+    MutationObserver: class { observe() {} disconnect() {} }, requestAnimationFrame: () => 1, cancelAnimationFrame() {}, setInterval: () => 1, clearInterval: () => {},
+  });
+  const ctx = new Context();
+  const registered = [];
+  const hostForm = {
+    getSnapshot: () => ({ status: 'ready', value: {}, base: undefined, user: {}, revision: 1, writable: true }),
+    subscribe: () => () => {}, set: async () => true, unset: async () => true, mutate: async () => true,
+  };
+  class Remote extends Service {
+    constructor(ctx) {
+      super(ctx, 'remote');
+      ctx.provide('remote.harness', {
+        availableHarnesses: async () => ({ ok: true, value: ['dsh', 'codex'] }),
+      });
+    }
+    async $mount() { return () => {}; }
+  }
+  class Slots extends Service {
+    constructor(ctx) { super(ctx, 'slots'); }
+    inject(_name, register) { return register(); }
+    register(options, component) { registered.push({ options, component }); return () => {}; }
+  }
+  class ConfigForms extends Service {
+    constructor(ctx) { super(ctx, 'configForms'); }
+    get() { return hostForm; }
+    whileServed(namespaces, register) { return register(new Set(namespaces)); }
+  }
+  ctx.provide('locale', { register: () => () => {}, bind: () => key => key });
+  try {
+    await ctx.plugin(Remote);
+    await ctx.plugin(Slots);
+    await ctx.plugin(ConfigForms);
+    await ctx.plugin({ inject: ['remote', 'slots', 'locale'], apply: scope => client.apply(scope) });
+    const section = registered.find(entry => entry.options.name === 'settings.section');
+    assert.ok(section, 'settings.section should be registered');
+    const { loadAvailableHarnesses } = section.options.inject();
+    assert.deepEqual(await loadAvailableHarnesses(), ['dsh', 'codex']);
+  } finally {
+    await ctx.fiber.dispose();
+  }
 });
